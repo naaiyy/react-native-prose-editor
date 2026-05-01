@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.6] - 2026-05-01
+
+### Fixed
+
+- Updated Android JNA to `5.18.1` so bundled native JNA libraries support 16 KB page-size Android devices required by Google Play.
+
 ## [0.5.5] - 2026-04-30
 
 ### Fixed
@@ -163,6 +169,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.6]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.5...0.5.6
 [0.5.5]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.4...0.5.5
 [0.5.4]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.3...0.5.4
 [0.5.3]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.2...0.5.3
