@@ -484,9 +484,10 @@ fn doc_to_scalar_intra_block(block_node: &Node, doc_offset: u32) -> u32 {
 }
 
 fn inline_void_visible_scalar_len(node: &Node) -> u32 {
+    let label = render::inline_atom_label(node.node_type(), node.attrs());
     render::inline_node_visible_scalar_len(
         node.node_type(),
-        node.attrs().get("label").and_then(|value| value.as_str()),
+        Some(label.as_str()),
         matches!(node.node_type(), "hardBreak" | "hard_break"),
     )
 }

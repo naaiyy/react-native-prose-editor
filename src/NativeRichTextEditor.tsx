@@ -39,7 +39,7 @@ import {
     type EditorToolbarItem,
     type EditorToolbarListType,
 } from './EditorToolbar';
-import { serializeEditorTheme, type EditorTheme } from './EditorTheme';
+import { serializeEditorTheme, type EditorMentionTheme, type EditorTheme } from './EditorTheme';
 import {
     buildMentionFragmentJson,
     serializeEditorAddons,
@@ -1566,6 +1566,26 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             []
         );
 
+        const resolveMentionInsertionAttrs = useCallback(
+            (selectionEvent: MentionSelectionAttrsEvent): Record<string, unknown> => {
+                const attrs = resolveMentionSelectionAttrs(selectionEvent);
+                let resolvedTheme: EditorMentionTheme | null | undefined;
+                try {
+                    resolvedTheme = addonsRef.current?.mentions?.resolveTheme?.({
+                        ...selectionEvent,
+                        attrs,
+                    });
+                } catch (error) {
+                    if (__DEV__) {
+                        console.error('NativeRichTextEditor: mentions.resolveTheme threw', error);
+                    }
+                }
+
+                return isRecord(resolvedTheme) ? { ...attrs, mentionTheme: resolvedTheme } : attrs;
+            },
+            [resolveMentionSelectionAttrs]
+        );
+
         const handleInlineMentionSuggestionPress = useCallback(
             (suggestion: MentionSuggestion) => {
                 const mentionQuery = mentionQueryEventRef.current;
@@ -1579,7 +1599,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     return;
                 }
 
-                const attrs = resolveMentionSelectionAttrs({
+                const attrs = resolveMentionInsertionAttrs({
                     trigger: mentionQuery.trigger,
                     suggestion,
                     attrs: resolveMentionSuggestionAttrs(suggestion, mentionQuery.trigger),
@@ -1604,7 +1624,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     });
                 }
             },
-            [resolveMentionSelectionAttrs, runAndApply]
+            [resolveMentionInsertionAttrs, runAndApply]
         );
 
         const handleAddonEvent = useCallback(
@@ -1644,7 +1664,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                         attrs: parsed.attrs,
                         range: parsed.range,
                     };
-                    const finalAttrs = resolveMentionSelectionAttrs(selectionEvent);
+                    const finalAttrs = resolveMentionInsertionAttrs(selectionEvent);
 
                     const update = runAndApply(
                         () =>
@@ -1675,7 +1695,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     });
                 }
             },
-            [resolveMentionSelectionAttrs, runAndApply]
+            [resolveMentionInsertionAttrs, runAndApply]
         );
 
         useImperativeHandle(

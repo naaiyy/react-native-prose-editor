@@ -295,6 +295,16 @@ class NativeEditorModule : Module() {
                 editorDestroy(editorId)
             }
         }
+        Function("measureContentHeight") { renderJson: String, themeJson: String?, width: Double ->
+            val density = appContext.reactContext?.resources?.displayMetrics?.density ?: 1f
+            val height = RenderBridge.measureHeight(
+                json = renderJson,
+                themeJson = themeJson,
+                width = width.toFloat(),
+                density = density
+            )
+            height.toDouble()
+        }
         Function("renderDocumentHtml") { configJson: String, html: String ->
             val editorId = editorCreate(configJson)
             try {

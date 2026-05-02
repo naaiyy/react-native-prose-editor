@@ -36,6 +36,8 @@ export interface MentionSelectionAttrsEvent {
     };
 }
 
+export type MentionThemeResolveEvent = MentionSelectionAttrsEvent;
+
 export interface MentionsAddonConfig {
     trigger?: string;
     suggestions?: readonly MentionSuggestion[];
@@ -43,6 +45,7 @@ export interface MentionsAddonConfig {
     resolveSelectionAttrs?: (
         event: MentionSelectionAttrsEvent
     ) => Record<string, unknown> | null | undefined;
+    resolveTheme?: (event: MentionThemeResolveEvent) => EditorMentionTheme | null | undefined;
     onQueryChange?: (event: MentionQueryChangeEvent) => void;
     onSelect?: (event: MentionSelectEvent) => void;
 }
@@ -63,6 +66,7 @@ export interface SerializedMentionsAddonConfig {
     trigger: string;
     theme?: EditorMentionTheme;
     resolveSelectionAttrs?: boolean;
+    resolveTheme?: boolean;
     suggestions: SerializedMentionSuggestion[];
 }
 
@@ -156,6 +160,7 @@ export function normalizeEditorAddons(addons?: EditorAddons): SerializedEditorAd
             ...(typeof addons.mentions.resolveSelectionAttrs === 'function'
                 ? { resolveSelectionAttrs: true }
                 : {}),
+            ...(typeof addons.mentions.resolveTheme === 'function' ? { resolveTheme: true } : {}),
             suggestions,
         },
     };

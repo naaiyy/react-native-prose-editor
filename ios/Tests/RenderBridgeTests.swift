@@ -242,6 +242,44 @@ final class RenderBridgeTests: XCTestCase {
         )
     }
 
+    func testRender_linkMarkUsesThemeOverrides() {
+        let json = """
+        [
+            {"type": "blockStart", "nodeType": "paragraph", "depth": 0},
+            {"type": "textRun", "text": "OpenAI", "marks": [{"type": "link", "href": "https://openai.com"}]},
+            {"type": "blockEnd"}
+        ]
+        """
+        let result = RenderBridge.renderElements(
+            fromJSON: json,
+            baseFont: baseFont,
+            textColor: textColor,
+            theme: EditorTheme(dictionary: [
+                "links": [
+                    "color": "#445566",
+                    "backgroundColor": "#eef6ff",
+                    "fontSize": 18,
+                    "fontWeight": "700",
+                    "fontStyle": "italic",
+                    "underline": false,
+                ],
+            ])
+        )
+
+        let attrs = result.attributes(at: 0, effectiveRange: nil)
+        let font = attrs[.font] as? UIFont
+        XCTAssertEqual(attrs[.foregroundColor] as? UIColor, EditorTheme.color(from: "#445566"))
+        XCTAssertEqual(attrs[.backgroundColor] as? UIColor, EditorTheme.color(from: "#eef6ff"))
+        XCTAssertNil(attrs[.underlineStyle])
+        XCTAssertEqual(font?.pointSize, 18)
+        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.traitBold) == true)
+        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.traitItalic) == true)
+        XCTAssertEqual(
+            attrs[RenderBridgeAttributes.linkHref] as? String,
+            "https://openai.com"
+        )
+    }
+
     func testRenderBlocks_withLeadingSeparatorDoesNotDuplicateTopLevelChildIndexOnContent() {
         let blocks: [[[String: Any]]] = [[
             ["type": "blockStart", "nodeType": "paragraph", "depth": 0],
@@ -2022,6 +2060,107 @@ final class RenderBridgeTests: XCTestCase {
             characterIndex: 0
         )
         XCTAssertNotNil(image, "HorizontalRuleAttachment should produce a non-nil image")
+    }
+
+    // MARK: - Height Measurement
+
+    func testMeasureHeightForSingleParagraph() {
+        let renderJSON = """
+        [
+            {"type":"blockStart","nodeType":"paragraph","depth":0},
+            {"type":"textRun","text":"Hello world"},
+            {"type":"blockEnd"}
+        ]
+        """
+        let height = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: nil,
+            width: 375
+        )
+        XCTAssertGreaterThan(height, 0, "Single paragraph should have positive height")
+    }
+
+    func testMeasureHeightForEmptyContent() {
+        let renderJSON = "[]"
+        let height = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: nil,
+            width: 375
+        )
+        XCTAssertEqual(height, 0, "Empty content should have zero height")
+    }
+
+    func testMeasureHeightRespectsWidth() {
+        let longText = String(repeating: "word ", count: 100)
+        let renderJSON = """
+        [
+            {"type":"blockStart","nodeType":"paragraph","depth":0},
+            {"type":"textRun","text":"\(longText)"},
+            {"type":"blockEnd"}
+        ]
+        """
+        let narrowHeight = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: nil,
+            width: 100
+        )
+        let wideHeight = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: nil,
+            width: 1000
+        )
+        XCTAssertGreaterThan(narrowHeight, wideHeight, "Narrower width should produce taller height")
+    }
+
+    func testMeasureHeightRespectsThemeFontSize() {
+        let renderJSON = """
+        [
+            {"type":"blockStart","nodeType":"paragraph","depth":0},
+            {"type":"textRun","text":"Hello world"},
+            {"type":"blockEnd"}
+        ]
+        """
+        let smallTheme = """
+        {"text":{"fontSize":12}}
+        """
+        let largeTheme = """
+        {"text":{"fontSize":32}}
+        """
+        let smallHeight = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: smallTheme,
+            width: 375
+        )
+        let largeHeight = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: largeTheme,
+            width: 375
+        )
+        XCTAssertGreaterThan(largeHeight, smallHeight, "Larger font should produce taller height")
+    }
+
+    func testMeasureHeightRespectsContentInsets() {
+        let renderJSON = """
+        [
+            {"type":"blockStart","nodeType":"paragraph","depth":0},
+            {"type":"textRun","text":"Hello world"},
+            {"type":"blockEnd"}
+        ]
+        """
+        let noInsetHeight = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: nil,
+            width: 375
+        )
+        let insetTheme = """
+        {"contentInsets":{"top":20,"bottom":20}}
+        """
+        let insetHeight = RenderBridge.measureHeight(
+            forRenderJSON: renderJSON,
+            themeJSON: insetTheme,
+            width: 375
+        )
+        XCTAssertEqual(insetHeight, noInsetHeight + 40, accuracy: 1.0, "Content insets should add to height")
     }
 
     func testRender_imageAttachmentHonorsPreferredDimensions() {

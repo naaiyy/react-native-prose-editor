@@ -1,6 +1,7 @@
 use crate::model::{Document, Node};
 use crate::render::{
-    empty_text_block_placeholder_string, inline_atom_label, ListContext, RenderElement, RenderMark,
+    empty_text_block_placeholder_string, inline_atom_label, inline_atom_mention_theme, ListContext,
+    RenderElement, RenderMark,
 };
 use crate::schema::{NodeRole, Schema};
 
@@ -160,6 +161,7 @@ fn walk_children(
                     node_type: child.node_type().to_string(),
                     label: inline_atom_label(child.node_type(), child.attrs()),
                     doc_pos: *pos,
+                    mention_theme: inline_atom_mention_theme(child.node_type(), child.attrs()),
                 });
                 *pos += child.node_size();
             }
@@ -186,6 +188,10 @@ fn walk_children(
                             node_type: child.node_type().to_string(),
                             label: inline_atom_label(child.node_type(), child.attrs()),
                             doc_pos: *pos,
+                            mention_theme: inline_atom_mention_theme(
+                                child.node_type(),
+                                child.attrs(),
+                            ),
                         });
                     } else {
                         elements.push(RenderElement::OpaqueBlockAtom {

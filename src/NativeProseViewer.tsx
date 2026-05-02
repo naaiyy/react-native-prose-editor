@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { requireNativeModule, requireNativeViewManager } from 'expo-modules-core';
 import {
     type NativeSyntheticEvent,
@@ -16,6 +16,12 @@ import {
 } from './EditorTheme';
 import type { DocumentJSON, RenderElement } from './NativeEditorBridge';
 import {
+    getHeightCache,
+    setHeightCache,
+    computeRenderJsonHash,
+    computeLayoutContextKey,
+} from './heightCache';
+import {
     normalizeDocumentJson,
     tiptapSchema,
     type SchemaDefinition,
@@ -24,6 +30,7 @@ import {
 interface NativeProseViewerModule {
     renderDocumentJson(configJson: string, json: string): string;
     renderDocumentHtml(configJson: string, html: string): string;
+    measureContentHeight(renderJson: string, themeJson: string | undefined, width: number): number;
 }
 
 interface NativeProseViewerViewProps {
@@ -73,6 +80,23 @@ export interface NativeProseViewerLinkPressEvent {
 }
 
 type NativeProseViewerContent = DocumentJSON | string;
+export type NativeProseViewerMentionPrefix =
+    | string
+    | ((mention: NativeProseViewerMentionRenderContext) => string | null | undefined);
+
+export interface NativeProseViewerMentionsAddonConfig {
+    trigger?: string;
+    prefix?: NativeProseViewerMentionPrefix;
+    theme?: EditorMentionTheme;
+    resolveTheme?: (
+        mention: NativeProseViewerMentionRenderContext
+    ) => EditorMentionTheme | null | undefined;
+    onPress?: (event: NativeProseViewerMentionPressEvent) => void;
+}
+
+export interface NativeProseViewerAddons {
+    mentions?: NativeProseViewerMentionsAddonConfig;
+}
 
 interface NativeProseViewerBaseProps {
     contentRevision?: string | number;
@@ -83,14 +107,10 @@ interface NativeProseViewerBaseProps {
     allowBase64Images?: boolean;
     collapseTrailingEmptyParagraphs?: boolean;
     enableLinkTaps?: boolean;
-    mentionPrefix?:
-        | string
-        | ((mention: NativeProseViewerMentionRenderContext) => string | null | undefined);
-    resolveMentionTheme?: (
-        mention: NativeProseViewerMentionRenderContext
-    ) => EditorMentionTheme | null | undefined;
+    addons?: NativeProseViewerAddons;
     onPressLink?: (event: NativeProseViewerLinkPressEvent) => void;
-    onPressMention?: (event: NativeProseViewerMentionPressEvent) => void;
+    contentId?: string;
+    containerWidth?: number;
 }
 
 interface NativeProseViewerJsonProps extends NativeProseViewerBaseProps {
@@ -173,13 +193,18 @@ function baseMentionLabelFromAttrs(attrs: Record<string, unknown>): string {
     return typeof label === 'string' && label.length > 0 ? label : 'mention';
 }
 
-function resolveMentionPrefix(
-    mentionPrefix: NativeProseViewerProps['mentionPrefix'],
+function resolveConfiguredMentionPrefix(
+    prefix: NativeProseViewerMentionPrefix | undefined,
     mention: NativeProseViewerMentionRenderContext
 ): string | undefined {
     const rawPrefix =
-        typeof mentionPrefix === 'function' ? mentionPrefix(mention) : mentionPrefix;
+        typeof prefix === 'function' ? prefix(mention) : prefix;
     return typeof rawPrefix === 'string' && rawPrefix.length > 0 ? rawPrefix : undefined;
+}
+
+function mentionTriggerFromAttrs(attrs: Record<string, unknown>): string | undefined {
+    const trigger = attrs.mentionSuggestionChar;
+    return typeof trigger === 'string' && trigger.length > 0 ? trigger : undefined;
 }
 
 function applyMentionPrefix(label: string, prefix: string | undefined): string {
@@ -189,6 +214,24 @@ function applyMentionPrefix(label: string, prefix: string | undefined): string {
     return `${prefix}${label}`;
 }
 
+function resolveMentionRenderedLabel(
+    mentionContext: NativeProseViewerMentionRenderContext,
+    prefix: NativeProseViewerMentionPrefix | undefined,
+    trigger: string | undefined
+): string {
+    if (prefix !== undefined) {
+        return applyMentionPrefix(
+            mentionContext.label,
+            resolveConfiguredMentionPrefix(prefix, mentionContext)
+        );
+    }
+
+    return applyMentionPrefix(
+        mentionContext.label,
+        trigger ?? mentionTriggerFromAttrs(mentionContext.attrs)
+    );
+}
+
 interface ResolvedMentionPayload extends NativeProseViewerMentionRenderContext {
     renderedLabel: string;
     mentionTheme?: EditorMentionTheme;
@@ -196,10 +239,13 @@ interface ResolvedMentionPayload extends NativeProseViewerMentionRenderContext {
 
 function collectMentionPayloadsByDocPos(
     document: DocumentJSON,
-    mentionPrefix: NativeProseViewerProps['mentionPrefix'],
-    resolveMentionTheme: NativeProseViewerProps['resolveMentionTheme']
+    mentionsAddon: NativeProseViewerMentionsAddonConfig | undefined
 ): Map<number, ResolvedMentionPayload> {
     const mentions = new Map<number, ResolvedMentionPayload>();
+    const effectiveMentionPrefix = mentionsAddon?.prefix;
+    const effectiveResolveMentionTheme = mentionsAddon?.resolveTheme;
+    const defaultMentionTheme = mentionsAddon?.theme;
+    const trigger = mentionsAddon?.trigger?.trim() || undefined;
 
     const visit = (node: unknown, pos: number, isRoot = false): number => {
         if (node == null || typeof node !== 'object') {
@@ -219,11 +265,20 @@ function collectMentionPayloadsByDocPos(
             const attrs = normalizeMentionAttrs(nodeRecord);
             const label = baseMentionLabelFromAttrs(attrs);
             const mentionContext = { docPos: pos, label, attrs };
-            const renderedLabel = applyMentionPrefix(
-                label,
-                resolveMentionPrefix(mentionPrefix, mentionContext)
+            const renderedLabel = resolveMentionRenderedLabel(
+                mentionContext,
+                effectiveMentionPrefix,
+                trigger
             );
-            const mentionTheme = resolveMentionTheme?.(mentionContext) ?? undefined;
+            const resolvedMentionTheme =
+                effectiveResolveMentionTheme?.(mentionContext) ?? undefined;
+            const mentionTheme =
+                defaultMentionTheme || resolvedMentionTheme
+                    ? {
+                          ...(defaultMentionTheme ?? {}),
+                          ...(resolvedMentionTheme ?? {}),
+                      }
+                    : undefined;
             mentions.set(pos, {
                 ...mentionContext,
                 renderedLabel,
@@ -532,11 +587,12 @@ export function NativeProseViewer({
         allowBase64Images = false,
         collapseTrailingEmptyParagraphs = true,
         enableLinkTaps = true,
-        mentionPrefix,
-        resolveMentionTheme,
+        addons,
         onPressLink,
-        onPressMention,
+        contentId,
+        containerWidth,
     } = props;
+    const mentionPressHandler = addons?.mentions?.onPress;
     const contentJSON = 'contentJSON' in props ? props.contentJSON : undefined;
     const contentHTML = 'contentHTML' in props ? props.contentHTML : undefined;
     const resolvedContentRevision = contentRevision ?? contentJSONRevision;
@@ -560,10 +616,9 @@ export function NativeProseViewer({
                 ? new Map<number, ResolvedMentionPayload>()
                 : collectMentionPayloadsByDocPos(
                       normalizedDocument,
-                      mentionPrefix,
-                      resolveMentionTheme
+                      addons?.mentions
                   ),
-        [mentionPrefix, normalizedDocument, resolveMentionTheme]
+        [addons?.mentions, normalizedDocument]
     );
     const renderJson = useMemo(() => {
         const configJson = JSON.stringify({
@@ -614,6 +669,39 @@ export function NativeProseViewer({
     );
     const [contentHeight, setContentHeight] = useState<number | null>(null);
 
+    useEffect(() => {
+        setContentHeight(null);
+    }, [contentId]);
+
+    const renderJsonHash = useMemo(
+        () => computeRenderJsonHash(renderJson),
+        [renderJson]
+    );
+
+    const layoutContextKey = useMemo(
+        () => containerWidth != null ? computeLayoutContextKey(themeJson, containerWidth) : null,
+        [themeJson, containerWidth]
+    );
+
+    const preMeasuredHeight = useMemo(() => {
+        if (!contentId || layoutContextKey == null || containerWidth == null) {
+            return null;
+        }
+
+        const cached = getHeightCache(contentId, layoutContextKey, renderJsonHash);
+        if (cached != null) return cached;
+
+        const measured = getNativeProseViewerModule().measureContentHeight(
+            renderJson,
+            themeJson,
+            containerWidth
+        );
+        if (measured > 0) {
+            setHeightCache(contentId, layoutContextKey, renderJsonHash, measured);
+        }
+        return measured > 0 ? measured : null;
+    }, [contentId, containerWidth, renderJson, themeJson, layoutContextKey, renderJsonHash]);
+
     const handleContentHeightChange = useCallback(
         (
             event: NativeSyntheticEvent<NativeProseViewerContentHeightEvent>
@@ -631,25 +719,28 @@ export function NativeProseViewer({
             setContentHeight((currentHeight) =>
                 currentHeight === nextHeight ? currentHeight : nextHeight
             );
+            if (contentId && layoutContextKey != null) {
+                setHeightCache(contentId, layoutContextKey, renderJsonHash, nextHeight);
+            }
         },
-        [renderJsonIsCollapsedEmpty]
+        [renderJsonIsCollapsedEmpty, contentId, layoutContextKey, renderJsonHash]
     );
 
     const handlePressMention = useCallback(
         (
             event: NativeSyntheticEvent<NativeProseViewerMentionPressNativeEvent>
         ) => {
-            if (!onPressMention) return;
+            if (!mentionPressHandler) return;
 
             const { docPos, label } = event.nativeEvent;
             const resolvedMention = mentionPayloadsByDocPos.get(docPos);
-            onPressMention({
+            mentionPressHandler({
                 docPos,
                 label: resolvedMention?.renderedLabel ?? label,
                 attrs: resolvedMention?.attrs ?? {},
             });
         },
-        [mentionPayloadsByDocPos, onPressMention]
+        [mentionPayloadsByDocPos, mentionPressHandler]
     );
     const handlePressLink = useCallback(
         (event: NativeSyntheticEvent<NativeProseViewerLinkPressNativeEvent>) => {
@@ -669,13 +760,15 @@ export function NativeProseViewer({
             measuredStyle = { height: 0, minHeight: 0 };
         } else if (contentHeight != null && contentHeight > 0) {
             measuredStyle = { minHeight: contentHeight };
+        } else if (preMeasuredHeight != null && preMeasuredHeight > 0) {
+            measuredStyle = { minHeight: preMeasuredHeight };
         }
         return [
             { minHeight: renderJsonIsCollapsedEmpty ? 0 : 1 },
             style,
             measuredStyle,
         ];
-    }, [contentHeight, renderJsonIsCollapsedEmpty, style]);
+    }, [contentHeight, preMeasuredHeight, renderJsonIsCollapsedEmpty, style]);
 
     return (
         <NativeProseViewerView
@@ -688,7 +781,9 @@ export function NativeProseViewer({
             onContentHeightChange={handleContentHeightChange}
             onPressLink={typeof onPressLink === 'function' ? handlePressLink : undefined}
             onPressMention={
-                typeof onPressMention === 'function' ? handlePressMention : undefined
+                typeof mentionPressHandler === 'function'
+                    ? handlePressMention
+                    : undefined
             }
         />
     );

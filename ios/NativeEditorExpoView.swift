@@ -2218,7 +2218,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         }
 
         let attrs = resolvedMentionAttrs(trigger: mentions.trigger, suggestion: suggestion)
-        if mentions.resolveSelectionAttrs {
+        if mentions.resolveSelectionAttrs || mentions.resolveTheme {
             emitMentionSelectRequest(
                 trigger: mentions.trigger,
                 suggestion: suggestion,

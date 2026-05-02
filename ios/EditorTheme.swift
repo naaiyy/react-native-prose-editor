@@ -124,6 +124,35 @@ struct EditorBlockquoteTheme {
     }
 }
 
+struct EditorLinkTheme {
+    var fontFamily: String?
+    var fontSize: CGFloat?
+    var fontWeight: String?
+    var fontStyle: String?
+    var color: UIColor?
+    var backgroundColor: UIColor?
+    var underline: Bool?
+
+    init(dictionary: [String: Any]) {
+        fontFamily = dictionary["fontFamily"] as? String
+        fontSize = EditorTheme.cgFloat(dictionary["fontSize"])
+        fontWeight = dictionary["fontWeight"] as? String
+        fontStyle = dictionary["fontStyle"] as? String
+        color = EditorTheme.color(from: dictionary["color"])
+        backgroundColor = EditorTheme.color(from: dictionary["backgroundColor"])
+        underline = dictionary["underline"] as? Bool
+    }
+
+    func resolvedFont(fallback: UIFont) -> UIFont {
+        EditorTextStyle(
+            fontFamily: fontFamily,
+            fontSize: fontSize,
+            fontWeight: fontWeight,
+            fontStyle: fontStyle
+        ).resolvedFont(fallback: fallback)
+    }
+}
+
 struct EditorMentionTheme {
     var textColor: UIColor?
     var backgroundColor: UIColor?
@@ -268,6 +297,7 @@ struct EditorTheme {
     var list: EditorListTheme?
     var horizontalRule: EditorHorizontalRuleTheme?
     var mentions: EditorMentionTheme?
+    var links: EditorLinkTheme?
     var toolbar: EditorToolbarTheme?
     var backgroundColor: UIColor?
     var borderRadius: CGFloat?
@@ -308,6 +338,9 @@ struct EditorTheme {
         }
         if let mentions = dictionary["mentions"] as? [String: Any] {
             self.mentions = EditorMentionTheme(dictionary: mentions)
+        }
+        if let links = dictionary["links"] as? [String: Any] {
+            self.links = EditorLinkTheme(dictionary: links)
         }
         if let toolbar = dictionary["toolbar"] as? [String: Any] {
             self.toolbar = EditorToolbarTheme(dictionary: toolbar)

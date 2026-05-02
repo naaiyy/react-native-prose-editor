@@ -573,7 +573,7 @@ class NativeEditorExpoView(
         val mentions = addons.mentions ?: return
         val queryState = mentionQueryState ?: return
         val attrs = resolvedMentionAttrs(mentions.trigger, suggestion)
-        if (mentions.resolveSelectionAttrs) {
+        if (mentions.resolveSelectionAttrs || mentions.resolveTheme) {
             emitMentionSelectRequest(mentions.trigger, suggestion, attrs, queryState)
             lastMentionEventJson = null
             clearMentionQueryState()

@@ -1921,6 +1921,107 @@ fn test_insert_content_json_at_selection_scalar_inserts_mention_and_preserves_at
 }
 
 #[test]
+fn test_insert_content_json_at_selection_scalar_renders_mention_trigger_for_bare_label() {
+    let mut editor = mention_editor();
+    editor.set_html("<p>Hello @al</p>").expect("set_html");
+
+    let mention_doc = serde_json::json!({
+        "type": "doc",
+        "content": [
+            {
+                "type": "mention",
+                "attrs": {
+                    "id": "u1",
+                    "kind": "user",
+                    "label": "Alice",
+                    "mentionSuggestionChar": "@"
+                }
+            }
+        ]
+    });
+
+    let update = editor
+        .insert_content_json_at_selection_scalar(6, 9, &mention_doc)
+        .expect("replace @mention query with mention node");
+
+    let json = editor.get_json();
+    assert_eq!(json["content"][0]["content"][1]["attrs"]["label"], "Alice");
+    assert_eq!(
+        json["content"][0]["content"][1]["attrs"]["mentionSuggestionChar"],
+        "@"
+    );
+    assert!(
+        update.render_elements.iter().any(|element| matches!(
+            element,
+            editor_core::render::RenderElement::OpaqueInlineAtom {
+                node_type,
+                label,
+                ..
+            } if node_type == "mention" && label == "@Alice"
+        )),
+        "mention render element should include the visible trigger-prefixed label: {:?}",
+        update.render_elements
+    );
+
+    let html = editor.get_html();
+    assert!(
+        html.contains(">@Alice</span>"),
+        "mention HTML should render the trigger-prefixed visible label, got: {html}"
+    );
+}
+
+#[test]
+fn test_insert_content_json_at_selection_scalar_renders_mention_theme_attr() {
+    let mut editor = mention_editor();
+    editor.set_html("<p>Hello @al</p>").expect("set_html");
+
+    let mention_doc = serde_json::json!({
+        "type": "doc",
+        "content": [
+            {
+                "type": "mention",
+                "attrs": {
+                    "id": "u1",
+                    "kind": "user",
+                    "label": "@Alice",
+                    "mentionTheme": {
+                        "textColor": "#445566",
+                        "backgroundColor": "#eef6ff"
+                    }
+                }
+            }
+        ]
+    });
+
+    let update = editor
+        .insert_content_json_at_selection_scalar(6, 9, &mention_doc)
+        .expect("replace @mention query with mention node");
+
+    let rendered_theme = update
+        .render_elements
+        .iter()
+        .find_map(|element| match element {
+            editor_core::render::RenderElement::OpaqueInlineAtom {
+                node_type,
+                mention_theme: Some(mention_theme),
+                ..
+            } if node_type == "mention" => Some(mention_theme),
+            _ => None,
+        });
+
+    let rendered_theme =
+        rendered_theme.expect("mention render element should include its mentionTheme attr");
+    assert_eq!(
+        rendered_theme.get("textColor"),
+        Some(&serde_json::json!("#445566"))
+    );
+    assert_eq!(
+        rendered_theme.get("backgroundColor"),
+        Some(&serde_json::json!("#eef6ff"))
+    );
+}
+
+#[test]
 fn test_insert_content_json_block_image_resolves_to_block_level() {
     let mut editor = default_editor();
     editor.set_html("<p>Hello</p>").expect("set_html");
@@ -2000,8 +2101,7 @@ fn test_insert_content_html_block_image_resolves_to_block_level() {
 fn test_insert_content_html_mixed_block_fragment_replaces_empty_paragraph() {
     let mut editor = default_editor();
 
-    let html_fragment =
-        "<p>Intro</p><ul><li><p>One</p></li><li><p>Two</p></li></ul><p>Outro</p>";
+    let html_fragment = "<p>Intro</p><ul><li><p>One</p></li><li><p>Two</p></li></ul><p>Outro</p>";
 
     let update = editor
         .insert_content_html(html_fragment)
@@ -2073,8 +2173,7 @@ fn test_insert_content_json_mixed_block_fragment_replaces_empty_paragraph() {
 
     let html = editor.get_html();
     assert_eq!(
-        html,
-        "<p>Intro</p><ul><li><p>One</p></li><li><p>Two</p></li></ul><p>Outro</p>",
+        html, "<p>Intro</p><ul><li><p>One</p></li><li><p>Two</p></li></ul><p>Outro</p>",
         "mixed block JSON should replace the synthetic empty paragraph, got: {html}"
     );
     assert_eq!(

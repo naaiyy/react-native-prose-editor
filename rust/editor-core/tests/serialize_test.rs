@@ -421,6 +421,32 @@ fn test_to_html_mention_serializes_native_editor_roundtrip_span() {
 }
 
 #[test]
+fn test_to_html_mention_applies_suggestion_trigger_to_bare_label() {
+    let d = doc(vec![paragraph(vec![
+        text("Hello "),
+        mention(&[
+            ("id", serde_json::Value::String("u1".to_string())),
+            (
+                "mentionSuggestionChar",
+                serde_json::Value::String("@".to_string()),
+            ),
+            ("label", serde_json::Value::String("Alice".to_string())),
+        ]),
+        text("!"),
+    ])]);
+
+    let html = to_html(&d, &mention_schema());
+    assert!(
+        html.contains(">@Alice</span>"),
+        "mention HTML should render the trigger-prefixed visible label, got: {html}"
+    );
+    assert!(
+        html.contains("&quot;label&quot;:&quot;Alice&quot;"),
+        "mention attrs should preserve the original bare label, got: {html}"
+    );
+}
+
+#[test]
 fn test_to_html_empty_paragraph() {
     let d = doc(vec![paragraph(vec![])]);
     let html = to_html(&d, &schema());

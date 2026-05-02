@@ -268,6 +268,14 @@ public class NativeEditorModule: Module {
             }
             return editorSetJson(id: editorId, json: json)
         }
+        Function("measureContentHeight") { (renderJson: String, themeJson: String?, width: Double) -> Double in
+            let height = RenderBridge.measureHeight(
+                forRenderJSON: renderJson,
+                themeJSON: themeJson,
+                width: CGFloat(width)
+            )
+            return Double(height)
+        }
         Function("renderDocumentHtml") { (configJson: String, html: String) -> String in
             let editorId = editorCreate(configJson: configJson)
             defer {

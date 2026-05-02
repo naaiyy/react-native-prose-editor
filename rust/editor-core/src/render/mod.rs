@@ -45,6 +45,7 @@ pub enum RenderElement {
         node_type: String,
         label: String,
         doc_pos: u32,
+        mention_theme: Option<std::collections::HashMap<String, serde_json::Value>>,
     },
     /// An opaque block atom (unrecognised block void).
     OpaqueBlockAtom {
@@ -84,16 +85,60 @@ pub fn opaque_atom_visible_string(node_type: &str, label: &str) -> String {
     }
 }
 
+pub fn mention_label_with_trigger(
+    label: &str,
+    attrs: &std::collections::HashMap<String, serde_json::Value>,
+) -> String {
+    let Some(trigger) = attrs
+        .get("mentionSuggestionChar")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    else {
+        return label.to_string();
+    };
+
+    if label.starts_with(trigger) {
+        label.to_string()
+    } else {
+        format!("{trigger}{label}")
+    }
+}
+
 pub fn inline_atom_label(
     node_type: &str,
     attrs: &std::collections::HashMap<String, serde_json::Value>,
 ) -> String {
-    attrs
+    let label = attrs
         .get("label")
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| node_type.to_string())
+        .unwrap_or_else(|| node_type.to_string());
+
+    if node_type == "mention" {
+        mention_label_with_trigger(&label, attrs)
+    } else {
+        label
+    }
+}
+
+pub fn inline_atom_mention_theme(
+    node_type: &str,
+    attrs: &std::collections::HashMap<String, serde_json::Value>,
+) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    if node_type != "mention" {
+        return None;
+    }
+
+    attrs
+        .get("mentionTheme")
+        .and_then(|value| value.as_object())
+        .map(|theme| {
+            theme
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
 }
 
 /// Invisible placeholder rendered for empty text blocks so native text views

@@ -41,6 +41,16 @@ export interface EditorTextStyle {
     spacingAfter?: number;
 }
 
+export interface EditorLinkTheme {
+    fontFamily?: string;
+    fontSize?: number;
+    fontWeight?: EditorFontWeight;
+    fontStyle?: EditorFontStyle;
+    color?: string;
+    backgroundColor?: string;
+    underline?: boolean;
+}
+
 export interface EditorHeadingTheme {
     h1?: EditorTextStyle;
     h2?: EditorTextStyle;
@@ -107,6 +117,7 @@ export interface EditorTheme {
     list?: EditorListTheme;
     horizontalRule?: EditorHorizontalRuleTheme;
     mentions?: EditorMentionTheme;
+    links?: EditorLinkTheme;
     toolbar?: EditorToolbarTheme;
     backgroundColor?: string;
     borderRadius?: number;

@@ -20,4 +20,27 @@ describe('EditorTheme', () => {
             },
         });
     });
+
+    it('serializes hyperlink theme overrides', () => {
+        const json = serializeEditorTheme({
+            links: {
+                color: '#445566',
+                backgroundColor: '#eef6ff',
+                fontWeight: '700',
+                fontStyle: 'italic',
+                underline: false,
+            },
+        });
+
+        expect(json).toBeTruthy();
+        expect(JSON.parse(json!)).toEqual({
+            links: {
+                color: '#445566',
+                backgroundColor: '#eef6ff',
+                fontWeight: '700',
+                fontStyle: 'italic',
+                underline: false,
+            },
+        });
+    });
 });

@@ -243,7 +243,8 @@ final class RenderBridge {
                 let baseAttrs = attributesForMarks(
                     marks,
                     baseFont: blockFont,
-                    textColor: blockColor
+                    textColor: blockColor,
+                    theme: theme
                 )
                 let attrs = applyBlockStyle(
                     to: baseAttrs,
@@ -541,6 +542,63 @@ final class RenderBridge {
         return result
     }
 
+    // MARK: - Height Pre-Measurement
+
+    static func measureHeight(
+        forRenderJSON renderJSON: String,
+        themeJSON: String?,
+        width: CGFloat
+    ) -> CGFloat {
+        guard width > 0 else { return 0 }
+
+        let theme = EditorTheme.from(json: themeJSON)
+        let baseFontSize = theme?.text?.fontSize ?? theme?.paragraph?.fontSize ?? 16
+        let baseFont = UIFont.systemFont(ofSize: baseFontSize)
+        let textColor = theme?.text?.color ?? UIColor.label
+
+        let attributedString = renderElements(
+            fromJSON: renderJSON,
+            baseFont: baseFont,
+            textColor: textColor,
+            theme: theme
+        )
+
+        guard attributedString.length > 0 else { return 0 }
+
+        let contentInsets = theme?.contentInsets
+        let topInset = contentInsets?.top ?? 0
+        let bottomInset = contentInsets?.bottom ?? 0
+        let leftInset = contentInsets?.left ?? 0
+        let rightInset = contentInsets?.right ?? 0
+
+        // When contentInsets are set, lineFragmentPadding is 0 (matches
+        // RichTextEditorView.theme didSet). Otherwise use the UITextView
+        // default of 5.
+        let lineFragmentPadding: CGFloat = contentInsets != nil ? 0 : 5
+
+        let textStorage = NSTextStorage(attributedString: attributedString)
+        let layoutManager = NSLayoutManager()
+        let containerWidth = width - leftInset - rightInset - lineFragmentPadding * 2
+        let textContainer = NSTextContainer(
+            size: CGSize(width: max(containerWidth, 0), height: .greatestFiniteMagnitude)
+        )
+        textContainer.lineFragmentPadding = 0
+
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+
+        layoutManager.ensureLayout(for: textContainer)
+
+        var usedRect = layoutManager.usedRect(for: textContainer)
+        let extraLineFragmentRect = layoutManager.extraLineFragmentRect
+        if !extraLineFragmentRect.isEmpty {
+            usedRect = usedRect.union(extraLineFragmentRect)
+        }
+
+        let height = ceil(usedRect.height + topInset + bottomInset)
+        return height
+    }
+
     // MARK: - Mark Handling
 
     /// Build NSAttributedString attributes for a set of render marks.
@@ -556,7 +614,8 @@ final class RenderBridge {
     static func attributesForMarks(
         _ marks: [Any],
         baseFont: UIFont,
-        textColor: UIColor
+        textColor: UIColor,
+        theme: EditorTheme? = nil
     ) -> [NSAttributedString.Key: Any] {
         var attrs = defaultAttributes(baseFont: baseFont, textColor: textColor)
 
@@ -566,6 +625,8 @@ final class RenderBridge {
 
         var traits: UIFontDescriptor.SymbolicTraits = []
         var useMonospace = false
+        var linkTheme: EditorLinkTheme?
+        var shouldUnderline = false
         for mark in marks {
             let markObject = mark as? [String: Any]
             let markType: String
@@ -583,14 +644,20 @@ final class RenderBridge {
             case "italic", "em":
                 traits.insert(.traitItalic)
             case "underline":
-                attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                shouldUnderline = true
             case "strike", "strikethrough":
                 attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
             case "code":
                 useMonospace = true
             case "link":
-                attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                attrs[.foregroundColor] = UIColor.systemBlue
+                linkTheme = theme?.links
+                if theme?.links?.underline ?? true {
+                    shouldUnderline = true
+                }
+                attrs[.foregroundColor] = theme?.links?.color ?? UIColor.systemBlue
+                if let backgroundColor = theme?.links?.backgroundColor {
+                    attrs[.backgroundColor] = backgroundColor
+                }
                 if let href = markObject?["href"] as? String, !href.isEmpty {
                     attrs[RenderBridgeAttributes.linkHref] = href
                 }
@@ -599,11 +666,11 @@ final class RenderBridge {
             }
         }
 
-        var resolvedFont = baseFont
+        var resolvedFont = linkTheme?.resolvedFont(fallback: baseFont) ?? baseFont
 
         if useMonospace {
             resolvedFont = UIFont.monospacedSystemFont(
-                ofSize: baseFont.pointSize,
+                ofSize: resolvedFont.pointSize,
                 weight: traits.contains(.traitBold) ? .bold : .regular
             )
             // Monospaced doesn't support italic via descriptor traits, but we
@@ -612,15 +679,19 @@ final class RenderBridge {
             if traits.contains(.traitItalic) && !traits.contains(.traitBold) {
                 // For code+italic only, try applying italic trait.
                 if let descriptor = resolvedFont.fontDescriptor.withSymbolicTraits(.traitItalic) {
-                    resolvedFont = UIFont(descriptor: descriptor, size: baseFont.pointSize)
+                    resolvedFont = UIFont(descriptor: descriptor, size: resolvedFont.pointSize)
                 }
             }
         } else if !traits.isEmpty {
-            if let descriptor = baseFont.fontDescriptor.withSymbolicTraits(traits) {
-                resolvedFont = UIFont(descriptor: descriptor, size: baseFont.pointSize)
+            let mergedTraits = resolvedFont.fontDescriptor.symbolicTraits.union(traits)
+            if let descriptor = resolvedFont.fontDescriptor.withSymbolicTraits(mergedTraits) {
+                resolvedFont = UIFont(descriptor: descriptor, size: resolvedFont.pointSize)
             }
         }
 
+        if shouldUnderline {
+            attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        }
         attrs[.font] = resolvedFont
         return attrs
     }

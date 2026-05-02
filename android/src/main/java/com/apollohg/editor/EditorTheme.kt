@@ -112,6 +112,40 @@ data class EditorBlockquoteTheme(
     }
 }
 
+data class EditorLinkTheme(
+    val fontFamily: String? = null,
+    val fontSize: Float? = null,
+    val fontWeight: String? = null,
+    val fontStyle: String? = null,
+    val color: Int? = null,
+    val backgroundColor: Int? = null,
+    val underline: Boolean? = null
+) {
+    companion object {
+        fun fromJson(json: JSONObject?): EditorLinkTheme? {
+            json ?: return null
+            return EditorLinkTheme(
+                fontFamily = json.optNullableString("fontFamily"),
+                fontSize = json.optNullableFloat("fontSize"),
+                fontWeight = json.optNullableString("fontWeight"),
+                fontStyle = json.optNullableString("fontStyle"),
+                color = parseColor(json.optNullableString("color")),
+                backgroundColor = parseColor(json.optNullableString("backgroundColor")),
+                underline = if (json.has("underline")) json.optBoolean("underline") else null
+            )
+        }
+    }
+
+    fun asTextStyle(): EditorTextStyle =
+        EditorTextStyle(
+            fontFamily = fontFamily,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            fontStyle = fontStyle,
+            color = color
+        )
+}
+
 data class EditorMentionTheme(
     val textColor: Int? = null,
     val backgroundColor: Int? = null,
@@ -268,6 +302,7 @@ data class EditorTheme(
     val list: EditorListTheme? = null,
     val horizontalRule: EditorHorizontalRuleTheme? = null,
     val mentions: EditorMentionTheme? = null,
+    val links: EditorLinkTheme? = null,
     val toolbar: EditorToolbarTheme? = null,
     val backgroundColor: Int? = null,
     val borderRadius: Float? = null,
@@ -298,6 +333,7 @@ data class EditorTheme(
                 list = EditorListTheme.fromJson(root.optJSONObject("list")),
                 horizontalRule = EditorHorizontalRuleTheme.fromJson(root.optJSONObject("horizontalRule")),
                 mentions = EditorMentionTheme.fromJson(root.optJSONObject("mentions")),
+                links = EditorLinkTheme.fromJson(root.optJSONObject("links")),
                 toolbar = EditorToolbarTheme.fromJson(root.optJSONObject("toolbar")),
                 backgroundColor = parseColor(root.optNullableString("backgroundColor")),
                 borderRadius = root.optNullableFloat("borderRadius"),

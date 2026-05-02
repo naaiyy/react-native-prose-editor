@@ -2237,6 +2237,103 @@ describe('NativeRichTextEditor', () => {
             });
         });
 
+        it('resolves mention themes before inserting a selected mention when configured', () => {
+            const resolveSelectionAttrs = jest.fn(() => ({
+                entityType: 'user',
+            }));
+            const resolveTheme = jest.fn(({ attrs }) =>
+                attrs.entityType === 'user'
+                    ? { textColor: '#445566', backgroundColor: '#eef6ff' }
+                    : null
+            );
+            const onSelect = jest.fn();
+            const { getByTestId } = render(
+                <NativeRichTextEditor
+                    addons={{
+                        mentions: {
+                            suggestions: [
+                                {
+                                    key: 'u1',
+                                    title: 'Alice',
+                                    label: '@Alice',
+                                    attrs: { id: 'u1', kind: 'user' },
+                                },
+                            ],
+                            resolveSelectionAttrs,
+                            resolveTheme,
+                            onSelect,
+                        },
+                    }}
+                />
+            );
+
+            act(() => {
+                getByTestId('native-editor-view').props.onAddonEvent({
+                    nativeEvent: {
+                        eventJson: JSON.stringify({
+                            type: 'mentionsSelectRequest',
+                            trigger: '@',
+                            suggestionKey: 'u1',
+                            range: { anchor: 3, head: 7 },
+                            attrs: {
+                                id: 'u1',
+                                kind: 'user',
+                                label: '@Alice',
+                                mentionSuggestionChar: '@',
+                            },
+                        }),
+                    },
+                });
+            });
+
+            const finalAttrs = {
+                id: 'u1',
+                kind: 'user',
+                label: '@Alice',
+                mentionSuggestionChar: '@',
+                entityType: 'user',
+                mentionTheme: { textColor: '#445566', backgroundColor: '#eef6ff' },
+            };
+            const suggestion = {
+                key: 'u1',
+                title: 'Alice',
+                label: '@Alice',
+                attrs: { id: 'u1', kind: 'user' },
+            };
+
+            expect(resolveTheme).toHaveBeenCalledWith({
+                trigger: '@',
+                suggestion,
+                range: { anchor: 3, head: 7 },
+                attrs: {
+                    id: 'u1',
+                    kind: 'user',
+                    label: '@Alice',
+                    mentionSuggestionChar: '@',
+                    entityType: 'user',
+                },
+            });
+            expect(mockNativeModule.editorInsertContentJsonAtSelectionScalar).toHaveBeenCalledWith(
+                1,
+                3,
+                7,
+                JSON.stringify({
+                    type: 'doc',
+                    content: [
+                        {
+                            type: 'mention',
+                            attrs: finalAttrs,
+                        },
+                    ],
+                })
+            );
+            expect(onSelect).toHaveBeenCalledWith({
+                trigger: '@',
+                suggestion,
+                attrs: finalAttrs,
+            });
+        });
+
         it('renders inline mention suggestions in the JS toolbar and inserts the selected mention', () => {
             const onSelect = jest.fn();
             const { getByTestId, queryByTestId } = render(

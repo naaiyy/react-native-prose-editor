@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.7] - 2026-05-02
+
+### Added
+
+- `NativeProseViewer.contentId` and `NativeProseViewer.containerWidth` props for height pre-measurement, removing the brief zero-height flash on mount in `FlatList`.
+- `clearHeightCache()` export to free cached viewer heights.
+- `EditorLinkTheme` interface and `EditorTheme.links` for styling link text.
+- `MentionsAddonConfig.resolveTheme` callback for per-mention theme overrides at insertion time. The resolved theme is stored as a `mentionTheme` attribute on the mention node.
+- Rust render engine now includes `mentionTheme` on `OpaqueInlineAtom` elements and applies `mentionSuggestionChar` trigger prefixes to mention labels.
+
+### Fixed
+
+- Mention insertion in `NativeRichTextEditor` now resolves per-mention theme via `resolveTheme` before writing attributes.
+
 ## [0.5.6] - 2026-05-01
 
 ### Fixed
@@ -169,6 +183,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.7]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.6...0.5.7
 [0.5.6]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.5...0.5.6
 [0.5.5]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.4...0.5.5
 [0.5.4]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.3...0.5.4

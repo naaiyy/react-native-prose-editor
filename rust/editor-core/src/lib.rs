@@ -928,13 +928,19 @@ fn serialize_render_elements(elements: &[render::RenderElement]) -> serde_json::
                 node_type,
                 label,
                 doc_pos,
+                mention_theme,
             } => {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "type": "opaqueInlineAtom",
                     "nodeType": node_type,
                     "label": label,
                     "docPos": doc_pos,
-                })
+                });
+                if let Some(mention_theme) = mention_theme {
+                    obj["mentionTheme"] =
+                        serde_json::Value::Object(mention_theme.clone().into_iter().collect());
+                }
+                obj
             }
             render::RenderElement::OpaqueBlockAtom {
                 node_type,

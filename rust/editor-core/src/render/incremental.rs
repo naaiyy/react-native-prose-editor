@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use crate::model::Document;
 use crate::render::empty_text_block_placeholder_string;
 use crate::render::inline_atom_label;
+use crate::render::inline_atom_mention_theme;
 use crate::render::RenderElement;
 use crate::render::RenderMark;
 use crate::schema::{NodeRole, Schema};
@@ -269,6 +270,7 @@ fn generate_block(
                 node_type: node.node_type().to_string(),
                 label: inline_atom_label(node.node_type(), node.attrs()),
                 doc_pos: *pos,
+                mention_theme: inline_atom_mention_theme(node.node_type(), node.attrs()),
             });
             *pos += node.node_size();
         }
@@ -294,6 +296,7 @@ fn generate_block(
                         node_type: node.node_type().to_string(),
                         label: inline_atom_label(node.node_type(), node.attrs()),
                         doc_pos: *pos,
+                        mention_theme: inline_atom_mention_theme(node.node_type(), node.attrs()),
                     });
                 } else {
                     elements.push(RenderElement::OpaqueBlockAtom {

@@ -28,12 +28,14 @@ struct NativeMentionsAddonConfig {
     let suggestions: [NativeMentionSuggestion]
     let theme: EditorMentionTheme?
     let resolveSelectionAttrs: Bool
+    let resolveTheme: Bool
 
     init?(dictionary: [String: Any]) {
         let trigger = (dictionary["trigger"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.trigger = (trigger?.isEmpty == false ? trigger : "@") ?? "@"
         self.suggestions = ((dictionary["suggestions"] as? [[String: Any]]) ?? []).compactMap(NativeMentionSuggestion.init(dictionary:))
         self.resolveSelectionAttrs = dictionary["resolveSelectionAttrs"] as? Bool ?? false
+        self.resolveTheme = dictionary["resolveTheme"] as? Bool ?? false
         if let theme = dictionary["theme"] as? [String: Any] {
             self.theme = EditorMentionTheme(dictionary: theme)
         } else {

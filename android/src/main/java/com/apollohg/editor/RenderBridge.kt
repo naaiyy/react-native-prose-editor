@@ -829,6 +829,53 @@ object RenderBridge {
         return state.result
     }
 
+    fun measureHeight(
+        json: String,
+        themeJson: String?,
+        width: Float,
+        density: Float
+    ): Float {
+        if (width <= 0) return 0f
+
+        val theme = EditorTheme.fromJson(themeJson)
+        val baseFontSize = theme?.text?.fontSize
+            ?: theme?.paragraph?.fontSize
+            ?: 16f
+
+        val spannable = buildSpannable(
+            json = json,
+            baseFontSize = baseFontSize,
+            textColor = android.graphics.Color.BLACK,
+            theme = theme,
+            density = density,
+            hostView = null
+        )
+
+        if (spannable.isEmpty()) return 0f
+
+        val contentInsets = theme?.contentInsets
+        val topInset = ((contentInsets?.top ?: 0f) * density).toInt()
+        val bottomInset = ((contentInsets?.bottom ?: 0f) * density).toInt()
+        val leftInset = ((contentInsets?.left ?: 0f) * density).toInt()
+        val rightInset = ((contentInsets?.right ?: 0f) * density).toInt()
+
+        val paint = android.text.TextPaint().apply {
+            textSize = baseFontSize * density
+            isAntiAlias = true
+        }
+
+        val availableWidth = (width - leftInset - rightInset).coerceAtLeast(0f).toInt()
+
+        val staticLayout = android.text.StaticLayout.Builder
+            .obtain(spannable, 0, spannable.length, paint, availableWidth)
+            .setAlignment(android.text.Layout.Alignment.ALIGN_NORMAL)
+            .setIncludePad(true)
+            .build()
+
+        val height = staticLayout.height + topInset + bottomInset
+        return height.toFloat()
+    }
+
     private fun appendElements(
         state: RenderBuildState,
         elements: JSONArray,
@@ -1135,8 +1182,42 @@ object RenderBridge {
                 blockquoteDepth(blockStack) > 0
             )
         } ?: theme?.effectiveTextStyle("paragraph", inBlockquote = blockquoteDepth(blockStack) > 0)
-        val resolvedTextSize = textStyle?.fontSize?.times(density) ?: baseFontSize
-        val resolvedTextColor = textStyle?.color ?: textColor
+
+        // Determine which marks are active.
+        var markBold = false
+        var markItalic = false
+        var markUnderline = false
+        var hasStrike = false
+        var hasCode = false
+        var isLink = false
+        var linkHref: String? = null
+        for (mark in marks) {
+            when {
+                mark is String -> when (mark) {
+                    "bold", "strong" -> markBold = true
+                    "italic", "em" -> markItalic = true
+                    "underline" -> markUnderline = true
+                    "strike", "strikethrough" -> hasStrike = true
+                    "code" -> hasCode = true
+                }
+                mark is JSONObject -> {
+                    val markType = mark.optString("type", "")
+                    if (markType == "link") {
+                        isLink = true
+                        linkHref = mark.optString("href", "").takeIf { it.isNotBlank() }
+                    }
+                }
+            }
+        }
+        val linkTheme = if (isLink) theme?.links else null
+        val effectiveTextStyle = textStyle?.mergedWith(linkTheme?.asTextStyle())
+            ?: linkTheme?.asTextStyle()
+        val resolvedTextSize = effectiveTextStyle?.fontSize?.times(density) ?: baseFontSize
+        val resolvedTextColor = if (isLink) {
+            effectiveTextStyle?.color ?: LayoutConstants.DEFAULT_LINK_COLOR
+        } else {
+            effectiveTextStyle?.color ?: textColor
+        }
 
         // Apply base styling.
         builder.setSpan(
@@ -1149,45 +1230,29 @@ object RenderBridge {
             start, end,
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
         )
-
-        // Determine which marks are active.
-        var hasBold = textStyle?.typefaceStyle()?.let { it == Typeface.BOLD || it == Typeface.BOLD_ITALIC } == true
-        var hasItalic = textStyle?.typefaceStyle()?.let { it == Typeface.ITALIC || it == Typeface.BOLD_ITALIC } == true
-        var hasUnderline = false
-        var hasStrike = false
-        var hasCode = false
-        for (mark in marks) {
-            when {
-                mark is String -> when (mark) {
-                    "bold", "strong" -> hasBold = true
-                    "italic", "em" -> hasItalic = true
-                    "underline" -> hasUnderline = true
-                    "strike", "strikethrough" -> hasStrike = true
-                    "code" -> hasCode = true
-                }
-                mark is JSONObject -> {
-                    val markType = mark.optString("type", "")
-                    if (markType == "link") {
-                        hasUnderline = true
-                        builder.setSpan(
-                            ForegroundColorSpan(LayoutConstants.DEFAULT_LINK_COLOR),
-                            start,
-                            end,
-                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                        )
-                        val href = mark.optString("href", "")
-                        if (href.isNotBlank()) {
-                            builder.setSpan(
-                                Annotation(NATIVE_LINK_HREF_ANNOTATION, href),
-                                start,
-                                end,
-                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                            )
-                        }
-                    }
-                }
-            }
+        linkTheme?.backgroundColor?.let { backgroundColor ->
+            builder.setSpan(
+                BackgroundColorSpan(backgroundColor),
+                start,
+                end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
         }
+        linkHref?.let { href ->
+            builder.setSpan(
+                Annotation(NATIVE_LINK_HREF_ANNOTATION, href),
+                start,
+                end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+
+        val typefaceStyle = effectiveTextStyle?.typefaceStyle()
+        val hasBold = markBold ||
+            typefaceStyle?.let { it == Typeface.BOLD || it == Typeface.BOLD_ITALIC } == true
+        val hasItalic = markItalic ||
+            typefaceStyle?.let { it == Typeface.ITALIC || it == Typeface.BOLD_ITALIC } == true
+        val hasUnderline = markUnderline || (isLink && (linkTheme?.underline ?: true))
 
         // Apply bold/italic as a combined StyleSpan.
         if (hasBold && hasItalic) {
@@ -1204,7 +1269,7 @@ object RenderBridge {
             )
         }
 
-        val fontFamily = textStyle?.fontFamily
+        val fontFamily = effectiveTextStyle?.fontFamily
         if (!hasCode && !fontFamily.isNullOrBlank()) {
             builder.setSpan(
                 TypefaceSpan(fontFamily),

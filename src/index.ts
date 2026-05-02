@@ -12,6 +12,9 @@ export {
 export {
     NativeProseViewer,
     type NativeProseViewerProps,
+    type NativeProseViewerAddons,
+    type NativeProseViewerMentionsAddonConfig,
+    type NativeProseViewerMentionPrefix,
     type NativeProseViewerLinkPressEvent,
     type NativeProseViewerMentionRenderContext,
     type NativeProseViewerMentionPressEvent,
@@ -38,6 +41,7 @@ export type {
     EditorContentInsets,
     EditorTheme,
     EditorTextStyle,
+    EditorLinkTheme,
     EditorHeadingTheme,
     EditorListTheme,
     EditorHorizontalRuleTheme,
@@ -58,6 +62,7 @@ export {
     type MentionSuggestion,
     type MentionQueryChangeEvent,
     type MentionSelectionAttrsEvent,
+    type MentionThemeResolveEvent,
     type MentionSelectEvent,
     type EditorAddonEvent,
 } from './addons';
@@ -103,3 +108,5 @@ export {
     encodeCollaborationStateBase64,
     decodeCollaborationStateBase64,
 } from './NativeEditorBridge';
+
+export { clearHeightCache } from './heightCache';

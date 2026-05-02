@@ -128,6 +128,35 @@ describe('mentions addon helpers', () => {
         );
     });
 
+    it('marks mention configs that require JS-side theme resolution', () => {
+        const serialized = serializeEditorAddons({
+            mentions: {
+                suggestions: [{ key: 'u1', title: 'Alice' }],
+                resolveTheme: () => ({ textColor: '#445566' }),
+            },
+        });
+
+        expect(serialized).toBe(
+            JSON.stringify({
+                mentions: {
+                    trigger: '@',
+                    resolveTheme: true,
+                    suggestions: [
+                        {
+                            key: 'u1',
+                            title: 'Alice',
+                            label: '@Alice',
+                            attrs: {
+                                label: '@Alice',
+                                mentionSuggestionChar: '@',
+                            },
+                        },
+                    ],
+                },
+            })
+        );
+    });
+
     it('builds a mention fragment JSON payload that preserves custom attrs', () => {
         expect(
             buildMentionFragmentJson({

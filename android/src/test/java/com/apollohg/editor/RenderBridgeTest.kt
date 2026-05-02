@@ -920,6 +920,49 @@ class RenderBridgeTest {
         assertEquals("https://example.com", hrefAnnotations.first().value)
     }
 
+    @Test
+    fun `render - themed link mark`() {
+        val json = """
+        [
+            {"type": "blockStart", "nodeType": "paragraph", "depth": 0},
+            {"type": "textRun", "text": "click here", "marks": [{"type":"link","href":"https://example.com"}]},
+            {"type": "blockEnd"}
+        ]
+        """.trimIndent()
+        val theme = EditorTheme.fromJson(
+            """
+            {
+              "links": {
+                "color": "#445566",
+                "backgroundColor": "#eef6ff",
+                "fontSize": 18,
+                "fontWeight": "700",
+                "fontStyle": "italic",
+                "underline": false
+              }
+            }
+            """.trimIndent()
+        )
+
+        val result = RenderBridge.buildSpannable(json, baseFontSize, textColor, theme)
+        assertEquals("click here", result.toString())
+        val underlineSpans = result.getSpans(0, result.length, UnderlineSpan::class.java)
+        val colorSpans = result.getSpans(0, result.length, ForegroundColorSpan::class.java)
+        val backgroundSpans = result.getSpans(0, result.length, BackgroundColorSpan::class.java)
+        val sizeSpans = result.getSpans(0, result.length, AbsoluteSizeSpan::class.java)
+        val styleSpans = result.getSpans(0, result.length, StyleSpan::class.java)
+        val hrefAnnotations = result.getSpans(0, result.length, Annotation::class.java)
+            .filter { it.key == RenderBridge.NATIVE_LINK_HREF_ANNOTATION }
+
+        assertTrue("Link underline should be disabled by theme", underlineSpans.isEmpty())
+        assertTrue(colorSpans.any { it.foregroundColor == Color.parseColor("#445566") })
+        assertTrue(backgroundSpans.any { it.backgroundColor == Color.parseColor("#eef6ff") })
+        assertTrue(sizeSpans.any { it.size == 18 })
+        assertTrue(styleSpans.any { it.style == Typeface.BOLD_ITALIC })
+        assertEquals(1, hrefAnnotations.size)
+        assertEquals("https://example.com", hrefAnnotations.first().value)
+    }
+
     // ── Depth Indentation ───────────────────────────────────────────────
 
     @Test
@@ -1930,6 +1973,97 @@ class RenderBridgeTest {
 
         assertEquals(normalSpan.textSideGapPx(0f), scaledSpan.textSideGapPx(0f), 0.01f)
         assertEquals(gapToText, scaledSpan.textSideGapPx(0f), 0.01f)
+    }
+
+    // ── Height Measurement ──────────────────────────────────────────────
+
+    @Test
+    fun `measureHeight returns positive height for single paragraph`() {
+        val renderJSON = """[{"type":"blockStart","nodeType":"paragraph","depth":0},{"type":"textRun","text":"Hello world"},{"type":"blockEnd"}]"""
+        val height = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = null,
+            width = 375f,
+            density = 1f
+        )
+        assertTrue("Single paragraph should have positive height, got $height", height > 0f)
+    }
+
+    @Test
+    fun `measureHeight returns zero for empty content`() {
+        val height = RenderBridge.measureHeight(
+            json = "[]",
+            themeJson = null,
+            width = 375f,
+            density = 1f
+        )
+        assertEquals("Empty content should have zero height", 0f, height)
+    }
+
+    @Test
+    fun `measureHeight produces taller result for narrower width`() {
+        val longText = "word ".repeat(100)
+        val renderJSON = """[{"type":"blockStart","nodeType":"paragraph","depth":0},{"type":"textRun","text":"$longText"},{"type":"blockEnd"}]"""
+        val narrowHeight = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = null,
+            width = 100f,
+            density = 1f
+        )
+        val wideHeight = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = null,
+            width = 1000f,
+            density = 1f
+        )
+        assertTrue(
+            "Narrower width ($narrowHeight) should be taller than wider ($wideHeight)",
+            narrowHeight > wideHeight
+        )
+    }
+
+    @Test
+    fun `measureHeight respects theme font size`() {
+        val renderJSON = """[{"type":"blockStart","nodeType":"paragraph","depth":0},{"type":"textRun","text":"Hello world"},{"type":"blockEnd"}]"""
+        val smallHeight = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = """{"text":{"fontSize":12}}""",
+            width = 375f,
+            density = 1f
+        )
+        val largeHeight = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = """{"text":{"fontSize":32}}""",
+            width = 375f,
+            density = 1f
+        )
+        assertTrue(
+            "Larger font ($largeHeight) should be taller than smaller ($smallHeight)",
+            largeHeight > smallHeight
+        )
+    }
+
+    @Test
+    fun `measureHeight adds content insets`() {
+        val renderJSON = """[{"type":"blockStart","nodeType":"paragraph","depth":0},{"type":"textRun","text":"Hello world"},{"type":"blockEnd"}]"""
+        val noInsetHeight = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = null,
+            width = 375f,
+            density = 1f
+        )
+        val insetHeight = RenderBridge.measureHeight(
+            json = renderJSON,
+            themeJson = """{"contentInsets":{"top":20,"bottom":20}}""",
+            width = 375f,
+            density = 1f
+        )
+        assertEquals(
+            "Content insets should add 40 to height",
+            noInsetHeight + 40f,
+            insetHeight,
+            1f
+        )
     }
 
 
