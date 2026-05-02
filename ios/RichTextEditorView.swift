@@ -865,6 +865,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         didSet {
             renderAppearanceRevision &+= 1
             placeholderLabel.font = resolvedDefaultFont()
+            placeholderLabel.textColor = theme?.placeholderColor ?? .placeholderText
             backgroundColor = theme?.backgroundColor ?? baseBackgroundColor
             if let contentInsets = theme?.contentInsets {
                 textContainerInset = UIEdgeInsets(

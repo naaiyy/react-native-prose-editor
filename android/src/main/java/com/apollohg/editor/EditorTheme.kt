@@ -304,6 +304,7 @@ data class EditorTheme(
     val mentions: EditorMentionTheme? = null,
     val links: EditorLinkTheme? = null,
     val toolbar: EditorToolbarTheme? = null,
+    val placeholderColor: Int? = null,
     val backgroundColor: Int? = null,
     val borderRadius: Float? = null,
     val contentInsets: EditorContentInsets? = null
@@ -335,6 +336,7 @@ data class EditorTheme(
                 mentions = EditorMentionTheme.fromJson(root.optJSONObject("mentions")),
                 links = EditorLinkTheme.fromJson(root.optJSONObject("links")),
                 toolbar = EditorToolbarTheme.fromJson(root.optJSONObject("toolbar")),
+                placeholderColor = parseColor(root.optNullableString("placeholderColor")),
                 backgroundColor = parseColor(root.optNullableString("backgroundColor")),
                 borderRadius = root.optNullableFloat("borderRadius"),
                 contentInsets = EditorContentInsets.fromJson(root.optJSONObject("contentInsets"))

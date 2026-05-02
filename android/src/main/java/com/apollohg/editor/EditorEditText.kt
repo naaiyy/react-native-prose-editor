@@ -339,7 +339,7 @@ class EditorEditText @JvmOverloads constructor(
         val resolvedTypeface = resolvePlaceholderTypeface(textStyle)
 
         return TextPaint(paint).apply {
-            color = currentHintTextColor
+            color = theme?.placeholderColor ?: currentHintTextColor
             textSize = resolvedTextSize
             typeface = resolvedTypeface
         }

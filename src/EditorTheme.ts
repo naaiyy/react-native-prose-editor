@@ -119,6 +119,7 @@ export interface EditorTheme {
     mentions?: EditorMentionTheme;
     links?: EditorLinkTheme;
     toolbar?: EditorToolbarTheme;
+    placeholderColor?: string;
     backgroundColor?: string;
     borderRadius?: number;
     contentInsets?: EditorContentInsets;

@@ -299,6 +299,7 @@ struct EditorTheme {
     var mentions: EditorMentionTheme?
     var links: EditorLinkTheme?
     var toolbar: EditorToolbarTheme?
+    var placeholderColor: UIColor?
     var backgroundColor: UIColor?
     var borderRadius: CGFloat?
     var contentInsets: EditorContentInsets?
@@ -345,6 +346,7 @@ struct EditorTheme {
         if let toolbar = dictionary["toolbar"] as? [String: Any] {
             self.toolbar = EditorToolbarTheme(dictionary: toolbar)
         }
+        placeholderColor = EditorTheme.color(from: dictionary["placeholderColor"])
         backgroundColor = EditorTheme.color(from: dictionary["backgroundColor"])
         borderRadius = EditorTheme.cgFloat(dictionary["borderRadius"])
         if let contentInsets = dictionary["contentInsets"] as? [String: Any] {

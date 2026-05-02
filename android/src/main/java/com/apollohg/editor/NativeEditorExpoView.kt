@@ -405,8 +405,19 @@ class NativeEditorExpoView(
             return false
         }
         val toolbarFrame = toolbarFrameInWindow
-        if (toolbarFrame != null && toolbarFrame.contains(event.rawX, event.rawY)) {
-            return false
+        if (toolbarFrame != null) {
+            // toolbarFrame is in DP (from React Native's measureInWindow),
+            // but rawX/rawY are in pixels — convert before comparing.
+            val density = resources.displayMetrics.density
+            val frameInPx = RectF(
+                toolbarFrame.left * density,
+                toolbarFrame.top * density,
+                toolbarFrame.right * density,
+                toolbarFrame.bottom * density
+            )
+            if (frameInPx.contains(event.rawX, event.rawY)) {
+                return false
+            }
         }
         val rect = Rect()
         richTextView.editorEditText.getGlobalVisibleRect(rect)
