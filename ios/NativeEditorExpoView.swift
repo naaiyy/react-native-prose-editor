@@ -1576,6 +1576,46 @@ final class EditorAccessoryToolbarView: UIInputView {
     }
 }
 
+/// Keeps iOS keyboard integrations on the inputAccessoryView path when the
+/// visible toolbar is rendered outside the native keyboard accessory.
+final class EditorAccessoryPlaceholderView: UIView {
+    override init(frame: CGRect) {
+        super.init(
+            frame: CGRect(
+                x: frame.origin.x,
+                y: frame.origin.y,
+                width: frame.width,
+                height: 0
+            )
+        )
+        commonInit()
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: 0)
+    }
+
+    override func sizeThatFits(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width, height: 0)
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        false
+    }
+
+    private func commonInit() {
+        frame.size.height = 0
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+        autoresizingMask = [.flexibleWidth]
+    }
+}
+
 class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognizerDelegate {
 
     // MARK: - Subviews
@@ -1585,6 +1625,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         frame: .zero,
         inputViewStyle: .keyboard
     )
+    private let accessoryPlaceholder = EditorAccessoryPlaceholderView(frame: .zero)
     private var toolbarFrameInWindow: CGRect?
     private var didApplyAutoFocus = false
     private var toolbarState = NativeToolbarState.empty
@@ -2269,14 +2310,33 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     func triggerMentionSuggestionTapForTesting(at index: Int) {
         accessoryToolbar.triggerMentionSuggestionTapForTesting(at: index)
     }
+
+    func inputAccessoryViewForTesting() -> UIView? {
+        richTextView.textView.inputAccessoryView
+    }
+
+    func isUsingAccessoryToolbarForTesting() -> Bool {
+        richTextView.textView.inputAccessoryView === accessoryToolbar
+    }
+
+    func isUsingAccessoryPlaceholderForTesting() -> Bool {
+        richTextView.textView.inputAccessoryView === accessoryPlaceholder
+    }
+
     private func updateAccessoryToolbarVisibility() {
         refreshSystemAssistantToolbarIfNeeded()
-        let nextAccessoryView: UIView? = showsToolbar &&
+        let nextAccessoryView: UIView?
+        if showsToolbar &&
             toolbarPlacement == "keyboard" &&
             richTextView.textView.isEditable &&
             !shouldUseSystemAssistantToolbar
-            ? accessoryToolbar
-            : nil
+        {
+            nextAccessoryView = accessoryToolbar
+        } else if richTextView.textView.isEditable && !shouldUseSystemAssistantToolbar {
+            nextAccessoryView = accessoryPlaceholder
+        } else {
+            nextAccessoryView = nil
+        }
         if richTextView.textView.inputAccessoryView !== nextAccessoryView {
             richTextView.textView.inputAccessoryView = nextAccessoryView
             if richTextView.textView.isFirstResponder {

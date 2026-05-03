@@ -54,6 +54,7 @@ class RichTextEditorView @JvmOverloads constructor(
     private var baseBackgroundColor: Int = Color.WHITE
     private var viewportBottomInsetPx: Int = 0
     internal var appliedCornerRadiusPx: Float = 0f
+    internal var appliedBackgroundColorForTesting: Int = Color.WHITE
 
     /** Binds or unbinds the Rust editor instance. */
     var editorId: Long = 0
@@ -251,13 +252,15 @@ class RichTextEditorView @JvmOverloads constructor(
 
     private fun updateScrollContainerAppearance() {
         val cornerRadiusPx = (theme?.borderRadius ?: 0f) * resources.displayMetrics.density
+        val backgroundColor = theme?.backgroundColor ?: baseBackgroundColor
         editorViewport.background = GradientDrawable().apply {
             cornerRadius = cornerRadiusPx
-            setColor(theme?.backgroundColor ?: baseBackgroundColor)
+            setColor(backgroundColor)
         }
         editorViewport.clipToOutline = cornerRadiusPx > 0f
         editorScrollView.setBackgroundColor(Color.TRANSPARENT)
         appliedCornerRadiusPx = cornerRadiusPx
+        appliedBackgroundColorForTesting = backgroundColor
     }
 
     private fun updateScrollContainerInsets() {

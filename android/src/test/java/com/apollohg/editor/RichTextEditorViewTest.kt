@@ -816,6 +816,31 @@ class RichTextEditorViewTest {
     }
 
     @Test
+    fun `editor theme transparent backgroundColor applies transparent viewport background`() {
+        val context = RuntimeEnvironment.getApplication()
+        val richTextEditorView = RichTextEditorView(context)
+        richTextEditorView.configure(
+            textSizePx = 16f * context.resources.displayMetrics.density,
+            textColor = Color.BLACK,
+            backgroundColor = Color.WHITE
+        )
+
+        val theme = EditorTheme.fromJson(
+            """
+            {
+              "backgroundColor": "transparent"
+            }
+            """.trimIndent()
+        )
+
+        assertEquals(Color.TRANSPARENT, theme?.backgroundColor)
+
+        richTextEditorView.applyTheme(theme)
+
+        assertEquals(Color.TRANSPARENT, richTextEditorView.appliedBackgroundColorForTesting)
+    }
+
+    @Test
     fun `fixed height editor reserves viewport inset in effective bottom padding`() {
         val context = RuntimeEnvironment.getApplication()
         val richTextEditorView = RichTextEditorView(context)

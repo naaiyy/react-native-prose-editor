@@ -118,6 +118,31 @@ final class RichTextEditorViewTests: XCTestCase {
         )
     }
 
+    func testNativeEditReclaimsKeyboardProviderTextViewDelegateBeforeRustUpdate() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello</p>")
+        editorSetSelectionScalar(id: editorId, scalarAnchor: 5, scalarHead: 5)
+        textView.applyUpdateJSON(editorGetCurrentState(id: editorId), notifyDelegate: false)
+
+        let delegateSpy = KeyboardProviderTextViewDelegateSpy(textViewDelegate: textView)
+        textView.delegate = delegateSpy
+        XCTAssertFalse(textView.isUsingInternalTextViewDelegateForTesting())
+
+        textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello!</p>")
+        XCTAssertEqual(
+            delegateSpy.selectionChangeCount,
+            0,
+            "KeyboardProvider-style delegates should not inspect transient selection while Rust applies an edit"
+        )
+        XCTAssertEqual(delegateSpy.textChangeCount, 0)
+        XCTAssertTrue(textView.isUsingInternalTextViewDelegateForTesting())
+    }
+
     func testParagraphSplitAppliesTopLevelRenderPatch() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }
@@ -548,6 +573,56 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertTrue(didChange)
         XCTAssertEqual(toolbar.intrinsicContentSize.height, baseHeight + 2)
         XCTAssertTrue(toolbar.isShowingMentionSuggestions)
+    }
+
+    func testNativeEditorUsesZeroHeightAccessoryPlaceholderWhenToolbarIsInline() {
+        let view = NativeEditorExpoView()
+
+        view.setToolbarPlacement("inline")
+
+        XCTAssertTrue(view.isUsingAccessoryPlaceholderForTesting())
+        XCTAssertFalse(view.isUsingAccessoryToolbarForTesting())
+        XCTAssertNotNil(view.inputAccessoryViewForTesting())
+        XCTAssertEqual(view.inputAccessoryViewForTesting()?.intrinsicContentSize.height ?? -1, 0)
+    }
+
+    func testNativeEditorRestoresToolbarAccessoryWhenSwitchingBackToKeyboardPlacement() {
+        let view = NativeEditorExpoView()
+
+        view.setToolbarPlacement("inline")
+        XCTAssertTrue(view.isUsingAccessoryPlaceholderForTesting())
+
+        view.setToolbarPlacement("keyboard")
+
+        XCTAssertTrue(view.isUsingAccessoryToolbarForTesting())
+        XCTAssertFalse(view.isUsingAccessoryPlaceholderForTesting())
+    }
+
+    func testNativeEditorRemovesAccessoryPlaceholderWhenNotEditable() {
+        let view = NativeEditorExpoView()
+
+        view.setToolbarPlacement("inline")
+        view.setEditable(false)
+
+        XCTAssertNil(view.inputAccessoryViewForTesting())
+    }
+
+    func testInlineAccessoryPlaceholderRemainsAttachedAfterNativeEdit() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>Hello</p>")
+        editorSetSelectionScalar(id: editorId, scalarAnchor: 5, scalarHead: 5)
+
+        let view = NativeEditorExpoView()
+        view.setEditorId(editorId)
+        view.setToolbarPlacement("inline")
+        view.richTextView.textView.applyUpdateJSON(editorGetCurrentState(id: editorId), notifyDelegate: false)
+
+        view.richTextView.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello!</p>")
+        XCTAssertTrue(view.isUsingAccessoryPlaceholderForTesting())
     }
 
     func testToolbarThemeParsesNativeAppearance() {
@@ -3297,6 +3372,34 @@ final class RichTextEditorViewTests: XCTestCase {
 
         let data = try! JSONSerialization.data(withJSONObject: config)
         return String(data: data, encoding: .utf8)!
+    }
+}
+
+private final class KeyboardProviderTextViewDelegateSpy: NSObject, UITextViewDelegate {
+    weak var textViewDelegate: UITextViewDelegate?
+    private(set) var selectionChangeCount = 0
+    private(set) var textChangeCount = 0
+
+    init(textViewDelegate: UITextViewDelegate?) {
+        self.textViewDelegate = textViewDelegate
+    }
+
+    func textViewDidChangeSelection(_ textView: UITextView) {
+        selectionChangeCount += 1
+        textViewDelegate?.textViewDidChangeSelection?(textView)
+        if let range = textView.selectedTextRange {
+            _ = textView.firstRect(for: range)
+            _ = textView.caretRect(for: range.start)
+            _ = textView.caretRect(for: range.end)
+            _ = textView.offset(from: textView.beginningOfDocument, to: range.start)
+            _ = textView.offset(from: textView.beginningOfDocument, to: range.end)
+        }
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+        textChangeCount += 1
+        _ = textView.text
+        textViewDelegate?.textViewDidChange?(textView)
     }
 }
 

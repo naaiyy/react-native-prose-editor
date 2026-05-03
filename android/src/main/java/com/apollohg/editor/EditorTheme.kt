@@ -362,6 +362,10 @@ private fun parseColor(raw: String?): Int? {
     val value = raw?.trim()?.lowercase() ?: return null
     if (value.isEmpty()) return null
 
+    when (value) {
+        "clear", "transparent" -> return Color.TRANSPARENT
+    }
+
     parseCssHexColor(value)?.let { return it }
 
     try {

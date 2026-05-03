@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.9] - 2026-05-03
+
+### Fixed
+
+- iOS no longer crashes under `KeyboardProvider` when the editor is wrapped by `react-native-keyboard-controller`.
+- Android now respects `theme.backgroundColor: "transparent"` instead of falling back to a white editor background.
+
 ## [0.5.8] - 2026-05-02
 
 ### Added
@@ -188,6 +195,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.9]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.8...0.5.9
 [0.5.8]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.7...0.5.8
 [0.5.7]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.6...0.5.7
 [0.5.6]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.5...0.5.6

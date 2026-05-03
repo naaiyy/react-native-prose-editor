@@ -1050,7 +1050,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         // Register as the text storage delegate so we can detect unauthorized
         // mutations (reconciliation fallback).
         textStorage.delegate = self
-        delegate = self
+        ensureInternalTextViewDelegate()
         addGestureRecognizer(imageSelectionTapRecognizer)
         installImageSelectionTapDependencies()
 
@@ -1161,6 +1161,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     override func becomeFirstResponder() -> Bool {
         let didBecomeFirstResponder = super.becomeFirstResponder()
         if didBecomeFirstResponder {
+            ensureInternalTextViewDelegate()
+            DispatchQueue.main.async { [weak self] in
+                self?.ensureInternalTextViewDelegate()
+            }
             _ = normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded()
             refreshTypingAttributesForSelection()
         }
@@ -1338,6 +1342,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
     func lastApplyUpdateTrace() -> ApplyUpdateTrace? {
         lastApplyUpdateTraceForTesting
+    }
+
+    func isUsingInternalTextViewDelegateForTesting() -> Bool {
+        (delegate as AnyObject?) === (self as AnyObject)
     }
 
     func blockquoteStripeRectsForTesting() -> [CGRect] {
@@ -1533,6 +1541,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     ///   - id: The editor ID from `editor_create()`.
     ///   - initialHTML: Optional HTML to set as initial content.
     func bindEditor(id: UInt64, initialHTML: String? = nil) {
+        ensureInternalTextViewDelegate()
         editorId = id
 
         if let html = initialHTML, !html.isEmpty {
@@ -1561,6 +1570,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// Instead of calling `super.insertText()` (which would modify the
     /// underlying text storage directly), we route through Rust.
     override func insertText(_ text: String) {
+        ensureInternalTextViewDelegate()
         guard !isApplyingRustState else {
             super.insertText(text)
             return
@@ -1644,6 +1654,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// If there's a range selection, delete the range. If it's a cursor,
     /// delete the character (grapheme cluster) before the cursor.
     override func deleteBackward() {
+        ensureInternalTextViewDelegate()
         guard !isApplyingRustState else {
             super.deleteBackward()
             return
@@ -1837,6 +1848,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     ///
     /// We route the replacement through Rust to keep the document model in sync.
     override func replace(_ range: UITextRange, withText text: String) {
+        ensureInternalTextViewDelegate()
         guard !isApplyingRustState else {
             super.replace(range, withText: text)
             return
@@ -1871,6 +1883,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// UITextView display the composing text normally (with its underline
     /// decoration). The text is NOT sent to Rust during composition.
     override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        ensureInternalTextViewDelegate()
         isComposing = true
         Self.inputLog.debug(
             "[setMarkedText] marked=\(self.preview(markedText ?? ""), privacy: .public) nsRange=\(selectedRange.location),\(selectedRange.length) selection=\(self.selectionSummary(), privacy: .public)"
@@ -1886,6 +1899,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// replace the marked text with the final text in the text storage,
     /// but we intercept at a higher level.
     override func unmarkText() {
+        ensureInternalTextViewDelegate()
         // Capture the finalized composed text before UIKit clears it.
         composedText = markedTextRange.flatMap { text(in: $0) }
 
@@ -1919,6 +1933,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// Attempts to extract HTML from the pasteboard first (for rich text paste),
     /// falling back to plain text.
     override func paste(_ sender: Any?) {
+        ensureInternalTextViewDelegate()
         guard editorId != 0 else {
             super.paste(sender)
             return
@@ -1977,6 +1992,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// internally during tap handling and word-boundary resolution.
     func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView === self else { return }
+        ensureInternalTextViewDelegate()
         guard !isApplyingRustState else { return }
         if normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded() {
             return
@@ -2027,6 +2043,14 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
     private var isInterceptingInput: Bool {
         interceptedInputDepth > 0
+    }
+
+    private func ensureInternalTextViewDelegate() {
+        // Some keyboard integrations replace UITextView's private delegate ivar
+        // directly. The editor must own delegate callbacks so external observers
+        // cannot inspect transient TextKit state during Rust-driven edits.
+        guard (delegate as AnyObject?) !== (self as AnyObject) else { return }
+        delegate = self
     }
 
     private func performInterceptedInput(_ action: () -> Void) {
@@ -3236,12 +3260,11 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         var stringMutationNanos: UInt64 = 0
         var attributeMutationNanos: UInt64 = 0
         let previousTextStorageDelegate = textStorage.delegate
-        let previousTextViewDelegate = delegate
         textStorage.delegate = nil
         delegate = nil
         defer {
             textStorage.delegate = previousTextStorageDelegate
-            delegate = previousTextViewDelegate
+            ensureInternalTextViewDelegate()
         }
         if let replaceRange {
             if shouldUseSmallPatchTextMutation {
@@ -3810,6 +3833,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     ///
     /// - Parameter updateJSON: The JSON string from editor_insert_text, etc.
     func applyUpdateJSON(_ updateJSON: String, notifyDelegate: Bool = true) {
+        ensureInternalTextViewDelegate()
         let totalStartedAt = DispatchTime.now().uptimeNanoseconds
         let parseStartedAt = totalStartedAt
         guard let data = updateJSON.data(using: .utf8),
@@ -3996,6 +4020,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// Used for initial content loading (set_html / set_json return render
     /// elements directly, not wrapped in an EditorUpdate).
     func applyRenderJSON(_ renderJSON: String) {
+        ensureInternalTextViewDelegate()
         Self.updateLog.debug(
             "[applyRenderJSON.begin] before=\(self.textSnapshotSummary(), privacy: .public)"
         )
@@ -4031,7 +4056,11 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
         let totalStartedAt = DispatchTime.now().uptimeNanoseconds
         isApplyingRustState = true
-        defer { isApplyingRustState = false }
+        delegate = nil
+        defer {
+            ensureInternalTextViewDelegate()
+            isApplyingRustState = false
+        }
 
         switch type {
         case "text":
