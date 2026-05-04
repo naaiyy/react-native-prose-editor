@@ -38,9 +38,9 @@ import uniffi.editor_core.*  // UniFFI-generated bindings
  *
  * ## Composition Handling
  *
- * For CJK input methods, composing text is handled normally by the base
- * [InputConnection]. When composition finalizes, we capture the result and
- * route it through Rust.
+ * For CJK input methods, swipe keyboards, and some autocorrect flows, composing
+ * text is rendered transiently by the base [InputConnection]. The final commit
+ * is routed through Rust against the original authorized selection.
  *
  * ## Thread Safety
  *
@@ -190,6 +190,8 @@ class EditorEditText @JvmOverloads constructor(
     private var lastAppliedRenderAppearanceRevision: Long = 0L
     internal var onDeleteRangeInRustForTesting: ((Int, Int) -> Unit)? = null
     internal var onDeleteBackwardAtSelectionScalarInRustForTesting: ((Int, Int) -> Unit)? = null
+    internal var onInsertTextInRustForTesting: ((String, Int) -> Unit)? = null
+    internal var onReplaceTextInRustForTesting: ((Int, Int, String) -> Unit)? = null
 
     fun lastRenderAppliedPatch(): Boolean = lastRenderAppliedPatchForTesting
     fun lastApplyUpdateTrace(): ApplyUpdateTrace? = lastApplyUpdateTraceForTesting
@@ -583,13 +585,45 @@ class EditorEditText @JvmOverloads constructor(
             // Range selection: atomic replace via Rust.
             val scalarStart = PositionBridge.utf16ToScalar(start, currentText)
             val scalarEnd = PositionBridge.utf16ToScalar(end, currentText)
-            val updateJSON = editorReplaceTextScalar(
-                editorId.toULong(), scalarStart.toUInt(), scalarEnd.toUInt(), text
-            )
-            applyUpdateJSON(updateJSON)
+            replaceTextRangeInRust(scalarStart, scalarEnd, text)
         } else {
             val scalarPos = PositionBridge.utf16ToScalar(start, currentText)
             insertTextInRust(text, scalarPos)
+        }
+    }
+
+    internal fun runWithTransientInputMutationGuard(block: () -> Boolean): Boolean {
+        val wasApplyingRustState = isApplyingRustState
+        isApplyingRustState = true
+        return try {
+            block()
+        } finally {
+            isApplyingRustState = wasApplyingRustState
+        }
+    }
+
+    fun handleCompositionCommit(text: String, replacementStartUtf16: Int, replacementEndUtf16: Int) {
+        if (!isEditable) return
+        if (isApplyingRustState) return
+        if (editorId == 0L) return
+
+        if (text == "\n") {
+            handleReturnKey()
+            return
+        }
+
+        val authorizedText = lastAuthorizedText
+        val startUtf16 = minOf(replacementStartUtf16, replacementEndUtf16)
+            .coerceIn(0, authorizedText.length)
+        val endUtf16 = maxOf(replacementStartUtf16, replacementEndUtf16)
+            .coerceIn(0, authorizedText.length)
+        val scalarStart = PositionBridge.utf16ToScalar(startUtf16, authorizedText)
+        val scalarEnd = PositionBridge.utf16ToScalar(endUtf16, authorizedText)
+
+        if (scalarStart != scalarEnd) {
+            replaceTextRangeInRust(scalarStart, scalarEnd, text)
+        } else {
+            insertTextInRust(text, scalarStart)
         }
     }
 
@@ -697,35 +731,6 @@ class EditorEditText @JvmOverloads constructor(
         } else {
             deleteBackwardAtSelectionScalarInRust(0, 0)
         }
-    }
-
-    // ── Input Handling: Composition ─────────────────────────────────────
-
-    /**
-     * Handle finalization of IME composition (CJK input, swipe keyboard).
-     *
-     * Called by [EditorInputConnection.finishComposingText] after the base
-     * InputConnection has finalized the composing text.
-     */
-    /**
-     * Handle finalization of IME composition.
-     *
-     * @param composedText The finalized composed text captured from the InputConnection.
-     */
-    fun handleCompositionFinished(composedText: String?) {
-        if (!isEditable) return
-        if (isApplyingRustState) return
-        if (editorId == 0L) return
-        if (composedText.isNullOrEmpty()) return
-
-        // The cursor is at the end of the composed text. Calculate the insert
-        // position as cursor - composed_length (in scalar offsets).
-        val currentText = text?.toString() ?: ""
-        val cursorUtf16 = selectionStart
-        val cursorScalar = PositionBridge.utf16ToScalar(cursorUtf16, currentText)
-        val composedScalarLen = composedText.codePointCount(0, composedText.length)
-        val insertPos = if (cursorScalar >= composedScalarLen) cursorScalar - composedScalarLen else 0
-        insertTextInRust(composedText, insertPos)
     }
 
     // ── Input Handling: Return Key ──────────────────────────────────────
@@ -1078,7 +1083,25 @@ class EditorEditText @JvmOverloads constructor(
      * Insert text at a scalar position via the Rust editor.
      */
     private fun insertTextInRust(text: String, atScalarPos: Int) {
+        onInsertTextInRustForTesting?.let { callback ->
+            callback(text, atScalarPos)
+            return
+        }
         val updateJSON = editorInsertTextScalar(editorId.toULong(), atScalarPos.toUInt(), text)
+        applyUpdateJSON(updateJSON)
+    }
+
+    private fun replaceTextRangeInRust(scalarFrom: Int, scalarTo: Int, text: String) {
+        onReplaceTextInRustForTesting?.let { callback ->
+            callback(scalarFrom, scalarTo, text)
+            return
+        }
+        val updateJSON = editorReplaceTextScalar(
+            editorId.toULong(),
+            scalarFrom.toUInt(),
+            scalarTo.toUInt(),
+            text
+        )
         applyUpdateJSON(updateJSON)
     }
 

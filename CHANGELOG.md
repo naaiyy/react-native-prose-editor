@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.10] - 2026-05-04
+
+### Fixed
+
+- Android CRDT editing now keeps Samsung Keyboard and other IME composing text transient until commit, then applies the final text at the original Rust-authorised range.
+- iOS marked-text composition now uses the same original-range commit path, preventing transient `UITextView` composition state from shifting CRDT insertion or replacement offsets.
+- Added Android and iOS regression coverage for composition commits, selection replacement, transient deletes, and reconciliation suppression during composing text.
+
 ## [0.5.9] - 2026-05-03
 
 ### Fixed
@@ -195,6 +203,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.10]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.9...0.5.10
 [0.5.9]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.8...0.5.9
 [0.5.8]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.7...0.5.8
 [0.5.7]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.6...0.5.7

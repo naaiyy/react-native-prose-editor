@@ -704,7 +704,8 @@ private final class ImageResizeOverlayView: UIView {
 /// For CJK input methods, `setMarkedText` / `unmarkText` are used. During
 /// composition (marked text), we let UITextView handle it normally so the
 /// user sees their composing text. When composition finalizes (`unmarkText`),
-/// we capture the result and route it through Rust.
+/// we commit the final text through Rust at the original Rust-authorized
+/// replacement range.
 ///
 /// ## Thread Safety
 ///
@@ -970,9 +971,12 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     private var pendingDeferredImageSelectionRange: NSRange?
     private var pendingDeferredImageSelectionGeneration: UInt64 = 0
 
-    /// Stores the text that was composed during a marked text session,
-    /// captured when `unmarkText` is called.
-    private var composedText: String?
+    /// Stores the Rust-authorized scalar range replaced by the active marked
+    /// text session. UIKit mutates visible TextKit state during composition,
+    /// so final commits must not infer their range from the transient cursor.
+    private var markedTextReplacementScalarRange: (from: UInt32, to: UInt32)?
+    private var markedTextReplacementUtf16Range: NSRange?
+    private var markedTextCompositionText: String?
 
     private let editorLayoutManager: EditorLayoutManager
 
@@ -1580,6 +1584,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             return
         }
 
+        if markedTextReplacementScalarRange != nil || markedTextRange != nil {
+            let replacementRange = trackedMarkedTextReplacementRange()
+            finishTransientMarkedTextMutation()
+            commitMarkedText(text, replacementRange: replacementRange)
+            return
+        }
+
         // Handle Enter/Return as a block split operation.
         if text == "\n" {
             performInterceptedInput {
@@ -1661,6 +1672,15 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         }
         guard editorId != 0 else {
             super.deleteBackward()
+            return
+        }
+
+        if markedTextReplacementScalarRange != nil || markedTextRange != nil {
+            performTransientTextMutation {
+                super.deleteBackward()
+            }
+            refreshMarkedTextCompositionText()
+            isComposing = markedTextRange != nil || markedTextReplacementScalarRange != nil
             return
         }
 
@@ -1858,6 +1878,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             return
         }
 
+        if markedTextReplacementScalarRange != nil || markedTextRange != nil {
+            let replacementRange = trackedMarkedTextReplacementRange()
+            finishTransientMarkedTextMutation()
+            commitMarkedText(text, replacementRange: replacementRange)
+            return
+        }
+
         let scalarRange = PositionBridge.textRangeToScalarRange(range, in: self)
         Self.inputLog.debug(
             "[replace] text=\(self.preview(text), privacy: .public) scalarRange=\(scalarRange.from)-\(scalarRange.to) selection=\(self.selectionSummary(), privacy: .public) textState=\(self.textSnapshotSummary(), privacy: .public)"
@@ -1884,46 +1911,178 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// decoration). The text is NOT sent to Rust during composition.
     override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
         ensureInternalTextViewDelegate()
-        isComposing = true
+        if markedText != nil {
+            captureMarkedTextReplacementRangeIfNeeded()
+        }
+        isComposing = markedText != nil || markedTextReplacementScalarRange != nil
         Self.inputLog.debug(
             "[setMarkedText] marked=\(self.preview(markedText ?? ""), privacy: .public) nsRange=\(selectedRange.location),\(selectedRange.length) selection=\(self.selectionSummary(), privacy: .public)"
         )
-        super.setMarkedText(markedText, selectedRange: selectedRange)
+        performTransientTextMutation {
+            super.setMarkedText(markedText, selectedRange: selectedRange)
+        }
+        if markedText == nil {
+            clearMarkedTextTracking()
+            restoreAuthorizedTextAfterCancelledCompositionIfNeeded()
+        } else {
+            refreshMarkedTextCompositionText(fallback: markedText)
+        }
     }
 
     /// Called when composition is finalized (user selects a candidate or
     /// presses space/enter to commit).
     ///
-    /// At this point, the composed text is final. We capture it and send
-    /// it to Rust as a single insertion. `unmarkText` in UITextView will
-    /// replace the marked text with the final text in the text storage,
-    /// but we intercept at a higher level.
+    /// At this point, the composed text is final. We capture it and commit it
+    /// to Rust at the original replacement range captured before UIKit mutated
+    /// the transient text storage.
     override func unmarkText() {
         ensureInternalTextViewDelegate()
-        // Capture the finalized composed text before UIKit clears it.
-        composedText = markedTextRange.flatMap { text(in: $0) }
+        let composedText = currentMarkedTextForCommit()
+        let replacementRange = trackedMarkedTextReplacementRange()
 
-        // Prevent selection sync while UIKit commits the marked text, since
-        // the Rust document doesn't have the composed text yet.
-        isApplyingRustState = true
-        super.unmarkText()
-        isApplyingRustState = false
-        isComposing = false
+        finishTransientMarkedTextMutation()
 
-        // Now route the composed text through Rust. The cursor is at the end
-        // of the composed text, so the insert position is cursor - length.
-        if let composed = composedText, !composed.isEmpty, editorId != 0 {
-            let cursorPos = PositionBridge.cursorScalarOffset(in: self)
-            let composedScalars = UInt32(composed.unicodeScalars.count)
-            let insertPos = cursorPos >= composedScalars ? cursorPos - composedScalars : 0
+        if let composed = composedText, !composed.isEmpty {
             Self.inputLog.debug(
-                "[unmarkText] composed=\(self.preview(composed), privacy: .public) cursorPos=\(cursorPos) insertPos=\(insertPos) selection=\(self.selectionSummary(), privacy: .public)"
+                "[unmarkText] composed=\(self.preview(composed), privacy: .public) replacement=\(self.previewMarkedTextReplacementRange(replacementRange), privacy: .public) selection=\(self.selectionSummary(), privacy: .public)"
             )
+            commitMarkedText(composed, replacementRange: replacementRange)
+        } else {
+            restoreAuthorizedTextAfterCancelledCompositionIfNeeded()
+        }
+    }
+
+    private func captureMarkedTextReplacementRangeIfNeeded() {
+        guard markedTextReplacementScalarRange == nil else { return }
+
+        guard let selectedRange = selectedTextRange else {
+            let scalarPos = PositionBridge.cursorScalarOffset(in: self)
+            markedTextReplacementScalarRange = (from: scalarPos, to: scalarPos)
+            markedTextReplacementUtf16Range = NSRange(
+                location: Int(scalarPos),
+                length: 0
+            )
+            return
+        }
+
+        let scalarRange = PositionBridge.textRangeToScalarRange(selectedRange, in: self)
+        let startUtf16 = offset(from: beginningOfDocument, to: selectedRange.start)
+        let endUtf16 = offset(from: beginningOfDocument, to: selectedRange.end)
+
+        markedTextReplacementScalarRange = (from: scalarRange.from, to: scalarRange.to)
+        markedTextReplacementUtf16Range = NSRange(
+            location: min(startUtf16, endUtf16),
+            length: abs(endUtf16 - startUtf16)
+        )
+    }
+
+    private func trackedMarkedTextReplacementRange() -> (from: UInt32, to: UInt32)? {
+        if let markedTextReplacementScalarRange {
+            return markedTextReplacementScalarRange
+        }
+        guard let selectedRange = selectedTextRange else { return nil }
+        let scalarRange = PositionBridge.textRangeToScalarRange(selectedRange, in: self)
+        return (from: scalarRange.from, to: scalarRange.to)
+    }
+
+    private func clearMarkedTextTracking() {
+        markedTextReplacementScalarRange = nil
+        markedTextReplacementUtf16Range = nil
+        markedTextCompositionText = nil
+        isComposing = false
+    }
+
+    private func finishTransientMarkedTextMutation() {
+        performTransientTextMutation {
+            super.unmarkText()
+        }
+        clearMarkedTextTracking()
+    }
+
+    private func performTransientTextMutation(_ action: () -> Void) {
+        let wasApplyingRustState = isApplyingRustState
+        isApplyingRustState = true
+        action()
+        isApplyingRustState = wasApplyingRustState
+    }
+
+    private func currentMarkedTextForCommit() -> String? {
+        markedTextRange.flatMap { text(in: $0) }
+            ?? markedTextCompositionText
+            ?? transientMarkedTextFromAuthorizedDiff()
+    }
+
+    private func refreshMarkedTextCompositionText(fallback: String? = nil) {
+        markedTextCompositionText = markedTextRange.flatMap { text(in: $0) }
+            ?? transientMarkedTextFromAuthorizedDiff()
+            ?? fallback
+    }
+
+    private func transientMarkedTextFromAuthorizedDiff() -> String? {
+        guard let replacementRange = markedTextReplacementUtf16Range else { return nil }
+
+        let currentText = textStorage.string as NSString
+        let authorizedText = lastAuthorizedText as NSString
+        let replacementEnd = replacementRange.location + replacementRange.length
+        guard replacementRange.location >= 0,
+              replacementEnd <= authorizedText.length
+        else {
+            return nil
+        }
+
+        let insertedLength = currentText.length - (authorizedText.length - replacementRange.length)
+        guard insertedLength >= 0,
+              replacementRange.location + insertedLength <= currentText.length
+        else {
+            return nil
+        }
+
+        return currentText.substring(
+            with: NSRange(location: replacementRange.location, length: insertedLength)
+        )
+    }
+
+    private func commitMarkedText(
+        _ text: String,
+        replacementRange: (from: UInt32, to: UInt32)?
+    ) {
+        guard editorId != 0 else { return }
+        guard let replacementRange else {
             performInterceptedInput {
-                insertTextInRust(composed, at: insertPos)
+                insertTextInRust(text, at: PositionBridge.cursorScalarOffset(in: self))
+            }
+            return
+        }
+
+        performInterceptedInput {
+            if replacementRange.from == replacementRange.to {
+                insertTextInRust(text, at: replacementRange.from)
+            } else {
+                replaceTextRangeInRust(
+                    from: replacementRange.from,
+                    to: replacementRange.to,
+                    with: text
+                )
             }
         }
-        composedText = nil
+    }
+
+    private func restoreAuthorizedTextAfterCancelledCompositionIfNeeded() {
+        guard editorId != 0 else { return }
+        guard textStorage.string != lastAuthorizedText else { return }
+
+        let stateJSON = editorGetCurrentState(id: editorId)
+        applyUpdateJSON(stateJSON)
+    }
+
+    private func previewMarkedTextReplacementRange(
+        _ range: (from: UInt32, to: UInt32)?
+    ) -> String {
+        guard let range else { return "none" }
+        let utf16 = markedTextReplacementUtf16Range
+            .map { "\($0.location)..<\($0.location + $0.length)" }
+            ?? "none"
+        return "scalar=\(range.from)..<\(range.to) utf16=\(utf16)"
     }
 
     // MARK: - Paste Handling
@@ -1993,7 +2152,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView === self else { return }
         ensureInternalTextViewDelegate()
-        guard !isApplyingRustState else { return }
+        guard !isApplyingRustState, !isComposing else { return }
         if normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded() {
             return
         }
@@ -2174,7 +2333,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     private func syncSelectionToRustAndNotifyDelegate() {
-        guard !isApplyingRustState, editorId != 0 else { return }
+        guard !isApplyingRustState, !isComposing, editorId != 0 else { return }
         guard let range = selectedTextRange else { return }
 
         let anchor = PositionBridge.textViewToScalar(range.start, in: self)
@@ -2765,6 +2924,19 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             "[rust.insertTextScalar] text=\(self.preview(text), privacy: .public) scalarPos=\(scalarPos) selection=\(self.selectionSummary(), privacy: .public)"
         )
         let updateJSON = editorInsertTextScalar(id: editorId, scalarPos: scalarPos, text: text)
+        applyUpdateJSON(updateJSON)
+    }
+
+    private func replaceTextRangeInRust(from: UInt32, to: UInt32, with text: String) {
+        Self.inputLog.debug(
+            "[rust.replaceTextScalar] text=\(self.preview(text), privacy: .public) scalar=\(from)-\(to) selection=\(self.selectionSummary(), privacy: .public)"
+        )
+        let updateJSON = editorReplaceTextScalar(
+            id: editorId,
+            scalarFrom: from,
+            scalarTo: to,
+            text: text
+        )
         applyUpdateJSON(updateJSON)
     }
 
@@ -4205,7 +4377,7 @@ extension EditorTextView: NSTextStorageDelegate {
         guard editedMask.contains(.editedCharacters) else { return }
 
         // Skip if this change came from our own Rust apply path.
-        guard !isApplyingRustState, !isInterceptingInput else { return }
+        guard !isApplyingRustState, !isInterceptingInput, !isComposing else { return }
 
         // Skip if no editor is bound yet (nothing to reconcile against).
         guard editorId != 0 else { return }
@@ -4247,7 +4419,7 @@ extension EditorTextView: NSTextStorageDelegate {
             guard let self else { return }
             self.reconciliationWorkScheduled = false
 
-            guard !self.isApplyingRustState, !self.isInterceptingInput else { return }
+            guard !self.isApplyingRustState, !self.isInterceptingInput, !self.isComposing else { return }
             guard self.editorId != 0 else { return }
             guard self.textStorage.string != self.lastAuthorizedText else { return }
 

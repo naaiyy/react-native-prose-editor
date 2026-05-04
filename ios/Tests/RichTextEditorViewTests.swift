@@ -1125,6 +1125,106 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertEqual(textView.textStorage.string, authorizedText)
     }
 
+    func testMarkedTextDoesNotReconcileWhileCompositionIsTransient() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("brave ", selectedRange: NSRange(location: 6, length: 0))
+
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+        XCTAssertEqual(textView.reconciliationCount, 0)
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<p>Hello world</p>",
+            "marked text should stay visible-only until the IME commits it"
+        )
+    }
+
+    func testUnmarkTextCommitsAtOriginalAuthorizedOffset() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("brave ", selectedRange: NSRange(location: 6, length: 0))
+        textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello brave world</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+    }
+
+    func testUnmarkTextReplacesOriginalAuthorizedSelection() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setSelection(in: textView, utf16Range: NSRange(location: 6, length: 5))
+
+        textView.setMarkedText("there", selectedRange: NSRange(location: 5, length: 0))
+        textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello there")
+    }
+
+    func testInsertTextDuringMarkedCompositionUsesOriginalReplacementRange() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("brav", selectedRange: NSRange(location: 4, length: 0))
+        textView.insertText("brave ")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello brave world</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+    }
+
+    func testUpdatedMarkedTextStillUsesOriginalAuthorizedOffset() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("abc ", selectedRange: NSRange(location: 3, length: 0))
+        textView.setMarkedText("ab ", selectedRange: NSRange(location: 3, length: 0))
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello world</p>")
+
+        textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello ab world</p>")
+    }
+
+    func testDeleteBackwardDuringMarkedCompositionDoesNotMutateRust() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("abc ", selectedRange: NSRange(location: 3, length: 0))
+        textView.deleteBackward()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello world</p>")
+
+        textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello world</p>")
+    }
+
     func testAdjustedCaretRectUsesBaselineAndFontMetrics() {
         let font = UIFont.systemFont(ofSize: 16)
         let adjusted = EditorTextView.adjustedCaretRect(

@@ -1,6 +1,7 @@
 package com.apollohg.editor
 
 import android.view.KeyEvent
+import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
 
@@ -16,11 +17,11 @@ import android.view.inputmethod.InputConnectionWrapper
  *
  * ## Composition (IME) Handling
  *
- * For CJK input methods (and swipe keyboards), [setComposingText] and
- * [finishComposingText] are used. During composition, we let the base [InputConnection]
- * handle composing text normally so the user sees their in-progress input with the
- * composing underline. When composition finalizes ([finishComposingText]), we capture
- * the result and route it through Rust.
+ * For CJK input methods, swipe keyboards, and some autocorrect flows, [setComposingText],
+ * [commitText], and [finishComposingText] are used together. During composition, we let
+ * the base [InputConnection] render transient composing text, but keep the original
+ * Rust-authorized replacement range so the final committed text lands at the correct
+ * document position.
  *
  * ## Key Events
  *
@@ -70,6 +71,8 @@ class EditorInputConnection(
 
     /** Tracks the current composing text for CJK/swipe input. */
     private var composingText: String? = null
+    private var composingReplacementStartUtf16: Int? = null
+    private var composingReplacementEndUtf16: Int? = null
 
     /**
      * Called when the IME commits finalized text (single character, word,
@@ -82,7 +85,26 @@ class EditorInputConnection(
         if (editorView.isApplyingRustState) {
             return super.commitText(text, newCursorPosition)
         }
-        text?.toString()?.let { editorView.handleTextCommit(it) }
+        if (editorView.editorId == 0L) {
+            return super.commitText(text, newCursorPosition)
+        }
+
+        val committedText = text?.toString()
+        val replacementRange = trackedCompositionReplacementRange()
+        if (replacementRange != null && committedText != null) {
+            clearCompositionTracking()
+            editorView.runWithTransientInputMutationGuard {
+                super.finishComposingText()
+            }
+            editorView.handleCompositionCommit(
+                committedText,
+                replacementRange.first,
+                replacementRange.second
+            )
+        } else {
+            clearCompositionTracking()
+            committedText?.let { editorView.handleTextCommit(it) }
+        }
         return true
     }
 
@@ -99,6 +121,13 @@ class EditorInputConnection(
         if (editorView.isApplyingRustState) {
             return super.deleteSurroundingText(beforeLength, afterLength)
         }
+        if (trackedCompositionReplacementRange() != null) {
+            val result = editorView.runWithTransientInputMutationGuard {
+                super.deleteSurroundingText(beforeLength, afterLength)
+            }
+            refreshComposingTextFromEditable()
+            return result
+        }
         editorView.handleDelete(beforeLength, afterLength)
         return true
     }
@@ -107,6 +136,13 @@ class EditorInputConnection(
         if (!editorView.isEditable) return false
         if (editorView.isApplyingRustState) {
             return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+        }
+        if (trackedCompositionReplacementRange() != null) {
+            val result = editorView.runWithTransientInputMutationGuard {
+                super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+            }
+            refreshComposingTextFromEditable()
+            return result
         }
 
         val currentText = editorView.text?.toString().orEmpty()
@@ -132,12 +168,27 @@ class EditorInputConnection(
      *
      * We let the base InputConnection handle this normally so the user sees
      * the composing text with its underline decoration. The text is NOT sent
-     * to Rust during composition — only when [finishComposingText] is called.
+     * to Rust during composition — only when the IME commits or finishes it.
      */
     override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
         if (!editorView.isEditable) return super.setComposingText(text, newCursorPosition)
+        if (editorView.editorId == 0L) return super.setComposingText(text, newCursorPosition)
+        captureCompositionReplacementRangeIfNeeded()
         composingText = text?.toString()
-        return super.setComposingText(text, newCursorPosition)
+        return editorView.runWithTransientInputMutationGuard {
+            super.setComposingText(text, newCursorPosition)
+        }
+    }
+
+    override fun setComposingRegion(start: Int, end: Int): Boolean {
+        if (!editorView.isEditable) return super.setComposingRegion(start, end)
+        if (editorView.editorId == 0L) return super.setComposingRegion(start, end)
+        val authorizedLength = editorView.text?.length ?: 0
+        composingReplacementStartUtf16 = minOf(start, end).coerceIn(0, authorizedLength)
+        composingReplacementEndUtf16 = maxOf(start, end).coerceIn(0, authorizedLength)
+        return editorView.runWithTransientInputMutationGuard {
+            super.setComposingRegion(start, end)
+        }
     }
 
     /**
@@ -149,20 +200,58 @@ class EditorInputConnection(
      */
     override fun finishComposingText(): Boolean {
         if (!editorView.isEditable) return super.finishComposingText()
+        if (editorView.editorId == 0L) return super.finishComposingText()
         val composed = composingText
-        composingText = null
+        val replacementRange = trackedCompositionReplacementRange()
+        clearCompositionTracking()
 
         // Prevent selection sync while the base connection commits the composed
         // text, since the Rust document doesn't have it yet.
-        editorView.isApplyingRustState = true
-        val result = super.finishComposingText()
-        editorView.isApplyingRustState = false
+        val result = editorView.runWithTransientInputMutationGuard {
+            super.finishComposingText()
+        }
 
         // Now route the composed text through Rust.
-        if (!editorView.isApplyingRustState) {
-            editorView.handleCompositionFinished(composed)
+        if (replacementRange != null && !composed.isNullOrEmpty()) {
+            editorView.handleCompositionCommit(
+                composed,
+                replacementRange.first,
+                replacementRange.second
+            )
         }
         return result
+    }
+
+    private fun captureCompositionReplacementRangeIfNeeded() {
+        if (trackedCompositionReplacementRange() != null) return
+        val start = editorView.selectionStart.coerceAtLeast(0)
+        val end = editorView.selectionEnd.coerceAtLeast(0)
+        val authorizedLength = editorView.text?.length ?: 0
+        composingReplacementStartUtf16 = minOf(start, end).coerceIn(0, authorizedLength)
+        composingReplacementEndUtf16 = maxOf(start, end).coerceIn(0, authorizedLength)
+    }
+
+    private fun trackedCompositionReplacementRange(): Pair<Int, Int>? {
+        val start = composingReplacementStartUtf16 ?: return null
+        val end = composingReplacementEndUtf16 ?: return null
+        return start to end
+    }
+
+    private fun clearCompositionTracking() {
+        composingText = null
+        composingReplacementStartUtf16 = null
+        composingReplacementEndUtf16 = null
+    }
+
+    private fun refreshComposingTextFromEditable() {
+        val editable = editorView.text ?: return
+        val start = BaseInputConnection.getComposingSpanStart(editable)
+        val end = BaseInputConnection.getComposingSpanEnd(editable)
+        if (start < 0 || end < 0 || start > end || end > editable.length) {
+            composingText = null
+            return
+        }
+        composingText = editable.subSequence(start, end).toString()
     }
 
     /**
