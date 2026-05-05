@@ -301,6 +301,16 @@ class RichTextEditorView @JvmOverloads constructor(
         )
     }
 
+    internal fun caretRect(): RectF? {
+        val rect = editorEditText.caretRect() ?: return null
+        return RectF(
+            editorViewport.left + editorScrollView.left + editorEditText.left + rect.left,
+            editorViewport.top + editorScrollView.top + editorEditText.top + rect.top - editorScrollView.scrollY,
+            editorViewport.left + editorScrollView.left + editorEditText.left + rect.right,
+            editorViewport.top + editorScrollView.top + editorEditText.top + rect.bottom - editorScrollView.scrollY
+        )
+    }
+
     internal fun maximumImageWidthPx(): Float {
         val availableWidth =
             maxOf(editorEditText.width, editorEditText.measuredWidth) -

@@ -380,6 +380,10 @@ class NativeEditorModule : Module() {
                 view.blur()
             }
 
+            AsyncFunction("getCaretRect") { view: NativeEditorExpoView ->
+                view.getCaretRectJson()
+            }
+
             AsyncFunction("applyEditorUpdate") { view: NativeEditorExpoView, updateJson: String ->
                 view.applyEditorUpdate(updateJson)
             }

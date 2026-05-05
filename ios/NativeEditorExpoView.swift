@@ -1626,7 +1626,8 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         inputViewStyle: .keyboard
     )
     private let accessoryPlaceholder = EditorAccessoryPlaceholderView(frame: .zero)
-    private var toolbarFrameInWindow: CGRect?
+    private var toolbarFramesInWindow: [CGRect] = []
+    private var lastToolbarTouchUptime: TimeInterval = -Double.infinity
     private var didApplyAutoFocus = false
     private var toolbarState = NativeToolbarState.empty
     private var toolbarItems: [NativeToolbarItem] = NativeToolbarItem.defaults
@@ -1855,17 +1856,32 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         lastToolbarFrameJSON = toolbarFrameJson
         guard let toolbarFrameJson,
               let data = toolbarFrameJson.data(using: .utf8),
-              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let x = (raw["x"] as? NSNumber)?.doubleValue,
-              let y = (raw["y"] as? NSNumber)?.doubleValue,
-              let width = (raw["width"] as? NSNumber)?.doubleValue,
-              let height = (raw["height"] as? NSNumber)?.doubleValue
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            toolbarFrameInWindow = nil
+            toolbarFramesInWindow = []
             return
         }
 
-        toolbarFrameInWindow = CGRect(x: x, y: y, width: width, height: height)
+        if let frameDictionaries = raw["frames"] as? [[String: Any]] {
+            toolbarFramesInWindow = frameDictionaries.compactMap(Self.toolbarFrame(from:))
+            return
+        }
+
+        toolbarFramesInWindow = Self.toolbarFrame(from: raw).map { [$0] } ?? []
+    }
+
+    private static func toolbarFrame(from raw: [String: Any]) -> CGRect? {
+        guard let x = (raw["x"] as? NSNumber)?.doubleValue,
+              let y = (raw["y"] as? NSNumber)?.doubleValue,
+              let width = (raw["width"] as? NSNumber)?.doubleValue,
+              let height = (raw["height"] as? NSNumber)?.doubleValue,
+              width > 0,
+              height > 0
+        else {
+            return nil
+        }
+
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 
     func setPendingEditorUpdateJson(_ editorUpdateJson: String?) {
@@ -1904,6 +1920,30 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         richTextView.textView.resignFirstResponder()
     }
 
+    func getCaretRectJson() -> String? {
+        layoutIfNeeded()
+        richTextView.layoutIfNeeded()
+
+        guard let caretRect = richTextView.currentCaretRect() else {
+            return nil
+        }
+        let editorRect = richTextView.convert(caretRect, to: self)
+        let payload: [String: Any] = [
+            "x": editorRect.minX,
+            "y": editorRect.minY,
+            "width": editorRect.width,
+            "height": editorRect.height,
+            "editorWidth": bounds.width,
+            "editorHeight": bounds.height,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        return json
+    }
+
     // MARK: - Focus Notifications
 
     @objc private func textViewDidBeginEditing(_ notification: Notification) {
@@ -1914,6 +1954,13 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     @objc private func textViewDidEndEditing(_ notification: Notification) {
+        if shouldPreserveFocusAfterToolbarTouch() {
+            DispatchQueue.main.async { [weak self] in
+                self?.richTextView.textView.becomeFirstResponder()
+            }
+            return
+        }
+
         uninstallOutsideTapRecognizer()
         richTextView.textView.refreshSelectionVisualState()
         clearMentionQueryStateAndHidePopover()
@@ -1952,11 +1999,26 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         guard gestureRecognizer === outsideTapGestureRecognizer else { return true }
         guard let tapWindow = gestureWindow ?? window else { return true }
         let locationInWindow = touch.location(in: tapWindow)
+        if isLocationInStandaloneToolbarFrame(locationInWindow) {
+            markRecentToolbarTouch()
+        }
         let result = shouldHandleOutsideTap(
             locationInWindow: locationInWindow,
             touchedView: touch.view
         )
         return result
+    }
+
+    private func markRecentToolbarTouch() {
+        lastToolbarTouchUptime = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func shouldPreserveFocusAfterToolbarTouch() -> Bool {
+        ProcessInfo.processInfo.systemUptime - lastToolbarTouchUptime <= 0.75
+    }
+
+    private func isLocationInStandaloneToolbarFrame(_ locationInWindow: CGPoint) -> Bool {
+        toolbarFramesInWindow.contains(where: { $0.contains(locationInWindow) })
     }
 
     private func shouldHandleOutsideTap(
@@ -1975,7 +2037,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         if let touchedView, touchedView.isDescendant(of: accessoryToolbar) {
             return false
         }
-        if let toolbarFrameInWindow, toolbarFrameInWindow.contains(locationInWindow) {
+        if isLocationInStandaloneToolbarFrame(locationInWindow) {
             return false
         }
         return true

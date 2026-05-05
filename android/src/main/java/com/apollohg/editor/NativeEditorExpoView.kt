@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -61,7 +62,8 @@ class NativeEditorExpoView(
     private var lastEmittedContentHeight = 0
     private var outsideTapWindowCallback: Window.Callback? = null
     private var previousWindowCallback: Window.Callback? = null
-    private var toolbarFrameInWindow: RectF? = null
+    private var toolbarFramesInWindow: List<RectF> = emptyList()
+    private var lastToolbarTouchUptimeMs: Long? = null
     private var addons = NativeEditorAddons(null)
     private var mentionQueryState: MentionQueryState? = null
     private var lastMentionEventJson: String? = null
@@ -91,7 +93,7 @@ class NativeEditorExpoView(
         ViewCompat.setOnApplyWindowInsetsListener(keyboardToolbarView) { _, insets ->
             currentImeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
             updateKeyboardToolbarLayout()
-            updateKeyboardToolbarVisibility()
+            updateAttachedKeyboardToolbarForInsets()
             insets
         }
 
@@ -101,6 +103,12 @@ class NativeEditorExpoView(
                 installOutsideTapBlurHandlerIfNeeded()
                 refreshMentionQuery()
             } else {
+                if (shouldPreserveFocusAfterToolbarTouch()) {
+                    richTextView.editorEditText.post {
+                        focus()
+                    }
+                    return@setOnFocusChangeListener
+                }
                 uninstallOutsideTapBlurHandler()
                 clearMentionQueryState()
             }
@@ -195,21 +203,50 @@ class NativeEditorExpoView(
         if (lastToolbarFrameJson == toolbarFrameJson) return
         lastToolbarFrameJson = toolbarFrameJson
         if (toolbarFrameJson.isNullOrBlank()) {
-            toolbarFrameInWindow = null
+            toolbarFramesInWindow = emptyList()
             return
         }
 
-        toolbarFrameInWindow = try {
+        toolbarFramesInWindow = try {
             val json = JSONObject(toolbarFrameJson)
-            RectF(
-                json.optDouble("x").toFloat(),
-                json.optDouble("y").toFloat(),
-                (json.optDouble("x") + json.optDouble("width")).toFloat(),
-                (json.optDouble("y") + json.optDouble("height")).toFloat()
-            )
+            val frames = json.optJSONArray("frames")
+            if (frames != null) {
+                buildList {
+                    for (index in 0 until frames.length()) {
+                        frames.optJSONObject(index)?.toToolbarFrame()?.let { add(it) }
+                    }
+                }
+            } else {
+                listOfNotNull(json.toToolbarFrame())
+            }
         } catch (_: Throwable) {
-            null
+            emptyList()
         }
+    }
+
+    private fun JSONObject.toToolbarFrame(): RectF? {
+        val x = optDouble("x", Double.NaN)
+        val y = optDouble("y", Double.NaN)
+        val width = optDouble("width", Double.NaN)
+        val height = optDouble("height", Double.NaN)
+        if (
+            x.isNaN() || x.isInfinite() ||
+            y.isNaN() || y.isInfinite() ||
+            width.isNaN() || width.isInfinite() ||
+            height.isNaN() || height.isInfinite()
+        ) {
+            return null
+        }
+        if (width <= 0.0 || height <= 0.0) {
+            return null
+        }
+
+        return RectF(
+            x.toFloat(),
+            y.toFloat(),
+            (x + width).toFloat(),
+            (y + height).toFloat()
+        )
     }
 
     fun setPendingEditorUpdateJson(editorUpdateJson: String?) {
@@ -230,12 +267,31 @@ class NativeEditorExpoView(
 
     fun focus() {
         richTextView.editorEditText.requestFocus()
+        richTextView.editorEditText.post {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.showSoftInput(richTextView.editorEditText, InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     fun blur() {
+        clearRecentToolbarTouch()
         richTextView.editorEditText.clearFocus()
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.hideSoftInputFromWindow(richTextView.editorEditText.windowToken, 0)
+    }
+
+    fun getCaretRectJson(): String? {
+        if (width <= 0 || height <= 0) return null
+        val rect = richTextView.caretRect() ?: return null
+        val density = resources.displayMetrics.density
+        return JSONObject()
+            .put("x", rect.left / density)
+            .put("y", rect.top / density)
+            .put("width", rect.width() / density)
+            .put("height", rect.height() / density)
+            .put("editorWidth", width / density)
+            .put("editorHeight", height / density)
+            .toString()
     }
 
     override fun onDetachedFromWindow() {
@@ -404,24 +460,85 @@ class NativeEditorExpoView(
         if (isTouchInsideKeyboardToolbar(event)) {
             return false
         }
-        val toolbarFrame = toolbarFrameInWindow
-        if (toolbarFrame != null) {
-            // toolbarFrame is in DP (from React Native's measureInWindow),
-            // but rawX/rawY are in pixels — convert before comparing.
-            val density = resources.displayMetrics.density
-            val frameInPx = RectF(
-                toolbarFrame.left * density,
-                toolbarFrame.top * density,
-                toolbarFrame.right * density,
-                toolbarFrame.bottom * density
-            )
-            if (frameInPx.contains(event.rawX, event.rawY)) {
-                return false
-            }
+        if (isTouchInsideStandaloneToolbar(event)) {
+            markRecentToolbarTouch()
+            return false
         }
         val rect = Rect()
         richTextView.editorEditText.getGlobalVisibleRect(rect)
         return !rect.contains(event.rawX.toInt(), event.rawY.toInt())
+    }
+
+    private fun markRecentToolbarTouch() {
+        lastToolbarTouchUptimeMs = SystemClock.uptimeMillis()
+    }
+
+    private fun clearRecentToolbarTouch() {
+        lastToolbarTouchUptimeMs = null
+    }
+
+    private fun shouldPreserveFocusAfterToolbarTouch(): Boolean {
+        val lastToolbarTouch = lastToolbarTouchUptimeMs ?: return false
+        val elapsedMs = SystemClock.uptimeMillis() - lastToolbarTouch
+        return elapsedMs in 0L..TOOLBAR_FOCUS_PRESERVE_MS
+    }
+
+    internal fun markRecentToolbarTouchForTesting() {
+        markRecentToolbarTouch()
+    }
+
+    internal fun shouldPreserveFocusAfterToolbarTouchForTesting(): Boolean =
+        shouldPreserveFocusAfterToolbarTouch()
+
+    private fun isTouchInsideStandaloneToolbar(event: MotionEvent): Boolean {
+        val visibleWindowFrame = Rect()
+        getWindowVisibleDisplayFrame(visibleWindowFrame)
+        return isPointInsideStandaloneToolbar(event.rawX, event.rawY, visibleWindowFrame)
+    }
+
+    internal fun isPointInsideStandaloneToolbarForTesting(
+        rawX: Float,
+        rawY: Float,
+        visibleWindowFrame: Rect
+    ): Boolean = isPointInsideStandaloneToolbar(rawX, rawY, visibleWindowFrame)
+
+    private fun isPointInsideStandaloneToolbar(
+        rawX: Float,
+        rawY: Float,
+        visibleWindowFrame: Rect
+    ): Boolean {
+        if (toolbarFramesInWindow.isEmpty()) {
+            return false
+        }
+        // toolbarFrame is in DP from React Native's measureInWindow. On Android
+        // that is window-relative after visible-window insets are subtracted,
+        // while rawX/rawY are screen pixels. Fabric/newer implementations may
+        // differ here, so accept both window-relative and raw-screen comparisons.
+        val density = resources.displayMetrics.density
+        val hitSlopPx = TOOLBAR_HIT_SLOP_DP * density
+        val eventX = rawX - visibleWindowFrame.left
+        val eventY = rawY - visibleWindowFrame.top
+        for (toolbarFrame in toolbarFramesInWindow) {
+            val windowFrameInPx = RectF(
+                toolbarFrame.left * density,
+                toolbarFrame.top * density,
+                toolbarFrame.right * density,
+                toolbarFrame.bottom * density
+            ).apply {
+                inset(-hitSlopPx, -hitSlopPx)
+            }
+            val screenFrameInPx = RectF(windowFrameInPx).apply {
+                offset(visibleWindowFrame.left.toFloat(), visibleWindowFrame.top.toFloat())
+            }
+            if (
+                windowFrameInPx.contains(rawX, rawY) ||
+                windowFrameInPx.contains(eventX, eventY) ||
+                screenFrameInPx.contains(rawX, rawY)
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun isTouchInsideKeyboardToolbar(event: MotionEvent): Boolean {
@@ -431,6 +548,11 @@ class NativeEditorExpoView(
         val rect = Rect()
         keyboardToolbarView.getGlobalVisibleRect(rect)
         return rect.contains(event.rawX.toInt(), event.rawY.toInt())
+    }
+
+    private companion object {
+        private const val TOOLBAR_HIT_SLOP_DP = 8f
+        private const val TOOLBAR_FOCUS_PRESERVE_MS = 750L
     }
 
     private fun resolveActivity(context: Context): Activity? {
@@ -656,6 +778,11 @@ class NativeEditorExpoView(
         params.rightMargin = horizontalInsetPx
         params.bottomMargin = currentImeBottom + keyboardOffsetPx
         keyboardToolbarView.layoutParams = params
+    }
+
+    private fun updateAttachedKeyboardToolbarForInsets() {
+        keyboardToolbarView.visibility = if (currentImeBottom > 0) View.VISIBLE else View.INVISIBLE
+        updateEditorViewportInset()
     }
 
     private fun updateKeyboardToolbarVisibility() {

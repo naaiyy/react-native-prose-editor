@@ -551,6 +551,18 @@ class EditorEditText @JvmOverloads constructor(
         }
     }
 
+    internal fun caretRect(): RectF? {
+        val textLayout = layout ?: return null
+        val selectionOffset = selectionEnd.takeIf { it >= 0 } ?: return null
+        val clampedOffset = selectionOffset.coerceIn(0, textLayout.text.length)
+        val line = textLayout.getLineForOffset(clampedOffset)
+        val caretLeft = textLayout.getPrimaryHorizontal(clampedOffset)
+        val left = totalPaddingLeft + caretLeft - scrollX
+        val top = totalPaddingTop + textLayout.getLineTop(line) - scrollY
+        val bottom = totalPaddingTop + textLayout.getLineBottom(line) - scrollY
+        return RectF(left, top.toFloat(), left + 1f, bottom.toFloat())
+    }
+
     // ── Input Handling: Text Commit ─────────────────────────────────────
 
     /**

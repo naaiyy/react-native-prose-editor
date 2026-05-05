@@ -221,6 +221,7 @@ let mockEditorIdCounter = 0;
 const mockApplyEditorUpdate = jest.fn();
 const mockNativeFocus = jest.fn();
 const mockNativeBlur = jest.fn();
+const mockNativeGetCaretRect = jest.fn();
 
 const mockNativeModule = {
     editorCreate: jest.fn((_configJson: string) => ++mockEditorIdCounter),
@@ -292,6 +293,7 @@ jest.mock('expo-modules-core', () => {
             React.useImperativeHandle(ref, () => ({
                 focus: mockNativeFocus,
                 blur: mockNativeBlur,
+                getCaretRect: mockNativeGetCaretRect,
                 applyEditorUpdate: mockApplyEditorUpdate,
             }));
             return React.createElement(View, { testID: 'native-editor-view', ...props });
@@ -312,6 +314,11 @@ import { render, act, fireEvent } from '@testing-library/react-native';
 import { PixelRatio, Platform, StyleSheet } from 'react-native';
 
 import { NativeRichTextEditor, type NativeRichTextEditorRef } from '../NativeRichTextEditor';
+import {
+    _beginEditorToolbarInteractionForTests,
+    _resetEditorToolbarFrameRegistryForTests,
+    _setEditorToolbarFrameForTests,
+} from '../EditorToolbar';
 import { _resetNativeModuleCache } from '../NativeEditorBridge';
 
 // ─── Tests ──────────────────────────────────────────────────────
@@ -319,10 +326,12 @@ import { _resetNativeModuleCache } from '../NativeEditorBridge';
 describe('NativeRichTextEditor', () => {
     beforeEach(() => {
         _resetNativeModuleCache();
+        _resetEditorToolbarFrameRegistryForTests();
         mockEditorIdCounter = 0;
         mockApplyEditorUpdate.mockClear();
         mockNativeFocus.mockClear();
         mockNativeBlur.mockClear();
+        mockNativeGetCaretRect.mockReset();
 
         // Reset all mocks to defaults (mockClear only clears call history,
         // mockReset also clears return values and implementations)
@@ -1234,6 +1243,44 @@ describe('NativeRichTextEditor', () => {
             expect(text).toBe('test content');
         });
 
+        it('getCaretRect returns the native caret rectangle', async () => {
+            const ref = createRef<NativeRichTextEditorRef>();
+            mockNativeGetCaretRect.mockResolvedValue(
+                JSON.stringify({
+                    x: 8,
+                    y: 32,
+                    width: 2,
+                    height: 20,
+                    editorWidth: 320,
+                    editorHeight: 64,
+                })
+            );
+            render(<NativeRichTextEditor ref={ref} />);
+
+            await expect(ref.current!.getCaretRect()).resolves.toEqual({
+                x: 8,
+                y: 32,
+                width: 2,
+                height: 20,
+                editorWidth: 320,
+                editorHeight: 64,
+            });
+            expect(mockNativeGetCaretRect.mock.contexts[0]).toEqual(
+                expect.objectContaining({
+                    getCaretRect: mockNativeGetCaretRect,
+                    applyEditorUpdate: mockApplyEditorUpdate,
+                })
+            );
+        });
+
+        it('getCaretRect returns null when native cannot measure the caret', async () => {
+            const ref = createRef<NativeRichTextEditorRef>();
+            mockNativeGetCaretRect.mockResolvedValue(null);
+            render(<NativeRichTextEditor ref={ref} />);
+
+            await expect(ref.current!.getCaretRect()).resolves.toBeNull();
+        });
+
         it('undo calls bridge.undo and applyEditorUpdate', () => {
             const ref = createRef<NativeRichTextEditorRef>();
             render(<NativeRichTextEditor ref={ref} />);
@@ -1766,6 +1813,90 @@ describe('NativeRichTextEditor', () => {
             const { getByTestId } = render(<NativeRichTextEditor toolbarPlacement='inline' />);
 
             expect(getByTestId('native-editor-js-toolbar')).toBeTruthy();
+        });
+
+        it('passes standalone toolbar frames to native while focused', () => {
+            const { getByTestId } = render(<NativeRichTextEditor showToolbar={false} />);
+
+            act(() => {
+                _setEditorToolbarFrameForTests(1, { x: 12, y: 24, width: 320, height: 48 });
+            });
+            act(() => {
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: true },
+                });
+            });
+
+            expect(JSON.parse(getByTestId('native-editor-view').props.toolbarFrameJson)).toEqual({
+                x: 12,
+                y: 24,
+                width: 320,
+                height: 48,
+            });
+        });
+
+        it('clears standalone toolbar frames when blurred', () => {
+            const { getByTestId } = render(<NativeRichTextEditor showToolbar={false} />);
+
+            act(() => {
+                _setEditorToolbarFrameForTests(1, { x: 12, y: 24, width: 320, height: 48 });
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: true },
+                });
+            });
+
+            expect(getByTestId('native-editor-view').props.toolbarFrameJson).toBeDefined();
+
+            act(() => {
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: false },
+                });
+            });
+
+            expect(getByTestId('native-editor-view').props.toolbarFrameJson).toBeUndefined();
+        });
+
+        it('restores focus instead of emitting blur during standalone toolbar interaction', () => {
+            const onBlur = jest.fn();
+            const { getByTestId } = render(
+                <NativeRichTextEditor showToolbar={false} onBlur={onBlur} />
+            );
+
+            act(() => {
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: true },
+                });
+            });
+            mockNativeFocus.mockClear();
+
+            act(() => {
+                _beginEditorToolbarInteractionForTests();
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: false },
+                });
+            });
+
+            expect(onBlur).not.toHaveBeenCalled();
+            expect(mockNativeFocus).toHaveBeenCalled();
+        });
+
+        it('serializes multiple standalone toolbar frames for native outside-tap filtering', () => {
+            const { getByTestId } = render(<NativeRichTextEditor showToolbar={false} />);
+
+            act(() => {
+                _setEditorToolbarFrameForTests(1, { x: 12, y: 24, width: 320, height: 48 });
+                _setEditorToolbarFrameForTests(2, { x: 0, y: 480, width: 390, height: 56 });
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: true },
+                });
+            });
+
+            expect(JSON.parse(getByTestId('native-editor-view').props.toolbarFrameJson)).toEqual({
+                frames: [
+                    { x: 12, y: 24, width: 320, height: 48 },
+                    { x: 0, y: 480, width: 390, height: 56 },
+                ],
+            });
         });
 
         it('applies theme.toolbar.marginTop to the inline JS toolbar chrome', () => {

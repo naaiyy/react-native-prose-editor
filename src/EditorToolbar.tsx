@@ -180,6 +180,117 @@ interface ToolbarMenuState {
     height: number;
 }
 
+export interface EditorToolbarFrame {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+type EditorToolbarFrameListener = () => void;
+
+const editorToolbarFrames = new Map<number, EditorToolbarFrame>();
+const editorToolbarFrameListeners = new Set<EditorToolbarFrameListener>();
+let nextEditorToolbarRegistrationId = 1;
+let activeEditorToolbarInteractions = 0;
+let editorToolbarFocusPreserveUntil = 0;
+const EDITOR_TOOLBAR_FOCUS_PRESERVE_MS = 750;
+
+function areToolbarFramesEqual(
+    left: EditorToolbarFrame | undefined,
+    right: EditorToolbarFrame | undefined
+): boolean {
+    return (
+        left?.x === right?.x &&
+        left?.y === right?.y &&
+        left?.width === right?.width &&
+        left?.height === right?.height
+    );
+}
+
+function notifyEditorToolbarFrameListeners() {
+    editorToolbarFrameListeners.forEach((listener) => listener());
+}
+
+function getEditorToolbarFramesSnapshot(): EditorToolbarFrame[] {
+    return Array.from(editorToolbarFrames.values());
+}
+
+function registerEditorToolbarFrame(id: number, frame: EditorToolbarFrame | null) {
+    if (frame == null || frame.width <= 0 || frame.height <= 0) {
+        if (editorToolbarFrames.delete(id)) {
+            notifyEditorToolbarFrameListeners();
+        }
+        return;
+    }
+
+    const currentFrame = editorToolbarFrames.get(id);
+    if (areToolbarFramesEqual(currentFrame, frame)) {
+        return;
+    }
+
+    editorToolbarFrames.set(id, frame);
+    notifyEditorToolbarFrameListeners();
+}
+
+function unregisterEditorToolbarFrame(id: number) {
+    if (editorToolbarFrames.delete(id)) {
+        notifyEditorToolbarFrameListeners();
+    }
+}
+
+function preserveEditorToolbarFocusForNextBlur() {
+    editorToolbarFocusPreserveUntil = Date.now() + EDITOR_TOOLBAR_FOCUS_PRESERVE_MS;
+}
+
+function beginEditorToolbarInteraction() {
+    activeEditorToolbarInteractions += 1;
+    preserveEditorToolbarFocusForNextBlur();
+}
+
+function endEditorToolbarInteraction() {
+    activeEditorToolbarInteractions = Math.max(0, activeEditorToolbarInteractions - 1);
+    preserveEditorToolbarFocusForNextBlur();
+}
+
+export function isEditorToolbarFocusPreservationActive(): boolean {
+    return activeEditorToolbarInteractions > 0 || Date.now() <= editorToolbarFocusPreserveUntil;
+}
+
+export function useEditorToolbarFrames(): readonly EditorToolbarFrame[] {
+    const [frames, setFrames] = useState<EditorToolbarFrame[]>(getEditorToolbarFramesSnapshot);
+
+    useEffect(() => {
+        const listener = () => setFrames(getEditorToolbarFramesSnapshot());
+        editorToolbarFrameListeners.add(listener);
+        listener();
+        return () => {
+            editorToolbarFrameListeners.delete(listener);
+        };
+    }, []);
+
+    return frames;
+}
+
+export function _setEditorToolbarFrameForTests(id: number, frame: EditorToolbarFrame | null) {
+    registerEditorToolbarFrame(id, frame);
+}
+
+export function _resetEditorToolbarFrameRegistryForTests() {
+    editorToolbarFrames.clear();
+    activeEditorToolbarInteractions = 0;
+    editorToolbarFocusPreserveUntil = 0;
+    notifyEditorToolbarFrameListeners();
+}
+
+export function _beginEditorToolbarInteractionForTests() {
+    beginEditorToolbarInteraction();
+}
+
+export function _endEditorToolbarInteractionForTests() {
+    endEditorToolbarInteraction();
+}
+
 type ToolbarRenderedItem =
     | { type: 'separator'; key: string }
     | { type: 'button'; button: ToolbarButton }
@@ -280,6 +391,11 @@ export interface EditorToolbarProps {
     theme?: EditorToolbarTheme;
     /** Whether to render the built-in top separator line. */
     showTopBorder?: boolean;
+    /**
+     * Keep NativeRichTextEditor focused when this toolbar is rendered outside
+     * the editor wrapper. Defaults to true.
+     */
+    preserveEditorFocus?: boolean;
 }
 
 const BUTTON_HIT = 44;
@@ -376,16 +492,23 @@ export function EditorToolbar({
     toolbarItems = DEFAULT_EDITOR_TOOLBAR_ITEMS,
     theme,
     showTopBorder,
+    preserveEditorFocus = true,
 }: EditorToolbarProps) {
     const marks = activeState.marks ?? {};
     const nodes = activeState.nodes ?? {};
     const commands = activeState.commands ?? {};
     const allowedMarks = activeState.allowedMarks ?? [];
     const insertableNodes = activeState.insertableNodes ?? [];
+    const rootRef = useRef<View | null>(null);
     const groupButtonRefs = useRef(new Map<string, View | null>());
     const { width: windowWidth, height: windowHeight } = useWindowDimensions();
     const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
     const [menuState, setMenuState] = useState<ToolbarMenuState | null>(null);
+    const toolbarInteractionActiveRef = useRef(false);
+    const registrationIdRef = useRef<number | null>(null);
+    if (registrationIdRef.current == null) {
+        registrationIdRef.current = nextEditorToolbarRegistrationId++;
+    }
 
     const isMarkActive = useCallback((mark: string) => !!marks[mark], [marks]);
 
@@ -677,6 +800,62 @@ export function EditorToolbar({
     }, [expandedGroupKey, menuState?.groupKey, resolveButton, toolbarItems]);
 
     const resolvedShowTopBorder = showTopBorder ?? theme?.showTopBorder ?? true;
+    const publishToolbarFrame = useCallback(() => {
+        const registrationId = registrationIdRef.current;
+        const toolbar = rootRef.current;
+        if (!preserveEditorFocus || registrationId == null || !toolbar) {
+            if (registrationId != null) {
+                unregisterEditorToolbarFrame(registrationId);
+            }
+            return;
+        }
+
+        if (typeof toolbar.measureInWindow !== 'function') {
+            return;
+        }
+
+        toolbar.measureInWindow((x, y, width, height) => {
+            registerEditorToolbarFrame(registrationId, { x, y, width, height });
+        });
+    }, [preserveEditorFocus]);
+
+    const handleToolbarLayout = useCallback(() => {
+        requestAnimationFrame(publishToolbarFrame);
+    }, [publishToolbarFrame]);
+
+    useEffect(() => {
+        if (!preserveEditorFocus) {
+            const registrationId = registrationIdRef.current;
+            if (registrationId != null) {
+                unregisterEditorToolbarFrame(registrationId);
+            }
+            return;
+        }
+
+        const frame = requestAnimationFrame(publishToolbarFrame);
+        return () => cancelAnimationFrame(frame);
+    }, [
+        expandedGroupKey,
+        menuState?.groupKey,
+        preserveEditorFocus,
+        publishToolbarFrame,
+        renderedItems.length,
+        windowHeight,
+        windowWidth,
+    ]);
+
+    useEffect(() => {
+        const registrationId = registrationIdRef.current;
+        return () => {
+            if (toolbarInteractionActiveRef.current) {
+                toolbarInteractionActiveRef.current = false;
+                endEditorToolbarInteraction();
+            }
+            if (registrationId != null) {
+                unregisterEditorToolbarFrame(registrationId);
+            }
+        };
+    }, []);
 
     useEffect(() => {
         if (expandedGroupKey != null && !groupsByKey.has(expandedGroupKey)) {
@@ -697,6 +876,20 @@ export function EditorToolbar({
         }
         setMenuState(null);
     }, []);
+
+    const handleToolbarPressIn = useCallback(() => {
+        if (preserveEditorFocus && !toolbarInteractionActiveRef.current) {
+            toolbarInteractionActiveRef.current = true;
+            beginEditorToolbarInteraction();
+        }
+    }, [preserveEditorFocus]);
+
+    const handleToolbarPressOut = useCallback(() => {
+        if (preserveEditorFocus && toolbarInteractionActiveRef.current) {
+            toolbarInteractionActiveRef.current = false;
+            endEditorToolbarInteraction();
+        }
+    }, [preserveEditorFocus]);
 
     const handleGroupPress = useCallback((group: ToolbarGroupButton) => {
         if (group.isDisabled) {
@@ -787,6 +980,8 @@ export function EditorToolbar({
                 collapsable={false}
                 style={styles.buttonAnchor}>
                 <TouchableOpacity
+                    onPressIn={handleToolbarPressIn}
+                    onPressOut={handleToolbarPressOut}
                     onPress={onPress}
                     disabled={button.isDisabled}
                     style={[
@@ -829,6 +1024,9 @@ export function EditorToolbar({
 
     return (
         <View
+            ref={rootRef}
+            collapsable={false}
+            onLayout={handleToolbarLayout}
             style={[
                 styles.container,
                 !resolvedShowTopBorder && styles.containerWithoutTopBorder,
@@ -906,6 +1104,8 @@ export function EditorToolbar({
                                 return (
                                     <Pressable
                                         key={button.key}
+                                        onPressIn={handleToolbarPressIn}
+                                        onPressOut={handleToolbarPressOut}
                                         onPress={() => handleButtonPress(button)}
                                         disabled={button.isDisabled}
                                         style={({ pressed }) => [

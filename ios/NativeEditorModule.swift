@@ -386,6 +386,9 @@ public class NativeEditorModule: Module {
             AsyncFunction("blur") { (view: NativeEditorExpoView) in
                 view.blur()
             }
+            AsyncFunction("getCaretRect") { (view: NativeEditorExpoView) -> String? in
+                view.getCaretRectJson()
+            }
         }
 
         View(NativeProseViewerExpoView.self) {

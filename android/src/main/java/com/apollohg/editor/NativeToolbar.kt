@@ -11,6 +11,7 @@ import android.view.View
 import android.view.ViewOutlineProvider
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import androidx.appcompat.R as AppCompatR
 import androidx.appcompat.widget.AppCompatButton
 import androidx.appcompat.widget.PopupMenu
 import androidx.appcompat.widget.AppCompatTextView
@@ -834,7 +835,7 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
                     0.38f
                 )
                 active -> theme?.buttonActiveColor ?: resolveColorAttr(
-                    MaterialR.attr.colorPrimary,
+                    AppCompatR.attr.colorPrimary,
                     android.R.attr.textColorPrimary
                 )
                 else -> theme?.buttonColor ?: resolveColorAttr(

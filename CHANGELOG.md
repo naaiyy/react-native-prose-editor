@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.11] - 2026-05-05
+
+### Added
+
+- `NativeRichTextEditorRef.getCaretRect()` returns the current caret rectangle and editor dimensions in editor-local coordinates on iOS and Android.
+- Standalone `EditorToolbar` instances now preserve editor focus by default via measured toolbar hit-test frames, with `preserveEditorFocus={false}` available for embedded toolbar cases.
+
+### Fixed
+
+- Standalone toolbar taps no longer blur the editor or dismiss and immediately re-show the keyboard on Android and iOS.
+- Android standalone toolbar hit testing now handles multiple toolbar frames and Android coordinate-space differences between React Native `measureInWindow` and native raw touch events.
+- Android focus-preservation state now starts inactive and is cleared on real blur so outside taps can still dismiss the keyboard.
+- Android no longer mutates the keyboard toolbar view hierarchy from inside `WindowInsets` dispatch, avoiding a framework `dispatchApplyWindowInsets` null-reference crash.
+- Android native toolbar active-button color resolution now uses the AppCompat `colorPrimary` attribute fallback, avoiding a Material `R.attr.colorPrimary` `NoSuchFieldError`.
+- Added regression coverage for caret geometry, standalone toolbar frame serialization, Android toolbar hit testing, and toolbar focus-preservation state.
+
 ## [0.5.10] - 2026-05-04
 
 ### Fixed
@@ -203,6 +219,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.11]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.10...0.5.11
 [0.5.10]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.9...0.5.10
 [0.5.9]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.8...0.5.9
 [0.5.8]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.7...0.5.8

@@ -98,6 +98,38 @@ final class RichTextEditorViewTests: XCTestCase {
         )
     }
 
+    func testCurrentCaretRectReportsEditorLocalCoordinates() throws {
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.textView.applyRenderJSON("""
+        [
+          {"type":"blockStart","nodeType":"paragraph","depth":0},
+          {"type":"textRun","text":"Hello world","marks":[]},
+          {"type":"blockEnd"}
+        ]
+        """)
+        view.layoutIfNeeded()
+        view.textView.layoutIfNeeded()
+        setCollapsedSelection(in: view.textView, utf16Offset: 5)
+
+        let selectedTextRange = try XCTUnwrap(view.textView.selectedTextRange)
+        let expected = view.textView.convert(
+            view.textView.caretRect(for: selectedTextRange.end),
+            to: view
+        )
+        let actual = try XCTUnwrap(view.currentCaretRect())
+
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 0.1)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 0.1)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 0.1)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 0.1)
+        XCTAssertGreaterThan(actual.height, 0)
+    }
+
     func testEmptyDocumentSelectionDriftSnapsBackBeforePlaceholderForAutocapitalization() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }

@@ -4669,6 +4669,13 @@ final class RichTextEditorView: UIView {
         remoteSelectionOverlayView.refresh()
     }
 
+    func currentCaretRect() -> CGRect? {
+        guard let selectedTextRange = textView.selectedTextRange else { return nil }
+        let rect = textView.caretRect(for: selectedTextRange.end)
+        guard rect.height > 0 else { return nil }
+        return textView.convert(rect, to: self)
+    }
+
     func remoteSelectionOverlaySubviewsForTesting() -> [UIView] {
         remoteSelectionOverlayView.subviews.filter { !$0.isHidden }
     }

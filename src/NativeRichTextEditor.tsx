@@ -32,7 +32,10 @@ import {
 import {
     DEFAULT_EDITOR_TOOLBAR_ITEMS,
     EditorToolbar,
+    isEditorToolbarFocusPreservationActive,
+    useEditorToolbarFrames,
     type EditorToolbarCommand,
+    type EditorToolbarFrame,
     type EditorToolbarGroupChildItem,
     type EditorToolbarHeadingLevel,
     type EditorToolbarIcon,
@@ -62,6 +65,7 @@ import {
 interface NativeEditorViewHandle {
     focus?: () => void;
     blur?: () => void;
+    getCaretRect?: () => Promise<string | null> | string | null;
     applyEditorUpdate: (updateJson: string) => void | Promise<void>;
 }
 
@@ -671,6 +675,56 @@ function serializeRemoteSelections(
     return stringifyCachedJson(remoteSelections);
 }
 
+function areToolbarFramesEqual(
+    left: EditorToolbarFrame | null | undefined,
+    right: EditorToolbarFrame | null | undefined
+): boolean {
+    return (
+        left?.x === right?.x &&
+        left?.y === right?.y &&
+        left?.width === right?.width &&
+        left?.height === right?.height
+    );
+}
+
+function serializeToolbarFrames(
+    frames: readonly EditorToolbarFrame[] | null | undefined
+): string | undefined {
+    if (!frames || frames.length === 0) {
+        return undefined;
+    }
+    return JSON.stringify(frames.length === 1 ? frames[0] : { frames });
+}
+
+function parseCaretRectJson(raw: string | null | undefined): NativeRichTextEditorCaretRect | null {
+    if (!raw) {
+        return null;
+    }
+
+    try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const x = typeof parsed.x === 'number' ? parsed.x : null;
+        const y = typeof parsed.y === 'number' ? parsed.y : null;
+        const width = typeof parsed.width === 'number' ? parsed.width : null;
+        const height = typeof parsed.height === 'number' ? parsed.height : null;
+        const editorWidth = typeof parsed.editorWidth === 'number' ? parsed.editorWidth : null;
+        const editorHeight = typeof parsed.editorHeight === 'number' ? parsed.editorHeight : null;
+        if (
+            x == null ||
+            y == null ||
+            width == null ||
+            height == null ||
+            editorWidth == null ||
+            editorHeight == null
+        ) {
+            return null;
+        }
+        return { x, y, width, height, editorWidth, editorHeight };
+    } catch {
+        return null;
+    }
+}
+
 const serializedJsonCache = new WeakMap<object, string>();
 
 function stringifyCachedJson(value: unknown): string {
@@ -854,6 +908,8 @@ export interface NativeRichTextEditorRef {
     getContentJson(): DocumentJSON;
     /** Get the plain text content (no markup). */
     getTextContent(): string;
+    /** Get the current caret rectangle in editor-local layout coordinates. */
+    getCaretRect(): Promise<NativeRichTextEditorCaretRect | null>;
     /** Undo the last operation. */
     undo(): void;
     /** Redo the last undone operation. */
@@ -862,6 +918,21 @@ export interface NativeRichTextEditorRef {
     canUndo(): boolean;
     /** Check if redo is available. */
     canRedo(): boolean;
+}
+
+export interface NativeRichTextEditorCaretRect {
+    /** Left edge of the caret, relative to the editor root view. */
+    x: number;
+    /** Top edge of the caret, relative to the editor root view. */
+    y: number;
+    /** Caret width. */
+    width: number;
+    /** Caret height. */
+    height: number;
+    /** Current editor root view width. */
+    editorWidth: number;
+    /** Current editor root view height. */
+    editorHeight: number;
 }
 
 interface RunAndApplyOptions {
@@ -918,7 +989,11 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const [isReady, setIsReady] = useState(false);
         const [editorInstanceId, setEditorInstanceId] = useState(0);
         const [isFocused, setIsFocused] = useState(false);
-        const [toolbarFrameJson, setToolbarFrameJson] = useState<string | undefined>(undefined);
+        const isFocusedRef = useRef(false);
+        const [inlineToolbarFrame, setInlineToolbarFrame] = useState<EditorToolbarFrame | null>(
+            null
+        );
+        const registeredToolbarFrames = useEditorToolbarFrames();
         const [pendingNativeUpdate, setPendingNativeUpdate] = useState<{
             json?: string;
             revision: number;
@@ -1298,24 +1373,26 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const updateToolbarFrame = useCallback(() => {
             const toolbar = toolbarRef.current;
             if (!toolbar) {
-                setToolbarFrameJson(undefined);
+                setInlineToolbarFrame(null);
                 return;
             }
 
             toolbar.measureInWindow((x, y, width, height) => {
                 if (width <= 0 || height <= 0) {
-                    setToolbarFrameJson(undefined);
+                    setInlineToolbarFrame(null);
                     return;
                 }
 
-                const nextJson = JSON.stringify({ x, y, width, height });
-                setToolbarFrameJson((prev) => (prev === nextJson ? prev : nextJson));
+                const nextFrame = { x, y, width, height };
+                setInlineToolbarFrame((prev) =>
+                    areToolbarFramesEqual(prev, nextFrame) ? prev : nextFrame
+                );
             });
         }, []);
 
         useEffect(() => {
             if (!(showToolbar && toolbarPlacement === 'inline' && isFocused && editable)) {
-                setToolbarFrameJson(undefined);
+                setInlineToolbarFrame(null);
                 return;
             }
 
@@ -1410,18 +1487,46 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             [syncSelectionStateFromUpdate]
         );
 
-        const handleFocusChange = useCallback((event: NativeSyntheticEvent<NativeFocusEvent>) => {
-            const { isFocused: focused } = event.nativeEvent;
-            setIsFocused(focused);
-            if (!focused) {
-                setMentionQueryEvent(null);
-            }
-            if (focused) {
-                onFocusRef.current?.();
-            } else {
-                onBlurRef.current?.();
-            }
+        const refocusAfterToolbarInteraction = useCallback(() => {
+            nativeViewRef.current?.focus?.();
+            requestAnimationFrame(() => {
+                nativeViewRef.current?.focus?.();
+            });
+            setTimeout(() => {
+                nativeViewRef.current?.focus?.();
+            }, 50);
         }, []);
+
+        const handleFocusChange = useCallback(
+            (event: NativeSyntheticEvent<NativeFocusEvent>) => {
+                const { isFocused: focused } = event.nativeEvent;
+                if (
+                    !focused &&
+                    editable &&
+                    isFocusedRef.current &&
+                    isEditorToolbarFocusPreservationActive()
+                ) {
+                    setIsFocused(true);
+                    refocusAfterToolbarInteraction();
+                    return;
+                }
+
+                const wasFocused = isFocusedRef.current;
+                isFocusedRef.current = focused;
+                setIsFocused(focused);
+                if (!focused) {
+                    setMentionQueryEvent(null);
+                }
+                if (focused) {
+                    if (!wasFocused) {
+                        onFocusRef.current?.();
+                    }
+                } else if (wasFocused) {
+                    onBlurRef.current?.();
+                }
+            },
+            [editable, refocusAfterToolbarInteraction]
+        );
 
         useEffect(() => {
             if (addons?.mentions != null) {
@@ -1773,6 +1878,12 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     if (!bridgeRef.current || bridgeRef.current.isDestroyed) return '';
                     return bridgeRef.current.getHtml().replace(/<[^>]+>/g, '');
                 },
+                async getCaretRect(): Promise<NativeRichTextEditorCaretRect | null> {
+                    const nativeView = nativeViewRef.current;
+                    if (!nativeView?.getCaretRect) return null;
+                    const raw = await Promise.resolve(nativeView.getCaretRect());
+                    return parseCaretRectJson(raw);
+                },
                 undo() {
                     runAndApply(() => bridgeRef.current?.undo() ?? null);
                 },
@@ -1878,6 +1989,16 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         }
         const nativeViewStyle =
             nativeViewStyleParts.length <= 1 ? nativeViewStyleParts[0] : nativeViewStyleParts;
+        const toolbarFrameJson = serializeToolbarFrames(
+            isFocused && editable
+                ? [
+                      ...(toolbarPlacement === 'inline' && inlineToolbarFrame != null
+                          ? [inlineToolbarFrame]
+                          : []),
+                      ...registeredToolbarFrames,
+                  ]
+                : undefined
+        );
         const jsToolbar = (
             <View
                 ref={toolbarRef}
@@ -1989,6 +2110,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                         toolbarItems={toolbarItems}
                         theme={theme?.toolbar}
                         showTopBorder={inlineToolbarShowTopBorder}
+                        preserveEditorFocus={false}
                         onToggleMark={(mark) =>
                             runAndApply(() => bridgeRef.current?.toggleMark(mark) ?? null, {
                                 skipNativeApplyIfContentUnchanged: true,
@@ -2090,9 +2212,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     addonsJson={addonsJson}
                     toolbarItemsJson={toolbarItemsJson}
                     remoteSelectionsJson={remoteSelectionsJson}
-                    toolbarFrameJson={
-                        toolbarPlacement === 'inline' && isFocused ? toolbarFrameJson : undefined
-                    }
+                    toolbarFrameJson={toolbarFrameJson}
                     editorUpdateJson={pendingNativeUpdate.json}
                     editorUpdateRevision={pendingNativeUpdate.revision}
                     onEditorUpdate={handleUpdate}

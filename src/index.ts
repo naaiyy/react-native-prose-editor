@@ -2,6 +2,7 @@ export {
     NativeRichTextEditor,
     type NativeRichTextEditorProps,
     type NativeRichTextEditorRef,
+    type NativeRichTextEditorCaretRect,
     type NativeRichTextEditorHeightBehavior,
     type NativeRichTextEditorToolbarPlacement,
     type RemoteSelectionDecoration,

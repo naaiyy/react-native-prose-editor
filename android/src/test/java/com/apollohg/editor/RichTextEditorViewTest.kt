@@ -888,6 +888,48 @@ class RichTextEditorViewTest {
     }
 
     @Test
+    fun `caret rect is reported in editor view coordinates`() {
+        val context = RuntimeEnvironment.getApplication()
+        val richTextEditorView = RichTextEditorView(context)
+        richTextEditorView.editorEditText.setText("Hello world")
+
+        val widthSpec = View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY)
+        val heightSpec = View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY)
+        richTextEditorView.measure(widthSpec, heightSpec)
+        richTextEditorView.layout(
+            0,
+            0,
+            richTextEditorView.measuredWidth,
+            richTextEditorView.measuredHeight
+        )
+        richTextEditorView.editorEditText.setSelection(5)
+
+        val editTextRect = richTextEditorView.editorEditText.caretRect()
+        val actual = richTextEditorView.caretRect()
+
+        assertNotNull(editTextRect)
+        assertNotNull(actual)
+        assertEquals(
+            richTextEditorView.editorViewport.left +
+                richTextEditorView.editorScrollView.left +
+                richTextEditorView.editorEditText.left +
+                editTextRect!!.left,
+            actual!!.left,
+            0.1f
+        )
+        assertEquals(
+            richTextEditorView.editorViewport.top +
+                richTextEditorView.editorScrollView.top +
+                richTextEditorView.editorEditText.top +
+                editTextRect.top -
+                richTextEditorView.editorScrollView.scrollY,
+            actual.top,
+            0.1f
+        )
+        assertTrue(actual.height() > 0f)
+    }
+
+    @Test
     fun `remote selections expose focused caret geometry without a badge`() {
         val context = RuntimeEnvironment.getApplication()
         val view = RichTextEditorView(context)
