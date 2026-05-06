@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.13] - 2026-05-06
+
+### Fixed
+
+- Android release builds with R8 minification now include package consumer ProGuard rules for the UniFFI/JNA bridge, fixing missing `java.awt.Component` failures from JNA desktop-only references.
+
 ## [0.5.12] - 2026-05-06
 
 ### Fixed
@@ -228,6 +234,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.13]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.12...0.5.13
 [0.5.12]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.11...0.5.12
 [0.5.11]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.10...0.5.11
 [0.5.10]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.9...0.5.10
