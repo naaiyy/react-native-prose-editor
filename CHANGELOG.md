@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.14] - 2026-05-06
+
+### Fixed
+
+- Hardened Android consumer ProGuard rules and JNA dependency metadata so minified apps keep the UniFFI/JNA runtime classes, including `com.sun.jna.Native`.
+
 ## [0.5.13] - 2026-05-06
 
 ### Fixed
@@ -234,6 +240,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.14]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.13...0.5.14
 [0.5.13]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.12...0.5.13
 [0.5.12]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.11...0.5.12
 [0.5.11]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.10...0.5.11

@@ -57,7 +57,9 @@ android {
 dependencies {
     implementation "androidx.appcompat:appcompat:1.7.0"
     implementation "com.google.android.material:material:1.12.0"
-    implementation "net.java.dev.jna:jna:5.18.1@aar"
+    // UniFFI loads the Rust bridge through JNA at runtime. Expose JNA to
+    // consuming apps so release shrinkers see the dependency on the app graph.
+    api "net.java.dev.jna:jna:5.18.1@aar"
 
     testImplementation "junit:junit:4.13.2"
     testImplementation "org.robolectric:robolectric:4.14.1"
