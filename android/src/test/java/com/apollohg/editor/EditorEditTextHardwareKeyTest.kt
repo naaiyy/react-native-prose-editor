@@ -33,7 +33,7 @@ class EditorEditTextHardwareKeyTest {
     }
 
     @Test
-    fun `soft backspace over empty block placeholder routes through scalar fallback`() {
+    fun `soft backspace over empty block placeholder routes caret scalar through fallback`() {
         val editText = EditorEditText(RuntimeEnvironment.getApplication())
         editText.editorId = 1
         editText.isApplyingRustState = true
@@ -48,6 +48,44 @@ class EditorEditTextHardwareKeyTest {
 
         editText.handleDelete(1, 0)
 
-        assertEquals(0 to 0, fallbackSelection)
+        assertEquals(1 to 1, fallbackSelection)
+    }
+
+    @Test
+    fun `soft backspace over escaped list placeholder routes caret scalar through fallback`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.editorId = 1
+        editText.isApplyingRustState = true
+        editText.setText("\u2022 A\n\u2022 B\n\u200B")
+        editText.isApplyingRustState = false
+        editText.setSelection(editText.text?.length ?: 0)
+
+        var fallbackSelection: Pair<Int, Int>? = null
+        editText.onDeleteBackwardAtSelectionScalarInRustForTesting = { anchor, head ->
+            fallbackSelection = anchor to head
+        }
+
+        editText.handleDelete(1, 0)
+
+        assertEquals(9 to 9, fallbackSelection)
+    }
+
+    @Test
+    fun `hardware backspace over escaped list placeholder routes caret scalar through fallback`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.editorId = 1
+        editText.isApplyingRustState = true
+        editText.setText("\u2022 A\n\u2022 B\n\u200B")
+        editText.isApplyingRustState = false
+        editText.setSelection(editText.text?.length ?: 0)
+
+        var fallbackSelection: Pair<Int, Int>? = null
+        editText.onDeleteBackwardAtSelectionScalarInRustForTesting = { anchor, head ->
+            fallbackSelection = anchor to head
+        }
+
+        editText.handleBackspace()
+
+        assertEquals(9 to 9, fallbackSelection)
     }
 }

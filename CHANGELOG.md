@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.12] - 2026-05-06
+
+### Fixed
+
+- Android standalone toolbar taps no longer dismiss the keyboard before the first editor newline has been entered.
+- Android backspace now continues correctly after breaking an empty trailing item out of a multi-item list.
+- Backspacing over list marker prefixes now joins previous list items or unwraps the first item instead of leaving the cursor stuck.
+- Empty-block placeholder backspace handling now sends the caret scalar on Android and tolerates the pre-placeholder scalar path in the Rust core.
+
 ## [0.5.11] - 2026-05-05
 
 ### Added
@@ -219,6 +228,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.12]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.11...0.5.12
 [0.5.11]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.10...0.5.11
 [0.5.10]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.9...0.5.10
 [0.5.9]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.8...0.5.9

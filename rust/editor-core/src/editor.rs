@@ -120,6 +120,11 @@ enum SplitAction {
     ExitBlockquote(u32),
 }
 
+enum ListMarkerBackspaceAction {
+    JoinPreviousItem(u32),
+    UnwrapItem(u32),
+}
+
 // ---------------------------------------------------------------------------
 // Editor
 // ---------------------------------------------------------------------------
@@ -997,6 +1002,17 @@ impl Editor {
             doc_to,
         ) {
             return self.exit_empty_blockquote(quote_pos);
+        }
+        if let Some(action) = self.list_item_marker_backspace_action_for_scalar_delete(
+            scalar_from,
+            scalar_to,
+            doc_from,
+            doc_to,
+        ) {
+            return match action {
+                ListMarkerBackspaceAction::JoinPreviousItem(pos) => self.join_blocks(pos),
+                ListMarkerBackspaceAction::UnwrapItem(pos) => self.unwrap_from_list(pos),
+            };
         }
         if let Some((replace_from, replace_to, content, selection_after)) = self
             .lift_empty_text_block_out_of_list_for_scalar_delete(
@@ -2905,6 +2921,58 @@ impl Editor {
             .map(|context| context.cursor_pos)
     }
 
+    fn list_item_marker_backspace_action_for_scalar_delete(
+        &self,
+        scalar_from: u32,
+        scalar_to: u32,
+        doc_from: u32,
+        doc_to: u32,
+    ) -> Option<ListMarkerBackspaceAction> {
+        if scalar_from >= scalar_to || doc_from != doc_to {
+            return None;
+        }
+        if self.doc_to_scalar(doc_to) != scalar_to {
+            return None;
+        }
+
+        let doc = self.backend.document();
+        let resolved = doc.resolve(doc_to).ok()?;
+        let block = resolved.parent(doc);
+        let block_spec = self.schema.node(block.node_type())?;
+        if !matches!(block_spec.role, NodeRole::TextBlock) {
+            return None;
+        }
+        if resolved.parent_offset != 0 || block.content_size() == 0 {
+            return None;
+        }
+
+        let mut current = doc.root();
+        let mut list_item_depth = None;
+        for (depth, &idx) in resolved.node_path.iter().enumerate() {
+            let child = current.child(idx as usize)?;
+            let spec = self.schema.node(child.node_type())?;
+            if matches!(spec.role, NodeRole::ListItem) {
+                list_item_depth = Some(depth);
+            }
+            current = child;
+        }
+
+        let list_item_depth = list_item_depth?;
+        let block_idx_in_list_item = *resolved.node_path.get(list_item_depth + 1)?;
+        if block_idx_in_list_item != 0 {
+            return None;
+        }
+
+        let list_item_path = resolved.node_path[..=list_item_depth].to_vec();
+        let list_item_idx = resolved.node_path[list_item_depth] as usize;
+        if list_item_idx > 0 {
+            let join_pos = Self::node_delete_start_pos(doc, &list_item_path)?;
+            return Some(ListMarkerBackspaceAction::JoinPreviousItem(join_pos));
+        }
+
+        Some(ListMarkerBackspaceAction::UnwrapItem(doc_to))
+    }
+
     fn lift_empty_text_block_out_of_list_for_scalar_delete(
         &self,
         scalar_from: u32,
@@ -3221,8 +3289,22 @@ impl Editor {
         }
 
         let doc = self.backend.document();
-        let (resolved, block_open) =
-            self.empty_text_block_context_for_scalar_delete(scalar_to, doc_to)?;
+        let (resolved, block_open) = self
+            .empty_text_block_context_for_scalar_delete(scalar_to, doc_to)
+            .or_else(|| {
+                if scalar_to == scalar_from.saturating_add(1) && doc_from < doc_to {
+                    scalar_to
+                        .checked_add(1)
+                        .and_then(|scalar_after_placeholder| {
+                            self.empty_text_block_context_for_scalar_delete(
+                                scalar_after_placeholder,
+                                doc_to,
+                            )
+                        })
+                } else {
+                    None
+                }
+            })?;
         let block = resolved.parent(doc);
         let block_path = &resolved.node_path;
         let &block_index = block_path.last()?;
@@ -3236,7 +3318,12 @@ impl Editor {
         if !previous_sibling.is_element() && !previous_sibling.is_void() {
             return None;
         }
-        if doc_from != doc_to {
+        let same_doc_delete = doc_from == doc_to;
+        let boundary_delete_before_empty_block = scalar_to == scalar_from.saturating_add(1)
+            && doc_from < doc_to
+            && doc_to == block_open.saturating_add(1)
+            && self.doc_to_scalar(doc_from) == scalar_from;
+        if !same_doc_delete && !boundary_delete_before_empty_block {
             return None;
         }
         Some((block_open, block_open + block.node_size()))

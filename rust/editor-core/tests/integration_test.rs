@@ -1424,6 +1424,156 @@ fn test_backspace_again_after_breaking_out_of_list_removes_empty_paragraph() {
 }
 
 #[test]
+fn test_backspace_continues_after_removing_trailing_item_from_multi_item_list() {
+    let mut editor = default_editor();
+    editor
+        .set_html("<ul><li><p>A</p></li><li><p>B</p></li><li><p>C</p></li></ul>")
+        .expect("set_html");
+    editor.set_selection(Selection::cursor(14));
+
+    let delete_c_scalar = editor.doc_to_scalar(14);
+    let delete_c_update = editor
+        .delete_scalar_range(delete_c_scalar - 1, delete_c_scalar)
+        .expect("delete final list item text");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li><li><p></p></li></ul>"
+    );
+
+    let empty_item_cursor = delete_c_update.selection.from(editor.document());
+    let empty_item_scalar = editor.doc_to_scalar(empty_item_cursor);
+    let escaped_update = editor
+        .delete_scalar_range(empty_item_scalar - 1, empty_item_scalar)
+        .expect("break final empty item out of list");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li></ul><p></p>"
+    );
+
+    let escaped_scalar = editor.doc_to_scalar(escaped_update.selection.from(editor.document()));
+    let removed_empty_update = editor
+        .delete_scalar_range(escaped_scalar - 1, escaped_scalar)
+        .expect("remove escaped empty paragraph");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li></ul>"
+    );
+
+    let previous_item_scalar =
+        editor.doc_to_scalar(removed_empty_update.selection.from(editor.document()));
+    editor
+        .delete_scalar_range(previous_item_scalar - 1, previous_item_scalar)
+        .expect("delete previous list item text after removing trailing item");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p></p></li></ul>"
+    );
+}
+
+#[test]
+fn test_backspace_at_start_of_escaped_empty_paragraph_after_list_removes_paragraph() {
+    let mut editor = default_editor();
+    editor
+        .set_html("<ul><li><p>A</p></li><li><p>B</p></li><li><p></p></li></ul>")
+        .expect("set_html");
+    editor.set_selection(Selection::cursor(14));
+
+    let empty_item_scalar = editor.doc_to_scalar(14);
+    editor
+        .delete_backward_at_selection_scalar(empty_item_scalar - 1, empty_item_scalar - 1)
+        .expect("break final empty item out of list");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li></ul><p></p>"
+    );
+
+    editor
+        .delete_backward_at_selection_scalar(8, 8)
+        .expect("backspace from Android placeholder start should remove escaped empty paragraph");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li></ul>"
+    );
+}
+
+#[test]
+fn test_caret_backspace_from_empty_trailing_multi_item_list_item_breaks_out() {
+    let mut editor = default_editor();
+    editor
+        .set_html("<ul><li><p>A</p></li><li><p>B</p></li><li><p></p></li></ul>")
+        .expect("set_html");
+    editor.set_selection(Selection::cursor(14));
+
+    let empty_item_cursor = editor.doc_to_scalar(14);
+    let escaped_update = editor
+        .delete_backward_at_selection_scalar(empty_item_cursor, empty_item_cursor)
+        .expect("caret backspace should break final empty item out of list");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li></ul><p></p>"
+    );
+
+    let escaped_scalar = editor.doc_to_scalar(escaped_update.selection.from(editor.document()));
+    let removed_empty_update = editor
+        .delete_backward_at_selection_scalar(escaped_scalar, escaped_scalar)
+        .expect("caret backspace should remove escaped empty paragraph");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p>B</p></li></ul>"
+    );
+
+    let previous_item_scalar =
+        editor.doc_to_scalar(removed_empty_update.selection.from(editor.document()));
+    editor
+        .delete_scalar_range(previous_item_scalar - 1, previous_item_scalar)
+        .expect("backspace should continue into the previous list item");
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p></li><li><p></p></li></ul>"
+    );
+}
+
+#[test]
+fn test_backspace_from_nonempty_list_item_prefix_joins_previous_item() {
+    let mut editor = default_editor();
+    editor
+        .set_html("<ul><li><p>A</p></li><li><p>B</p></li></ul>")
+        .expect("set_html");
+    editor.set_selection(Selection::cursor(8));
+
+    let item_start_scalar = editor.doc_to_scalar(8);
+    editor
+        .delete_scalar_range(item_start_scalar - 1, item_start_scalar)
+        .expect("backspace over non-empty list marker prefix should join");
+
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li><p>A</p><p>B</p></li></ul>",
+        "backspacing at the start of a non-empty list item should join it with the previous item"
+    );
+}
+
+#[test]
+fn test_backspace_from_first_nonempty_list_item_prefix_unwraps_item() {
+    let mut editor = default_editor();
+    editor
+        .set_html("<ul><li><p>A</p></li><li><p>B</p></li></ul>")
+        .expect("set_html");
+    editor.set_selection(Selection::cursor(3));
+
+    let item_start_scalar = editor.doc_to_scalar(3);
+    editor
+        .delete_scalar_range(item_start_scalar - 1, item_start_scalar)
+        .expect("backspace over first list marker prefix should unwrap");
+
+    assert_eq!(
+        editor.get_html(),
+        "<p>A</p><ul><li><p>B</p></li></ul>",
+        "backspacing at the start of the first non-empty list item should unwrap it"
+    );
+}
+
+#[test]
 fn test_backspace_from_empty_blockquote_paragraph_breaks_out_of_quote() {
     let mut editor = default_editor();
     editor

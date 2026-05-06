@@ -1,6 +1,7 @@
 import { MaterialIcons } from '@expo/vector-icons';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    Keyboard,
     Modal,
     Pressable,
     ScrollView,
@@ -404,6 +405,7 @@ const TOOLBAR_PADDING_H = 12;
 const TOOLBAR_PADDING_V = 4;
 const MENU_MARGIN = 8;
 const MENU_WIDTH = 192;
+const KEYBOARD_FRAME_REMEASURE_DELAYS_MS = [50, 150, 300] as const;
 
 const ACTIVE_BG = 'rgba(0, 122, 255, 0.12)';
 const ACTIVE_COLOR = '#007AFF';
@@ -505,6 +507,8 @@ export function EditorToolbar({
     const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
     const [menuState, setMenuState] = useState<ToolbarMenuState | null>(null);
     const toolbarInteractionActiveRef = useRef(false);
+    const framePublishAnimationFramesRef = useRef<number[]>([]);
+    const framePublishTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const registrationIdRef = useRef<number | null>(null);
     if (registrationIdRef.current == null) {
         registrationIdRef.current = nextEditorToolbarRegistrationId++;
@@ -819,6 +823,27 @@ export function EditorToolbar({
         });
     }, [preserveEditorFocus]);
 
+    const cancelScheduledFramePublishes = useCallback(() => {
+        framePublishAnimationFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
+        framePublishAnimationFramesRef.current = [];
+        framePublishTimeoutsRef.current.forEach((timeout) => clearTimeout(timeout));
+        framePublishTimeoutsRef.current = [];
+    }, []);
+
+    const scheduleToolbarFramePublish = useCallback(() => {
+        if (!preserveEditorFocus) {
+            return;
+        }
+
+        cancelScheduledFramePublishes();
+        publishToolbarFrame();
+
+        framePublishAnimationFramesRef.current.push(requestAnimationFrame(publishToolbarFrame));
+        KEYBOARD_FRAME_REMEASURE_DELAYS_MS.forEach((delay) => {
+            framePublishTimeoutsRef.current.push(setTimeout(publishToolbarFrame, delay));
+        });
+    }, [cancelScheduledFramePublishes, preserveEditorFocus, publishToolbarFrame]);
+
     const handleToolbarLayout = useCallback(() => {
         requestAnimationFrame(publishToolbarFrame);
     }, [publishToolbarFrame]);
@@ -847,6 +872,7 @@ export function EditorToolbar({
     useEffect(() => {
         const registrationId = registrationIdRef.current;
         return () => {
+            cancelScheduledFramePublishes();
             if (toolbarInteractionActiveRef.current) {
                 toolbarInteractionActiveRef.current = false;
                 endEditorToolbarInteraction();
@@ -855,7 +881,25 @@ export function EditorToolbar({
                 unregisterEditorToolbarFrame(registrationId);
             }
         };
-    }, []);
+    }, [cancelScheduledFramePublishes]);
+
+    useEffect(() => {
+        if (!preserveEditorFocus) {
+            cancelScheduledFramePublishes();
+            return;
+        }
+
+        const subscriptions = [
+            Keyboard.addListener('keyboardDidShow', scheduleToolbarFramePublish),
+            Keyboard.addListener('keyboardDidHide', scheduleToolbarFramePublish),
+            Keyboard.addListener('keyboardDidChangeFrame', scheduleToolbarFramePublish),
+        ];
+
+        return () => {
+            subscriptions.forEach((subscription) => subscription.remove());
+            cancelScheduledFramePublishes();
+        };
+    }, [cancelScheduledFramePublishes, preserveEditorFocus, scheduleToolbarFramePublish]);
 
     useEffect(() => {
         if (expandedGroupKey != null && !groupsByKey.has(expandedGroupKey)) {

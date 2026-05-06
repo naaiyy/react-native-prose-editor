@@ -64,6 +64,8 @@ class NativeEditorExpoView(
     private var previousWindowCallback: Window.Callback? = null
     private var toolbarFramesInWindow: List<RectF> = emptyList()
     private var lastToolbarTouchUptimeMs: Long? = null
+    private var pendingOutsideTapBlur: Runnable? = null
+    private var pendingKeyboardDismiss: Runnable? = null
     private var addons = NativeEditorAddons(null)
     private var mentionQueryState: MentionQueryState? = null
     private var lastMentionEventJson: String? = null
@@ -266,6 +268,8 @@ class NativeEditorExpoView(
     }
 
     fun focus() {
+        cancelPendingOutsideTapBlur()
+        cancelPendingKeyboardDismiss()
         richTextView.editorEditText.requestFocus()
         richTextView.editorEditText.post {
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -274,10 +278,53 @@ class NativeEditorExpoView(
     }
 
     fun blur() {
+        cancelPendingOutsideTapBlur()
+        cancelPendingKeyboardDismiss()
         clearRecentToolbarTouch()
         richTextView.editorEditText.clearFocus()
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.hideSoftInputFromWindow(richTextView.editorEditText.windowToken, 0)
+    }
+
+    private fun blurWithDeferredKeyboardDismiss() {
+        cancelPendingKeyboardDismiss()
+        clearRecentToolbarTouch()
+        richTextView.editorEditText.clearFocus()
+        val dismiss = Runnable {
+            pendingKeyboardDismiss = null
+            if (!richTextView.editorEditText.hasFocus()) {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(richTextView.editorEditText.windowToken, 0)
+            }
+        }
+        pendingKeyboardDismiss = dismiss
+        richTextView.editorEditText.post(dismiss)
+    }
+
+    private fun scheduleOutsideTapBlur() {
+        cancelPendingOutsideTapBlur()
+        val blur = Runnable {
+            pendingOutsideTapBlur = null
+            if (richTextView.editorEditText.hasFocus()) {
+                blurWithDeferredKeyboardDismiss()
+            }
+        }
+        pendingOutsideTapBlur = blur
+        richTextView.editorEditText.postDelayed(blur, OUTSIDE_TAP_BLUR_DELAY_MS)
+    }
+
+    private fun cancelPendingOutsideTapBlur() {
+        pendingOutsideTapBlur?.let {
+            richTextView.editorEditText.removeCallbacks(it)
+            pendingOutsideTapBlur = null
+        }
+    }
+
+    private fun cancelPendingKeyboardDismiss() {
+        pendingKeyboardDismiss?.let {
+            richTextView.editorEditText.removeCallbacks(it)
+            pendingKeyboardDismiss = null
+        }
     }
 
     fun getCaretRectJson(): String? {
@@ -296,6 +343,8 @@ class NativeEditorExpoView(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        cancelPendingOutsideTapBlur()
+        cancelPendingKeyboardDismiss()
         uninstallOutsideTapBlurHandler()
         detachKeyboardToolbarIfNeeded()
     }
@@ -430,14 +479,17 @@ class NativeEditorExpoView(
 
         val wrappedCallback = object : Window.Callback by currentCallback {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                if (
+                val shouldBlur =
                     event.action == MotionEvent.ACTION_DOWN &&
                     richTextView.editorEditText.hasFocus() &&
                     isTouchOutsideEditor(event)
-                ) {
-                    blur()
+                val result = currentCallback.dispatchTouchEvent(event)
+                if (shouldBlur) {
+                    scheduleOutsideTapBlur()
+                } else if (event.action == MotionEvent.ACTION_DOWN) {
+                    cancelPendingOutsideTapBlur()
                 }
-                return currentCallback.dispatchTouchEvent(event)
+                return result
             }
         }
 
@@ -458,6 +510,7 @@ class NativeEditorExpoView(
 
     private fun isTouchOutsideEditor(event: MotionEvent): Boolean {
         if (isTouchInsideKeyboardToolbar(event)) {
+            markRecentToolbarTouch()
             return false
         }
         if (isTouchInsideStandaloneToolbar(event)) {
@@ -553,6 +606,7 @@ class NativeEditorExpoView(
     private companion object {
         private const val TOOLBAR_HIT_SLOP_DP = 8f
         private const val TOOLBAR_FOCUS_PRESERVE_MS = 750L
+        private const val OUTSIDE_TAP_BLUR_DELAY_MS = 100L
     }
 
     private fun resolveActivity(context: Context): Activity? {

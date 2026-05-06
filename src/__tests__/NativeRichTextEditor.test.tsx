@@ -1835,7 +1835,7 @@ describe('NativeRichTextEditor', () => {
             });
         });
 
-        it('clears standalone toolbar frames when blurred', () => {
+        it('retains standalone toolbar frames after blur so native hit-testing works during focus transitions', () => {
             const { getByTestId } = render(<NativeRichTextEditor showToolbar={false} />);
 
             act(() => {
@@ -1853,7 +1853,7 @@ describe('NativeRichTextEditor', () => {
                 });
             });
 
-            expect(getByTestId('native-editor-view').props.toolbarFrameJson).toBeUndefined();
+            expect(getByTestId('native-editor-view').props.toolbarFrameJson).toBeDefined();
         });
 
         it('restores focus instead of emitting blur during standalone toolbar interaction', () => {

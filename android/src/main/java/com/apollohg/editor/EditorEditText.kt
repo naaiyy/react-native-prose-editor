@@ -669,7 +669,7 @@ class EditorEditText @JvmOverloads constructor(
             cursor > 0 &&
             currentText.getOrNull(cursor - 1) == EMPTY_BLOCK_PLACEHOLDER
         ) {
-            val scalarCursor = PositionBridge.utf16ToScalar(cursor - 1, currentText)
+            val scalarCursor = PositionBridge.utf16ToScalar(cursor, currentText)
             deleteBackwardAtSelectionScalarInRust(scalarCursor, scalarCursor)
             return
         }
@@ -722,7 +722,7 @@ class EditorEditText @JvmOverloads constructor(
             deleteRangeInRust(scalarStart, scalarEnd)
         } else if (start > 0) {
             if (currentText.getOrNull(start - 1) == EMPTY_BLOCK_PLACEHOLDER) {
-                val scalarCursor = PositionBridge.utf16ToScalar(start - 1, currentText)
+                val scalarCursor = PositionBridge.utf16ToScalar(start, currentText)
                 deleteBackwardAtSelectionScalarInRust(scalarCursor, scalarCursor)
                 return
             }

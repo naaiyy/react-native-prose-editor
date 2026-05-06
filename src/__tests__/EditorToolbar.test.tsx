@@ -10,7 +10,7 @@
 // ────────────────────────────────────────────────────────────────
 
 import React from 'react';
-import { StyleSheet } from 'react-native';
+import { Keyboard, StyleSheet } from 'react-native';
 import { render, fireEvent } from '@testing-library/react-native';
 
 import { EditorToolbar, type EditorToolbarProps } from '../EditorToolbar';
@@ -43,7 +43,8 @@ function renderToolbar(
     overrides: Partial<Omit<EditorToolbarProps, 'activeState' | 'historyState'>> & {
         activeState?: Partial<ActiveState>;
         historyState?: Partial<HistoryState>;
-    } = {}
+    } = {},
+    options?: Parameters<typeof render>[1]
 ) {
     const defaultProps: EditorToolbarProps = {
         activeState: {
@@ -89,7 +90,7 @@ function renderToolbar(
         onRedo: jest.fn(),
         ...overrides,
     };
-    return { ...render(<EditorToolbar {...defaultProps} />), props: defaultProps };
+    return { ...render(<EditorToolbar {...defaultProps} />, options), props: defaultProps };
 }
 
 // ─── Tests ──────────────────────────────────────────────────────
@@ -1133,6 +1134,39 @@ describe('EditorToolbar', () => {
             expect(getByLabelText('Horizontal Rule').props.accessibilityState).toEqual(
                 expect.objectContaining({ disabled: true })
             );
+        });
+    });
+
+    // ── Focus Preservation ─────────────────────────────────────
+
+    describe('focus preservation', () => {
+        it('subscribes to keyboard layout changes while preserving editor focus', () => {
+            const keyboardListeners = new Map<string, () => void>();
+            const removers: jest.Mock[] = [];
+            const addListenerSpy = jest
+                .spyOn(Keyboard, 'addListener')
+                .mockImplementation((eventName, listener) => {
+                    keyboardListeners.set(eventName, listener as () => void);
+                    const remove = jest.fn();
+                    removers.push(remove);
+                    return { remove } as ReturnType<typeof Keyboard.addListener>;
+                });
+
+            try {
+                const { unmount } = renderToolbar();
+
+                expect([...keyboardListeners.keys()]).toEqual([
+                    'keyboardDidShow',
+                    'keyboardDidHide',
+                    'keyboardDidChangeFrame',
+                ]);
+
+                unmount();
+                expect(removers).toHaveLength(3);
+                removers.forEach((remove) => expect(remove).toHaveBeenCalledTimes(1));
+            } finally {
+                addListenerSpy.mockRestore();
+            }
         });
     });
 });

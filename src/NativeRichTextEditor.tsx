@@ -1391,7 +1391,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         }, []);
 
         useEffect(() => {
-            if (!(showToolbar && toolbarPlacement === 'inline' && isFocused && editable)) {
+            if (!(showToolbar && toolbarPlacement === 'inline' && editable)) {
                 setInlineToolbarFrame(null);
                 return;
             }
@@ -1400,7 +1400,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 updateToolbarFrame();
             });
             return () => cancelAnimationFrame(frame);
-        }, [editable, isFocused, showToolbar, toolbarPlacement, updateToolbarFrame]);
+        }, [editable, showToolbar, toolbarPlacement, updateToolbarFrame]);
 
         useEffect(() => {
             if (heightBehavior !== 'autoGrow') {
@@ -1990,7 +1990,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const nativeViewStyle =
             nativeViewStyleParts.length <= 1 ? nativeViewStyleParts[0] : nativeViewStyleParts;
         const toolbarFrameJson = serializeToolbarFrames(
-            isFocused && editable
+            editable
                 ? [
                       ...(toolbarPlacement === 'inline' && inlineToolbarFrame != null
                           ? [inlineToolbarFrame]
