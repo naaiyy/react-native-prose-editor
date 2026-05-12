@@ -311,10 +311,11 @@ jest.mock('expo-modules-core', () => {
 
 import React, { createRef } from 'react';
 import { render, act, fireEvent } from '@testing-library/react-native';
-import { PixelRatio, Platform, StyleSheet } from 'react-native';
+import { PixelRatio, Platform, StyleSheet, View } from 'react-native';
 
 import { NativeRichTextEditor, type NativeRichTextEditorRef } from '../NativeRichTextEditor';
 import {
+    EditorToolbar,
     _beginEditorToolbarInteractionForTests,
     _resetEditorToolbarFrameRegistryForTests,
     _setEditorToolbarFrameForTests,
@@ -497,6 +498,21 @@ describe('NativeRichTextEditor', () => {
         it('passes autoFocus=true to native view', () => {
             const { getByTestId } = render(<NativeRichTextEditor autoFocus />);
             expect(getByTestId('native-editor-view').props.autoFocus).toBe(true);
+        });
+
+        it('passes keyboard input props to native view', () => {
+            const { getByTestId } = render(
+                <NativeRichTextEditor
+                    autoCapitalize='none'
+                    autoCorrect={false}
+                    keyboardType='email-address'
+                />
+            );
+            const viewProps = getByTestId('native-editor-view').props;
+
+            expect(viewProps.autoCapitalize).toBe('none');
+            expect(viewProps.autoCorrect).toBe(false);
+            expect(viewProps.keyboardType).toBe('email-address');
         });
 
         it('passes toolbarPlacement to native view', () => {
@@ -2551,6 +2567,179 @@ describe('NativeRichTextEditor', () => {
                     kind: 'user',
                     label: '@Alice',
                     mentionSuggestionChar: '@',
+                },
+            });
+        });
+
+        it('renders mention suggestions in a standalone EditorToolbar and inserts the selected mention', () => {
+            const onSelect = jest.fn();
+            const resolveTheme = jest.fn(({ attrs }) =>
+                attrs.kind === 'channel'
+                    ? {
+                          textColor: '#0055AA',
+                          backgroundColor: '#E8F2FF',
+                          borderRadius: 18,
+                          fontWeight: '700' as const,
+                      }
+                    : undefined
+            );
+            const { getByTestId, getByText, queryByTestId } = render(
+                <View>
+                    <NativeRichTextEditor
+                        showToolbar={false}
+                        addons={{
+                            mentions: {
+                                theme: {
+                                    backgroundColor: '#FAFAFA',
+                                    popoverBackgroundColor: '#111111',
+                                    popoverBorderColor: '#222222',
+                                    popoverBorderWidth: 2,
+                                    popoverBorderRadius: 16,
+                                    optionTextColor: '#333333',
+                                    optionSecondaryTextColor: '#777777',
+                                    optionHighlightedBackgroundColor: '#DDEEFF',
+                                    optionHighlightedTextColor: '#004488',
+                                },
+                                suggestions: [
+                                    {
+                                        key: 'u1',
+                                        title: 'Alice',
+                                        label: '@Alice',
+                                        subtitle: 'Design',
+                                        attrs: { id: 'u1', kind: 'user' },
+                                    },
+                                    {
+                                        key: 'u2',
+                                        title: 'Bob',
+                                        label: '@Bob',
+                                        attrs: { id: 'u2', kind: 'user' },
+                                    },
+                                ],
+                                resolveSelectionAttrs: ({ suggestion, attrs }) => ({
+                                    ...attrs,
+                                    kind: suggestion.key === 'u1' ? 'channel' : 'user',
+                                }),
+                                resolveTheme,
+                                onSelect,
+                            },
+                        }}
+                    />
+                    <EditorToolbar
+                        activeState={{
+                            marks: {},
+                            markAttrs: {},
+                            nodes: {},
+                            commands: {},
+                            allowedMarks: [],
+                            insertableNodes: [],
+                        }}
+                        historyState={{ canUndo: false, canRedo: false }}
+                        onToggleBold={jest.fn()}
+                        onToggleItalic={jest.fn()}
+                        onToggleUnderline={jest.fn()}
+                        onToggleStrike={jest.fn()}
+                        onUndo={jest.fn()}
+                        onRedo={jest.fn()}
+                    />
+                </View>
+            );
+
+            act(() => {
+                _setEditorToolbarFrameForTests(1, { x: 0, y: 400, width: 390, height: 48 });
+            });
+            act(() => {
+                getByTestId('native-editor-view').props.onFocusChange({
+                    nativeEvent: { isFocused: true },
+                });
+            });
+            act(() => {
+                getByTestId('native-editor-view').props.onAddonEvent({
+                    nativeEvent: {
+                        eventJson: JSON.stringify({
+                            type: 'mentionsQueryChange',
+                            query: 'ali',
+                            trigger: '@',
+                            range: { anchor: 3, head: 7 },
+                            isActive: true,
+                        }),
+                    },
+                });
+            });
+
+            expect(getByTestId('editor-toolbar-mention-suggestions')).toBeTruthy();
+            expect(getByTestId('editor-toolbar-mention-suggestion-u1')).toBeTruthy();
+            expect(queryByTestId('editor-toolbar-mention-suggestion-u2')).toBeNull();
+
+            const suggestionListStyle = StyleSheet.flatten(
+                getByTestId('editor-toolbar-mention-suggestions').props.style
+            );
+            const suggestionChipStyle = StyleSheet.flatten(
+                getByTestId('editor-toolbar-mention-suggestion-u1').props.style
+            );
+            const suggestionTitleStyle = StyleSheet.flatten(getByText('@Alice').props.style);
+
+            expect(suggestionListStyle.backgroundColor).toBe('#111111');
+            expect(suggestionListStyle.borderColor).toBe('#222222');
+            expect(suggestionListStyle.borderWidth).toBe(2);
+            expect(suggestionListStyle.borderRadius).toBe(16);
+            expect(suggestionChipStyle.backgroundColor).toBe('#E8F2FF');
+            expect(suggestionChipStyle.borderRadius).toBe(18);
+            expect(suggestionTitleStyle.color).toBe('#0055AA');
+            expect(suggestionTitleStyle.fontWeight).toBe('700');
+            expect(resolveTheme).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    suggestion: expect.objectContaining({ key: 'u1' }),
+                    attrs: expect.objectContaining({ kind: 'channel' }),
+                })
+            );
+
+            fireEvent.press(getByTestId('editor-toolbar-mention-suggestion-u1'));
+
+            expect(mockNativeModule.editorInsertContentJsonAtSelectionScalar).toHaveBeenCalledWith(
+                1,
+                3,
+                7,
+                JSON.stringify({
+                    type: 'doc',
+                    content: [
+                        {
+                            type: 'mention',
+                            attrs: {
+                                id: 'u1',
+                                kind: 'channel',
+                                label: '@Alice',
+                                mentionSuggestionChar: '@',
+                                mentionTheme: {
+                                    textColor: '#0055AA',
+                                    backgroundColor: '#E8F2FF',
+                                    borderRadius: 18,
+                                    fontWeight: '700',
+                                },
+                            },
+                        },
+                    ],
+                })
+            );
+            expect(onSelect).toHaveBeenCalledWith({
+                trigger: '@',
+                suggestion: {
+                    key: 'u1',
+                    title: 'Alice',
+                    label: '@Alice',
+                    subtitle: 'Design',
+                    attrs: { id: 'u1', kind: 'user' },
+                },
+                attrs: {
+                    id: 'u1',
+                    kind: 'channel',
+                    label: '@Alice',
+                    mentionSuggestionChar: '@',
+                    mentionTheme: {
+                        textColor: '#0055AA',
+                        backgroundColor: '#E8F2FF',
+                        borderRadius: 18,
+                        fontWeight: '700',
+                    },
                 },
             });
         });

@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.text.Annotation
 import android.text.Editable
+import android.text.InputType
 import android.text.Layout
 import android.text.Spanned
 import android.text.StaticLayout
@@ -19,6 +20,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import androidx.appcompat.widget.AppCompatEditText
 import kotlin.math.roundToInt
 import uniffi.editor_core.*  // UniFFI-generated bindings
@@ -162,6 +164,9 @@ class EditorEditText @JvmOverloads constructor(
     var heightBehavior: EditorHeightBehavior = EditorHeightBehavior.FIXED
         private set
     private var imageResizingEnabled = true
+    private var nativeAutoCapitalize = DEFAULT_AUTO_CAPITALIZE
+    private var nativeAutoCorrect = DEFAULT_AUTO_CORRECT
+    private var nativeKeyboardType = DEFAULT_KEYBOARD_TYPE
 
     private var contentInsets: EditorContentInsets? = null
     private var viewportBottomInsetPx: Int = 0
@@ -198,10 +203,7 @@ class EditorEditText @JvmOverloads constructor(
 
     init {
         // Configure for rich text editing.
-        inputType = EditorInfo.TYPE_CLASS_TEXT or
-                EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE or
-                EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT or
-                EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES
+        inputType = resolvedInputType()
 
         // Disable built-in spell checking to avoid conflicts with Rust state.
         // The Rust editor is the source of truth for text content.
@@ -222,6 +224,110 @@ class EditorEditText @JvmOverloads constructor(
         background = null
         linksClickable = false
         updateEffectivePadding()
+    }
+
+    fun setAutoCapitalize(autoCapitalize: String?) {
+        val next = when (autoCapitalize) {
+            "none",
+            "sentences",
+            "words",
+            "characters" -> autoCapitalize
+            else -> DEFAULT_AUTO_CAPITALIZE
+        }
+        if (nativeAutoCapitalize == next) return
+        nativeAutoCapitalize = next
+        applyInputTraits()
+    }
+
+    fun setAutoCorrect(autoCorrect: Boolean?) {
+        val next = autoCorrect ?: DEFAULT_AUTO_CORRECT
+        if (nativeAutoCorrect == next) return
+        nativeAutoCorrect = next
+        applyInputTraits()
+    }
+
+    fun setKeyboardType(keyboardType: String?) {
+        val next = when (keyboardType) {
+            "default",
+            "email-address",
+            "numeric",
+            "phone-pad",
+            "ascii-capable",
+            "numbers-and-punctuation",
+            "url",
+            "number-pad",
+            "name-phone-pad",
+            "decimal-pad",
+            "twitter",
+            "web-search",
+            "visible-password",
+            "ascii-capable-number-pad" -> keyboardType
+            else -> DEFAULT_KEYBOARD_TYPE
+        }
+        if (nativeKeyboardType == next) return
+        nativeKeyboardType = next
+        applyInputTraits()
+    }
+
+    private fun applyInputTraits() {
+        val nextInputType = resolvedInputType()
+        if (inputType == nextInputType) return
+
+        val currentStart = selectionStart
+        val currentEnd = selectionEnd
+        setRawInputType(nextInputType)
+
+        val editable = text
+        if (
+            editable != null &&
+            currentStart >= 0 &&
+            currentEnd >= 0 &&
+            currentStart <= editable.length &&
+            currentEnd <= editable.length
+        ) {
+            setSelection(currentStart, currentEnd)
+        }
+
+        if (hasFocus()) {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.restartInput(this)
+        }
+    }
+
+    private fun resolvedInputType(): Int {
+        var nextInputType = when (nativeKeyboardType) {
+            "email-address" -> InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+            "url" -> InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_URI
+            "phone-pad" -> InputType.TYPE_CLASS_PHONE
+            "number-pad" -> InputType.TYPE_CLASS_NUMBER
+            "decimal-pad" -> InputType.TYPE_CLASS_NUMBER or
+                InputType.TYPE_NUMBER_FLAG_DECIMAL
+            "numeric" -> InputType.TYPE_CLASS_NUMBER or
+                InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                InputType.TYPE_NUMBER_FLAG_SIGNED
+            "visible-password" -> InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            else -> InputType.TYPE_CLASS_TEXT
+        }
+
+        if ((nextInputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT) {
+            nextInputType = nextInputType or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            nextInputType = nextInputType or when (nativeAutoCapitalize) {
+                "none" -> 0
+                "words" -> InputType.TYPE_TEXT_FLAG_CAP_WORDS
+                "characters" -> InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                else -> InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            }
+            nextInputType = nextInputType or if (nativeAutoCorrect) {
+                InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+            } else {
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            }
+        }
+
+        return nextInputType
     }
 
     // ── InputConnection Override ────────────────────────────────────────
@@ -1929,6 +2035,9 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     companion object {
+        private const val DEFAULT_AUTO_CAPITALIZE = "sentences"
+        private const val DEFAULT_AUTO_CORRECT = true
+        private const val DEFAULT_KEYBOARD_TYPE = "default"
         private const val EMPTY_BLOCK_PLACEHOLDER = '\u200B'
         private const val LOG_TAG = "NativeEditor"
     }

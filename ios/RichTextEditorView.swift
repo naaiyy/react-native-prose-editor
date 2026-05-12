@@ -1031,9 +1031,9 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         // Configure the text view as a Rust-controlled editor surface.
         // UIKit smart-edit features mutate text storage outside our transaction
         // pipeline and can race with stored-mark typing after toolbar actions.
-        autocorrectionType = .no
-        autocapitalizationType = .sentences
-        spellCheckingType = .no
+        setAutoCorrect(nil)
+        setAutoCapitalize(nil)
+        setKeyboardType(nil)
         smartQuotesType = .no
         smartDashesType = .no
         smartInsertDeleteType = .no
@@ -1061,6 +1061,63 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         addSubview(placeholderLabel)
         refreshPlaceholderVisibility()
         refreshNativeSelectionChromeVisibility()
+    }
+
+    func setAutoCapitalize(_ autoCapitalize: String?) {
+        switch autoCapitalize {
+        case "none":
+            autocapitalizationType = .none
+        case "words":
+            autocapitalizationType = .words
+        case "characters":
+            autocapitalizationType = .allCharacters
+        default:
+            autocapitalizationType = .sentences
+        }
+    }
+
+    func setAutoCorrect(_ autoCorrect: Bool?) {
+        let isEnabled = autoCorrect ?? false
+        autocorrectionType = isEnabled ? .yes : .no
+        spellCheckingType = isEnabled ? .default : .no
+    }
+
+    func setKeyboardType(_ keyboardType: String?) {
+        self.keyboardType = Self.resolvedKeyboardType(from: keyboardType)
+        if isFirstResponder {
+            reloadInputViews()
+        }
+    }
+
+    private static func resolvedKeyboardType(from keyboardType: String?) -> UIKeyboardType {
+        switch keyboardType {
+        case "ascii-capable":
+            return .asciiCapable
+        case "numbers-and-punctuation":
+            return .numbersAndPunctuation
+        case "url":
+            return .URL
+        case "number-pad":
+            return .numberPad
+        case "phone-pad":
+            return .phonePad
+        case "name-phone-pad":
+            return .namePhonePad
+        case "email-address":
+            return .emailAddress
+        case "decimal-pad", "numeric":
+            return .decimalPad
+        case "twitter":
+            return .twitter
+        case "web-search":
+            return .webSearch
+        case "ascii-capable-number-pad":
+            return .asciiCapableNumberPad
+        case "visible-password":
+            return .asciiCapable
+        default:
+            return .default
+        }
     }
 
     override func didMoveToWindow() {

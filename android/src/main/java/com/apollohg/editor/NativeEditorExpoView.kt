@@ -181,6 +181,18 @@ class NativeEditorExpoView(
         focus()
     }
 
+    fun setAutoCapitalize(autoCapitalize: String?) {
+        richTextView.editorEditText.setAutoCapitalize(autoCapitalize)
+    }
+
+    fun setAutoCorrect(autoCorrect: Boolean?) {
+        richTextView.editorEditText.setAutoCorrect(autoCorrect)
+    }
+
+    fun setKeyboardType(keyboardType: String?) {
+        richTextView.editorEditText.setKeyboardType(keyboardType)
+    }
+
     fun setShowToolbar(showToolbar: Boolean) {
         showsToolbar = showToolbar
         updateKeyboardToolbarVisibility()

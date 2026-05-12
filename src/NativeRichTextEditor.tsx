@@ -3,6 +3,7 @@ import React, {
     useEffect,
     useCallback,
     useImperativeHandle,
+    useMemo,
     useRef,
     useState,
 } from 'react';
@@ -33,6 +34,7 @@ import {
     DEFAULT_EDITOR_TOOLBAR_ITEMS,
     EditorToolbar,
     isEditorToolbarFocusPreservationActive,
+    setEditorToolbarMentionState,
     useEditorToolbarFrames,
     type EditorToolbarCommand,
     type EditorToolbarFrame,
@@ -75,6 +77,9 @@ interface NativeEditorViewProps {
     placeholder?: string;
     editable: boolean;
     autoFocus: boolean;
+    autoCapitalize?: NativeRichTextEditorAutoCapitalize;
+    autoCorrect?: boolean;
+    keyboardType?: NativeRichTextEditorKeyboardType;
     showToolbar: boolean;
     toolbarPlacement: NativeRichTextEditorToolbarPlacement;
     heightBehavior: NativeRichTextEditorHeightBehavior;
@@ -226,6 +231,26 @@ function resolveMentionSuggestionAttrs(
         attrs.mentionSuggestionChar = trigger;
     }
     return attrs;
+}
+
+function mergeMentionSuggestionTheme(
+    baseTheme: EditorMentionTheme | undefined,
+    resolvedTheme: EditorMentionTheme | undefined
+): EditorMentionTheme | undefined {
+    if (baseTheme == null && resolvedTheme == null) {
+        return undefined;
+    }
+
+    const merged: EditorMentionTheme = {
+        ...(baseTheme ?? {}),
+        ...(resolvedTheme ?? {}),
+    };
+
+    if (resolvedTheme?.textColor != null && resolvedTheme.optionTextColor == null) {
+        merged.optionTextColor = resolvedTheme.textColor;
+    }
+
+    return merged;
 }
 
 interface AutoLinkCandidate {
@@ -775,6 +800,22 @@ function useSerializedValue<T>(
 
 export type NativeRichTextEditorHeightBehavior = 'fixed' | 'autoGrow';
 export type NativeRichTextEditorToolbarPlacement = 'keyboard' | 'inline';
+export type NativeRichTextEditorAutoCapitalize = 'none' | 'sentences' | 'words' | 'characters';
+export type NativeRichTextEditorKeyboardType =
+    | 'default'
+    | 'email-address'
+    | 'numeric'
+    | 'phone-pad'
+    | 'ascii-capable'
+    | 'numbers-and-punctuation'
+    | 'url'
+    | 'number-pad'
+    | 'name-phone-pad'
+    | 'decimal-pad'
+    | 'twitter'
+    | 'web-search'
+    | 'visible-password'
+    | 'ascii-capable-number-pad';
 
 export interface RemoteSelectionDecoration {
     clientId: number;
@@ -821,6 +862,12 @@ export interface NativeRichTextEditorProps {
     maxLength?: number;
     /** Whether to auto-focus on mount. */
     autoFocus?: boolean;
+    /** Controls native keyboard auto-capitalization. Defaults to sentences. */
+    autoCapitalize?: NativeRichTextEditorAutoCapitalize;
+    /** Controls native keyboard autocorrection. Defaults to the platform-specific editor default. */
+    autoCorrect?: boolean;
+    /** Controls the native keyboard layout. Defaults to the platform default keyboard. */
+    keyboardType?: NativeRichTextEditorKeyboardType;
     /** Controls whether the editor scrolls internally or grows with content. */
     heightBehavior?: NativeRichTextEditorHeightBehavior;
     /** Whether to show the formatting toolbar. Defaults to true. */
@@ -959,6 +1006,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             editable = true,
             maxLength,
             autoFocus = false,
+            autoCapitalize,
+            autoCorrect,
+            keyboardType,
             heightBehavior = 'autoGrow',
             showToolbar = true,
             toolbarPlacement = 'keyboard',
@@ -1902,6 +1952,108 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             [insertImage, runAndApply]
         );
 
+        const activeMentionTrigger = mentionQueryEvent?.trigger || resolveMentionTrigger(addons);
+        const activeMentionSuggestions = useMemo(
+            () =>
+                isFocused && mentionQueryEvent != null && addons?.mentions != null
+                    ? filterMentionSuggestions(
+                          addons.mentions.suggestions ?? [],
+                          mentionQueryEvent.query,
+                          activeMentionTrigger
+                      )
+                    : [],
+            [activeMentionTrigger, addons?.mentions, isFocused, mentionQueryEvent]
+        );
+        const inlineToolbarMentionTheme = theme?.mentions ?? addons?.mentions?.theme;
+        const activeMentionSuggestionThemes = useMemo(() => {
+            if (
+                mentionQueryEvent == null ||
+                addons?.mentions == null ||
+                typeof addons.mentions.resolveTheme !== 'function' ||
+                activeMentionSuggestions.length === 0
+            ) {
+                return undefined;
+            }
+
+            const suggestionThemes: Record<string, EditorMentionTheme> = {};
+
+            for (const suggestion of activeMentionSuggestions) {
+                const selectionEvent: MentionSelectionAttrsEvent = {
+                    trigger: activeMentionTrigger,
+                    suggestion,
+                    attrs: resolveMentionSuggestionAttrs(suggestion, activeMentionTrigger),
+                    range: mentionQueryEvent.range,
+                };
+                const attrs = resolveMentionSelectionAttrs(selectionEvent);
+                let resolvedTheme: EditorMentionTheme | undefined;
+                try {
+                    const nextTheme = addons.mentions.resolveTheme({
+                        ...selectionEvent,
+                        attrs,
+                    });
+                    resolvedTheme = isRecord(nextTheme)
+                        ? (nextTheme as EditorMentionTheme)
+                        : undefined;
+                } catch (error) {
+                    if (__DEV__) {
+                        console.error('NativeRichTextEditor: mentions.resolveTheme threw', error);
+                    }
+                }
+
+                const mergedTheme = mergeMentionSuggestionTheme(
+                    inlineToolbarMentionTheme,
+                    resolvedTheme
+                );
+                if (mergedTheme != null) {
+                    suggestionThemes[suggestion.key] = mergedTheme;
+                }
+            }
+
+            return Object.keys(suggestionThemes).length > 0 ? suggestionThemes : undefined;
+        }, [
+            activeMentionSuggestions,
+            activeMentionTrigger,
+            addons?.mentions,
+            inlineToolbarMentionTheme,
+            mentionQueryEvent,
+            resolveMentionSelectionAttrs,
+        ]);
+        const shouldPublishStandaloneMentionSuggestions =
+            editable &&
+            !showToolbar &&
+            registeredToolbarFrames.length > 0 &&
+            mentionQueryEvent != null &&
+            activeMentionSuggestions.length > 0 &&
+            addons?.mentions != null;
+        useEffect(() => {
+            if (editorInstanceId === 0) {
+                return;
+            }
+
+            if (!shouldPublishStandaloneMentionSuggestions || mentionQueryEvent == null) {
+                setEditorToolbarMentionState(editorInstanceId, null);
+                return () => setEditorToolbarMentionState(editorInstanceId, null);
+            }
+
+            setEditorToolbarMentionState(editorInstanceId, {
+                trigger: activeMentionTrigger,
+                suggestions: activeMentionSuggestions,
+                theme: inlineToolbarMentionTheme,
+                suggestionThemes: activeMentionSuggestionThemes,
+                onSelectSuggestion: handleInlineMentionSuggestionPress,
+            });
+            return () => setEditorToolbarMentionState(editorInstanceId, null);
+        }, [
+            activeMentionSuggestions,
+            activeMentionSuggestionThemes,
+            activeMentionTrigger,
+            editorInstanceId,
+            handleInlineMentionSuggestionPress,
+            inlineToolbarMentionTheme,
+            mentionQueryEvent,
+            shouldPublishStandaloneMentionSuggestions,
+        ]);
+
         if (!isReady) return null;
 
         const isLinkActive = activeState.marks.link === true;
@@ -1953,7 +2105,6 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         };
         const inlineToolbarMarginTop = theme?.toolbar?.marginTop ?? 8;
         const inlineToolbarShowTopBorder = theme?.toolbar?.showTopBorder ?? false;
-        const inlineToolbarMentionTheme = theme?.mentions ?? addons?.mentions?.theme;
         const inlineToolbarContentTopBorderStyle = inlineToolbarShowTopBorder
             ? {
                   borderTopWidth: theme?.toolbar?.borderWidth ?? StyleSheet.hairlineWidth,
@@ -1961,16 +2112,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
               }
             : null;
         const inlineMentionSuggestions =
-            toolbarPlacement === 'inline' &&
-            isFocused &&
-            mentionQueryEvent != null &&
-            addons?.mentions != null
-                ? filterMentionSuggestions(
-                      addons.mentions.suggestions ?? [],
-                      mentionQueryEvent.query,
-                      mentionQueryEvent.trigger || resolveMentionTrigger(addons)
-                  )
-                : [];
+            toolbarPlacement === 'inline' ? activeMentionSuggestions : [];
         const shouldShowInlineMentionSuggestions =
             shouldRenderJsToolbar &&
             toolbarPlacement === 'inline' &&
@@ -2037,6 +2179,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                                     suggestion,
                                     mentionQueryEvent?.trigger ?? resolveMentionTrigger(addons)
                                 );
+                                const suggestionTheme =
+                                    activeMentionSuggestionThemes?.[suggestion.key] ??
+                                    inlineToolbarMentionTheme;
 
                                 return (
                                     <Pressable
@@ -2051,17 +2196,17 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                                             styles.inlineMentionSuggestion,
                                             {
                                                 backgroundColor: pressed
-                                                    ? (inlineToolbarMentionTheme?.optionHighlightedBackgroundColor ??
+                                                    ? (suggestionTheme?.optionHighlightedBackgroundColor ??
                                                       'rgba(0, 122, 255, 0.12)')
-                                                    : (inlineToolbarMentionTheme?.backgroundColor ??
+                                                    : (suggestionTheme?.backgroundColor ??
                                                       '#F2F2F7'),
                                                 borderColor:
-                                                    inlineToolbarMentionTheme?.borderColor ??
+                                                    suggestionTheme?.borderColor ??
                                                     'transparent',
                                                 borderWidth:
-                                                    inlineToolbarMentionTheme?.borderWidth ?? 0,
+                                                    suggestionTheme?.borderWidth ?? 0,
                                                 borderRadius:
-                                                    inlineToolbarMentionTheme?.borderRadius ?? 12,
+                                                    suggestionTheme?.borderRadius ?? 12,
                                             },
                                         ]}>
                                         {({ pressed }) => (
@@ -2071,12 +2216,15 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                                                     style={[
                                                         styles.inlineMentionSuggestionTitle,
                                                         {
+                                                            fontWeight:
+                                                                suggestionTheme?.fontWeight ??
+                                                                '600',
                                                             color: pressed
-                                                                ? (inlineToolbarMentionTheme?.optionHighlightedTextColor ??
-                                                                  inlineToolbarMentionTheme?.optionTextColor ??
+                                                                ? (suggestionTheme?.optionHighlightedTextColor ??
+                                                                  suggestionTheme?.optionTextColor ??
                                                                   '#000000')
-                                                                : (inlineToolbarMentionTheme?.optionTextColor ??
-                                                                  inlineToolbarMentionTheme?.textColor ??
+                                                                : (suggestionTheme?.optionTextColor ??
+                                                                  suggestionTheme?.textColor ??
                                                                   '#000000'),
                                                         },
                                                     ]}>
@@ -2089,7 +2237,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                                                             styles.inlineMentionSuggestionSubtitle,
                                                             {
                                                                 color:
-                                                                    inlineToolbarMentionTheme?.optionSecondaryTextColor ??
+                                                                    suggestionTheme?.optionSecondaryTextColor ??
                                                                     '#8E8E93',
                                                             },
                                                         ]}>
@@ -2204,6 +2352,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     placeholder={placeholder}
                     editable={editable}
                     autoFocus={autoFocus}
+                    autoCapitalize={autoCapitalize}
+                    autoCorrect={autoCorrect}
+                    keyboardType={keyboardType}
                     showToolbar={showToolbar}
                     toolbarPlacement={toolbarPlacement}
                     heightBehavior={heightBehavior}

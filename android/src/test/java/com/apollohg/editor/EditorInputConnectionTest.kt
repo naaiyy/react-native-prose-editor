@@ -1,5 +1,6 @@
 package com.apollohg.editor
 
+import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import org.json.JSONArray
 import org.json.JSONObject
@@ -16,6 +17,42 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class EditorInputConnectionTest {
+    @Test
+    fun `editor input traits use rich text defaults`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+
+        assertEquals(InputType.TYPE_CLASS_TEXT, editText.inputType and InputType.TYPE_MASK_CLASS)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_MULTI_LINE)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+    }
+
+    @Test
+    fun `editor input traits apply React keyboard props`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+
+        editText.setKeyboardType("email-address")
+        editText.setAutoCapitalize("none")
+        editText.setAutoCorrect(false)
+
+        assertEquals(InputType.TYPE_CLASS_TEXT, editText.inputType and InputType.TYPE_MASK_CLASS)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_MULTI_LINE)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+        assertFalse(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
+        assertFalse(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+    }
+
+    @Test
+    fun `editor numeric keyboard type maps to numeric input class`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+
+        editText.setKeyboardType("numeric")
+
+        assertEquals(InputType.TYPE_CLASS_NUMBER, editText.inputType and InputType.TYPE_MASK_CLASS)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_NUMBER_FLAG_DECIMAL)
+        assertTrue(editText.inputType hasInputFlag InputType.TYPE_NUMBER_FLAG_SIGNED)
+    }
 
     @Test
     fun `code point delete length matches ascii backspace`() {
@@ -182,4 +219,6 @@ class EditorInputConnectionTest {
                 )
             )
             .toString()
+
+    private infix fun Int.hasInputFlag(flag: Int): Boolean = (this and flag) == flag
 }

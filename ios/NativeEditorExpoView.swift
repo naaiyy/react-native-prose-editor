@@ -1802,6 +1802,18 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         focus()
     }
 
+    func setAutoCapitalize(_ autoCapitalize: String?) {
+        richTextView.textView.setAutoCapitalize(autoCapitalize)
+    }
+
+    func setAutoCorrect(_ autoCorrect: Bool?) {
+        richTextView.textView.setAutoCorrect(autoCorrect)
+    }
+
+    func setKeyboardType(_ keyboardType: String?) {
+        richTextView.textView.setKeyboardType(keyboardType)
+    }
+
     func setShowToolbar(_ showToolbar: Bool) {
         showsToolbar = showToolbar
         updateAccessoryToolbarVisibility()
@@ -1913,7 +1925,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     // MARK: - Focus Commands
 
     func focus() {
-        richTextView.textView.becomeFirstResponder()
+        _ = richTextView.textView.becomeFirstResponder()
     }
 
     func blur() {
@@ -1956,7 +1968,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     @objc private func textViewDidEndEditing(_ notification: Notification) {
         if shouldPreserveFocusAfterToolbarTouch() {
             DispatchQueue.main.async { [weak self] in
-                self?.richTextView.textView.becomeFirstResponder()
+                _ = self?.richTextView.textView.becomeFirstResponder()
             }
             return
         }

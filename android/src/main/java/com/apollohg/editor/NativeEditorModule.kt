@@ -336,6 +336,15 @@ class NativeEditorModule : Module() {
             Prop("autoFocus") { view: NativeEditorExpoView, autoFocus: Boolean ->
                 view.setAutoFocus(autoFocus)
             }
+            Prop("autoCapitalize") { view: NativeEditorExpoView, autoCapitalize: String? ->
+                view.setAutoCapitalize(autoCapitalize)
+            }
+            Prop("autoCorrect") { view: NativeEditorExpoView, autoCorrect: Boolean? ->
+                view.setAutoCorrect(autoCorrect)
+            }
+            Prop("keyboardType") { view: NativeEditorExpoView, keyboardType: String? ->
+                view.setKeyboardType(keyboardType)
+            }
             Prop("showToolbar") { view: NativeEditorExpoView, showToolbar: Boolean ->
                 view.setShowToolbar(showToolbar)
             }

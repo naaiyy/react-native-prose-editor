@@ -10,6 +10,28 @@ final class RichTextEditorViewTests: XCTestCase {
         )
     }
 
+    func testEditorTextViewUsesRichTextKeyboardDefaults() {
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+
+        XCTAssertEqual(textView.autocapitalizationType, .sentences)
+        XCTAssertEqual(textView.autocorrectionType, .no)
+        XCTAssertEqual(textView.spellCheckingType, .no)
+        XCTAssertEqual(textView.keyboardType, .default)
+    }
+
+    func testEditorTextViewAppliesReactKeyboardProps() {
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+
+        textView.setAutoCapitalize("characters")
+        textView.setAutoCorrect(true)
+        textView.setKeyboardType("email-address")
+
+        XCTAssertEqual(textView.autocapitalizationType, .allCharacters)
+        XCTAssertEqual(textView.autocorrectionType, .yes)
+        XCTAssertEqual(textView.spellCheckingType, .default)
+        XCTAssertEqual(textView.keyboardType, .emailAddress)
+    }
+
     func testPlaceholderShowsForRenderedEmptyParagraph() {
         let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
         textView.placeholder = "Type here"
