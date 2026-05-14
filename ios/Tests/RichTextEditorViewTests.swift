@@ -1179,6 +1179,35 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertEqual(textView.textStorage.string, authorizedText)
     }
 
+    func testFocusedNativeTextMutationCommitsToRustInsteadOfReconciling() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello world</p>")
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 6, length: 5),
+            with: "there"
+        )
+
+        XCTAssertEqual(view.textView.textStorage.string, "Hello there")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello there")
+    }
+
     func testMarkedTextDoesNotReconcileWhileCompositionIsTransient() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.16] - 2026-05-14
+
+### Fixed
+
+- iOS and Android keyboard suggestions and autocorrections now commit into the Rust-backed editor state instead of being immediately reverted by reconciliation.
+
 ## [0.5.15] - 2026-05-12
 
 ### Added
@@ -252,6 +258,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.16]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.15...0.5.16
 [0.5.15]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.14...0.5.15
 [0.5.14]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.13...0.5.14
 [0.5.13]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.12...0.5.13

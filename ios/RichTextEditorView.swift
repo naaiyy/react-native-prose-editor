@@ -819,6 +819,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let entries: [TopLevelChildMetadata]
     }
 
+    private struct NativeTextMutation {
+        let from: UInt32
+        let to: UInt32
+        let replacementText: String
+        let resultingText: String
+    }
+
     private enum PositionCacheUpdate {
         case scan
         case invalidate
@@ -964,6 +971,8 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// trailing UIKit text-storage callbacks that arrive on the next run loop.
     private var interceptedInputDepth = 0
     private var reconciliationWorkScheduled = false
+    private var nativeTextMutationCommitScheduled = false
+    private var pendingNativeTextMutation: NativeTextMutation?
 
     /// Coalesces selection sync until UIKit has finished resolving the
     /// current tap/drag gesture's final caret position.
@@ -2209,7 +2218,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView === self else { return }
         ensureInternalTextViewDelegate()
-        guard !isApplyingRustState, !isComposing else { return }
+        guard !isApplyingRustState, !isComposing, !nativeTextMutationCommitScheduled else { return }
         if normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded() {
             return
         }
@@ -2390,7 +2399,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     private func syncSelectionToRustAndNotifyDelegate() {
-        guard !isApplyingRustState, !isComposing, editorId != 0 else { return }
+        guard !isApplyingRustState,
+              !isComposing,
+              !nativeTextMutationCommitScheduled,
+              editorId != 0
+        else {
+            return
+        }
         guard let range = selectedTextRange else { return }
 
         let anchor = PositionBridge.textViewToScalar(range.start, in: self)
@@ -2995,6 +3010,94 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             text: text
         )
         applyUpdateJSON(updateJSON)
+    }
+
+    private func nativeTextMutationFromAuthorizedDiff(
+        currentText: String
+    ) -> NativeTextMutation? {
+        let authorizedText = lastAuthorizedText
+        guard currentText != authorizedText else { return nil }
+
+        let authorized = authorizedText as NSString
+        let current = currentText as NSString
+        let sharedLength = min(authorized.length, current.length)
+        var prefix = 0
+        while prefix < sharedLength,
+              authorized.character(at: prefix) == current.character(at: prefix) {
+            prefix += 1
+        }
+
+        var authorizedEnd = authorized.length
+        var currentEnd = current.length
+        while authorizedEnd > prefix,
+              currentEnd > prefix,
+              authorized.character(at: authorizedEnd - 1) == current.character(at: currentEnd - 1) {
+            authorizedEnd -= 1
+            currentEnd -= 1
+        }
+
+        let replacementLength = currentEnd - prefix
+        guard replacementLength >= 0 else { return nil }
+        let replacementText = current.substring(
+            with: NSRange(location: prefix, length: replacementLength)
+        )
+
+        return NativeTextMutation(
+            from: PositionBridge.utf16OffsetToScalar(prefix, in: authorizedText),
+            to: PositionBridge.utf16OffsetToScalar(authorizedEnd, in: authorizedText),
+            replacementText: replacementText,
+            resultingText: currentText
+        )
+    }
+
+    private func shouldAdoptNativeTextStorageMutation() -> Bool {
+        isFirstResponder && isEditable
+    }
+
+    private func scheduleNativeTextMutationCommit(_ mutation: NativeTextMutation) {
+        pendingNativeTextMutation = mutation
+        guard !nativeTextMutationCommitScheduled else { return }
+
+        nativeTextMutationCommitScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.nativeTextMutationCommitScheduled = false
+            guard let mutation = self.pendingNativeTextMutation else { return }
+            self.pendingNativeTextMutation = nil
+
+            guard self.editorId != 0,
+                  !self.isApplyingRustState,
+                  !self.isInterceptingInput,
+                  !self.isComposing,
+                  self.shouldAdoptNativeTextStorageMutation()
+            else {
+                if self.textStorage.string != self.lastAuthorizedText {
+                    self.scheduleReconciliationFromRust()
+                }
+                return
+            }
+            guard self.textStorage.string == mutation.resultingText else {
+                if self.textStorage.string != self.lastAuthorizedText {
+                    self.scheduleReconciliationFromRust()
+                }
+                return
+            }
+
+            self.performInterceptedInput {
+                if mutation.from == mutation.to {
+                    guard !mutation.replacementText.isEmpty else { return }
+                    self.insertTextInRust(mutation.replacementText, at: mutation.from)
+                } else if mutation.replacementText.isEmpty {
+                    self.deleteScalarRangeInRust(from: mutation.from, to: mutation.to)
+                } else {
+                    self.replaceTextRangeInRust(
+                        from: mutation.from,
+                        to: mutation.to,
+                        with: mutation.replacementText
+                    )
+                }
+            }
+        }
     }
 
     private func insertNodeInRust(_ nodeType: String) {
@@ -4443,6 +4546,13 @@ extension EditorTextView: NSTextStorageDelegate {
         let currentText = textStorage.string
         guard currentText != lastAuthorizedText else { return }
         currentTopLevelChildMetadata = nil
+
+        if shouldAdoptNativeTextStorageMutation(),
+           let mutation = nativeTextMutationFromAuthorizedDiff(currentText: currentText) {
+            scheduleNativeTextMutationCommit(mutation)
+            return
+        }
+
         let authorizedPreview = preview(lastAuthorizedText)
         let storagePreview = preview(currentText)
 

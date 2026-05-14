@@ -18,6 +18,7 @@ import android.util.Log
 import android.util.TypedValue
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
@@ -105,6 +106,13 @@ class EditorEditText @JvmOverloads constructor(
     private data class ImageSelectionRange(
         val start: Int,
         val end: Int
+    )
+
+    private data class NativeTextMutation(
+        val scalarFrom: Int,
+        val scalarTo: Int,
+        val replacementText: String,
+        val resultingText: String
     )
 
     /**
@@ -1223,6 +1231,66 @@ class EditorEditText @JvmOverloads constructor(
         applyUpdateJSON(updateJSON)
     }
 
+    private fun nativeTextMutationFromAuthorizedDiff(currentText: String): NativeTextMutation? {
+        val authorizedText = lastAuthorizedText
+        if (currentText == authorizedText) return null
+
+        var prefix = 0
+        val sharedLength = minOf(authorizedText.length, currentText.length)
+        while (
+            prefix < sharedLength &&
+            authorizedText[prefix] == currentText[prefix]
+        ) {
+            prefix++
+        }
+
+        var authorizedEnd = authorizedText.length
+        var currentEnd = currentText.length
+        while (
+            authorizedEnd > prefix &&
+            currentEnd > prefix &&
+            authorizedText[authorizedEnd - 1] == currentText[currentEnd - 1]
+        ) {
+            authorizedEnd--
+            currentEnd--
+        }
+
+        val replacementText = currentText.substring(prefix, currentEnd)
+        return NativeTextMutation(
+            scalarFrom = PositionBridge.utf16ToScalar(prefix, authorizedText),
+            scalarTo = PositionBridge.utf16ToScalar(authorizedEnd, authorizedText),
+            replacementText = replacementText,
+            resultingText = currentText
+        )
+    }
+
+    private fun shouldAdoptNativeTextMutation(editable: Editable?): Boolean {
+        if (!isEditable || !hasFocus()) return false
+        if (editable == null) return true
+
+        val composingStart = BaseInputConnection.getComposingSpanStart(editable)
+        val composingEnd = BaseInputConnection.getComposingSpanEnd(editable)
+        return composingStart < 0 || composingEnd < 0 || composingStart == composingEnd
+    }
+
+    private fun commitNativeTextMutation(mutation: NativeTextMutation) {
+        if ((text?.toString() ?: "") != mutation.resultingText) return
+
+        if (mutation.scalarFrom == mutation.scalarTo) {
+            if (mutation.replacementText.isNotEmpty()) {
+                insertTextInRust(mutation.replacementText, mutation.scalarFrom)
+            }
+        } else if (mutation.replacementText.isEmpty()) {
+            deleteRangeInRust(mutation.scalarFrom, mutation.scalarTo)
+        } else {
+            replaceTextRangeInRust(
+                mutation.scalarFrom,
+                mutation.scalarTo,
+                mutation.replacementText
+            )
+        }
+    }
+
     /**
      * Delete a scalar range via the Rust editor.
      *
@@ -2017,6 +2085,12 @@ class EditorEditText @JvmOverloads constructor(
 
             val currentText = s?.toString() ?: ""
             if (currentText == lastAuthorizedText) return
+
+            val mutation = nativeTextMutationFromAuthorizedDiff(currentText)
+            if (mutation != null && shouldAdoptNativeTextMutation(s)) {
+                commitNativeTextMutation(mutation)
+                return
+            }
 
             // Text has diverged from Rust's authorized state.
             reconciliationCount++

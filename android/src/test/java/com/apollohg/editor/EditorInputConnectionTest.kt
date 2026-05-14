@@ -197,6 +197,45 @@ class EditorInputConnectionTest {
         assertEquals(0, insertedScalar)
     }
 
+    @Test
+    fun `focused native insertion mutation commits to rust instead of reconciliation`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("Hello world"), notifyListener = false)
+        assertTrue(editText.requestFocus())
+        editText.editorId = 1
+
+        var insertedText: String? = null
+        var insertedScalar: Int? = null
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            insertedText = text
+            insertedScalar = scalar
+        }
+
+        editText.text!!.insert(6, "brave ")
+
+        assertEquals("brave ", insertedText)
+        assertEquals(6, insertedScalar)
+        assertEquals(0, editText.reconciliationCount)
+    }
+
+    @Test
+    fun `focused native replacement mutation commits to rust instead of reconciliation`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("Hello world"), notifyListener = false)
+        assertTrue(editText.requestFocus())
+        editText.editorId = 1
+
+        var replacement: Triple<Int, Int, String>? = null
+        editText.onReplaceTextInRustForTesting = { scalarFrom, scalarTo, text ->
+            replacement = Triple(scalarFrom, scalarTo, text)
+        }
+
+        editText.text!!.replace(6, 11, "there")
+
+        assertEquals(Triple(6, 11, "there"), replacement)
+        assertEquals(0, editText.reconciliationCount)
+    }
+
     private fun renderUpdateJson(text: String): String =
         JSONObject()
             .put(
