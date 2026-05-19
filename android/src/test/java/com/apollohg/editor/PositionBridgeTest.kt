@@ -398,6 +398,23 @@ class PositionBridgeTest {
         }
     }
 
+    /** Scalar snapping only repairs surrogate-pair splits. */
+    @Test
+    fun `snapToScalarBoundary - mid surrogate pair`() {
+        val text = "A\uD83D\uDE00B"
+
+        assertEquals(1, PositionBridge.snapToScalarBoundary(2, text, biasForward = false))
+        assertEquals(3, PositionBridge.snapToScalarBoundary(2, text, biasForward = true))
+    }
+
+    /** Ranges expand away from invalid scalar boundaries. */
+    @Test
+    fun `snapRangeToScalarBoundaries - expands split surrogate range`() {
+        val text = "\uD83D\uDE00 ok"
+
+        assertEquals(0 to 2, PositionBridge.snapRangeToScalarBoundaries(1, 1, text))
+    }
+
     // ── Edge Cases ──────────────────────────────────────────────────────
 
     /** Offset beyond string length should be clamped. */

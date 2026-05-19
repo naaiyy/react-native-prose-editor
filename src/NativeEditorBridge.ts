@@ -1,4 +1,5 @@
 import { requireNativeModule } from 'expo-modules-core';
+import { Platform } from 'react-native';
 import type { EditorMentionTheme } from './EditorTheme';
 import { normalizeDocumentJson, type SchemaDefinition } from './schemas';
 
@@ -10,6 +11,7 @@ const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 export interface NativeEditorModule {
     editorCreate(configJson: string): number;
     editorDestroy(editorId: number): void;
+    editorPrepareForCommand?(editorId: number): string;
     collaborationSessionCreate(configJson: string): number;
     collaborationSessionDestroy(sessionId: number): void;
     collaborationSessionGetDocumentJson(sessionId: number): string;
@@ -205,6 +207,16 @@ export interface EditorUpdate {
     documentVersion?: number;
 }
 
+export interface ParseUpdateOptions {
+    rejectSameDocumentVersion?: boolean;
+    rejectVersionlessAfterDocumentVersion?: boolean;
+}
+
+interface RunPreparedCommandOptions {
+    cancelIfPreflightUpdated?: boolean;
+    refreshSelectionAfterPreflight?: boolean;
+}
+
 export interface ContentSnapshot {
     html: string;
     json: DocumentJSON;
@@ -226,6 +238,24 @@ export interface CollaborationResult {
     documentJson?: DocumentJSON;
     peersChanged: boolean;
     peers?: CollaborationPeer[];
+}
+
+interface CommandPreparation {
+    ready: boolean;
+    updateJSON?: string;
+    blockedReason?: CommandBlockedReason;
+}
+
+export type CommandBlockedReason =
+    | 'composition'
+    | 'detached'
+    | 'pendingUpdate'
+    | 'destroyed'
+    | 'unknown';
+
+export interface CommandBlockedInfo {
+    blocked: boolean;
+    reason: CommandBlockedReason | null;
 }
 
 export type EncodedCollaborationStateInput = Uint8Array | readonly number[] | string;
@@ -491,6 +521,34 @@ function normalizeDocumentJsonString(jsonString: string, schema?: SchemaDefiniti
     }
 }
 
+function parseCommandPreparationJson(json: string): CommandPreparation {
+    if (!json) return { ready: true };
+    let parsed: Record<string, unknown>;
+    try {
+        parsed = JSON.parse(json) as Record<string, unknown>;
+    } catch {
+        throw new Error(ERR_NATIVE_RESPONSE);
+    }
+    if (typeof parsed.error === 'string') {
+        throw new Error(`NativeEditorBridge: ${parsed.error}`);
+    }
+    const rawBlockedReason = parsed.blockedReason;
+    const blockedReason =
+        rawBlockedReason === 'composition' ||
+        rawBlockedReason === 'detached' ||
+        rawBlockedReason === 'pendingUpdate' ||
+        rawBlockedReason === 'destroyed'
+            ? rawBlockedReason
+            : rawBlockedReason === 'unknown'
+              ? 'unknown'
+              : undefined;
+    return {
+        ready: parsed.ready !== false,
+        updateJSON: typeof parsed.updateJSON === 'string' ? parsed.updateJSON : undefined,
+        blockedReason,
+    };
+}
+
 export function parseCollaborationResultJson(json: string): CollaborationResult {
     if (!json || json === '') {
         return {
@@ -545,6 +603,11 @@ export class NativeEditorBridge {
     private _cachedHtml: { version: number; value: string } | null = null;
     private _cachedJsonString: { version: number; value: string } | null = null;
     private _renderBlocksCache: RenderElement[][] | null = null;
+    private _lastCommandBlocked = false;
+    private _lastCommandBlockedReason: CommandBlockedReason | null = null;
+    private _lastCommandPreflightUpdate: EditorUpdate | null = null;
+    private _lastAcceptedUpdateJson: string | null = null;
+    private _hasSeenDocumentVersion = false;
 
     private constructor(editorId: number, schema?: SchemaDefinition) {
         this._editorId = editorId;
@@ -585,11 +648,49 @@ export class NativeEditorBridge {
         return this._destroyed;
     }
 
+    consumeLastCommandBlocked(): boolean {
+        const blocked = this._lastCommandBlocked;
+        this._lastCommandBlocked = false;
+        this._lastCommandBlockedReason = null;
+        return blocked;
+    }
+
+    consumeLastCommandBlockedReason(): CommandBlockedReason | null {
+        const reason = this._lastCommandBlockedReason;
+        this._lastCommandBlocked = false;
+        this._lastCommandBlockedReason = null;
+        return reason;
+    }
+
+    consumeLastCommandBlockedInfo(): CommandBlockedInfo {
+        const info = {
+            blocked: this._lastCommandBlocked,
+            reason: this._lastCommandBlockedReason,
+        };
+        this._lastCommandBlocked = false;
+        this._lastCommandBlockedReason = null;
+        return info;
+    }
+
+    consumeLastCommandPreflightUpdate(): EditorUpdate | null {
+        const update = this._lastCommandPreflightUpdate;
+        this._lastCommandPreflightUpdate = null;
+        return update;
+    }
+
+    prepareForNativeCommand(): boolean {
+        this.assertNotDestroyed();
+        return this.prepareForCommand();
+    }
+
     /** Destroy the editor instance and free native resources. */
     destroy(): void {
         if (this._destroyed) return;
         this._destroyed = true;
         this._renderBlocksCache = null;
+        this._lastCommandBlocked = false;
+        this._lastCommandBlockedReason = null;
+        this._lastCommandPreflightUpdate = null;
         getNativeModule().editorDestroy(this._editorId);
     }
 
@@ -611,6 +712,12 @@ export class NativeEditorBridge {
         const html = getNativeModule().editorGetHtml(this._editorId);
         this._cachedHtml = { version: this._documentVersion, value: html };
         return html;
+    }
+
+    /** Get cached HTML without making a native roundtrip. */
+    getCachedHtml(): string | null {
+        this.assertNotDestroyed();
+        return this._cachedHtml?.value ?? null;
     }
 
     /** Set content from ProseMirror JSON. Returns render elements. */
@@ -637,6 +744,18 @@ export class NativeEditorBridge {
         const json = getNativeModule().editorGetJson(this._editorId);
         this._cachedJsonString = { version: this._documentVersion, value: json };
         return json;
+    }
+
+    /** Get cached raw ProseMirror JSON without making a native roundtrip. */
+    getCachedJsonString(): string | null {
+        this.assertNotDestroyed();
+        return this._cachedJsonString?.value ?? null;
+    }
+
+    /** Get cached ProseMirror JSON without making a native roundtrip. */
+    getCachedJson(): DocumentJSON | null {
+        const json = this.getCachedJsonString();
+        return json == null ? null : parseDocumentJSON(json);
     }
 
     /** Get content as ProseMirror JSON. */
@@ -670,54 +789,65 @@ export class NativeEditorBridge {
     /** Insert text at a document position. Returns the full update. */
     insertText(pos: number, text: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorInsertText(this._editorId, pos, text);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorInsertText(this._editorId, pos, text)
+        );
     }
 
     /** Delete a range [from, to). Returns the full update. */
     deleteRange(from: number, to: number): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorDeleteRange(this._editorId, from, to);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorDeleteRange(this._editorId, from, to)
+        );
     }
 
     /** Replace the current selection with text atomically. */
     replaceSelectionText(text: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorReplaceSelectionText(this._editorId, text);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorReplaceSelectionText(this._editorId, text)
+        );
     }
 
     /** Toggle a mark (bold, italic, etc.) on the current selection. */
     toggleMark(markType: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorToggleMarkAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head,
-                  markType
-              )
-            : getNativeModule().editorToggleMark(this._editorId, markType);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorToggleMarkAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head,
+                          markType
+                      )
+                    : getNativeModule().editorToggleMark(this._editorId, markType);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Set a mark with attrs on the current selection. */
     setMark(markType: string, attrs: Record<string, unknown>): EditorUpdate | null {
         this.assertNotDestroyed();
         const attrsJson = JSON.stringify(attrs);
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorSetMarkAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head,
-                  markType,
-                  attrsJson
-              )
-            : getNativeModule().editorSetMark(this._editorId, markType, attrsJson);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorSetMarkAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head,
+                          markType,
+                          attrsJson
+                      )
+                    : getNativeModule().editorSetMark(this._editorId, markType, attrsJson);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Set a mark with attrs at an explicit scalar selection. */
@@ -728,43 +858,73 @@ export class NativeEditorBridge {
         attrs: Record<string, unknown>
     ): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorSetMarkAtSelectionScalar(
-            this._editorId,
-            scalarAnchor,
-            scalarHead,
-            markType,
-            JSON.stringify(attrs)
+        return this.runPreparedCommand(
+            () =>
+                getNativeModule().editorSetMarkAtSelectionScalar(
+                    this._editorId,
+                    scalarAnchor,
+                    scalarHead,
+                    markType,
+                    JSON.stringify(attrs)
+                ),
+            { cancelIfPreflightUpdated: true }
         );
-        return this.parseAndNoteUpdate(json);
     }
 
     /** Remove a mark from the current selection. */
     unsetMark(markType: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorUnsetMarkAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head,
-                  markType
-              )
-            : getNativeModule().editorUnsetMark(this._editorId, markType);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorUnsetMarkAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head,
+                          markType
+                      )
+                    : getNativeModule().editorUnsetMark(this._editorId, markType);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
+    }
+
+    /** Remove a mark at an explicit scalar selection. */
+    unsetMarkAtSelectionScalar(
+        scalarAnchor: number,
+        scalarHead: number,
+        markType: string
+    ): EditorUpdate | null {
+        this.assertNotDestroyed();
+        return this.runPreparedCommand(
+            () =>
+                getNativeModule().editorUnsetMarkAtSelectionScalar(
+                    this._editorId,
+                    scalarAnchor,
+                    scalarHead,
+                    markType
+                ),
+            { cancelIfPreflightUpdated: true }
+        );
     }
 
     /** Toggle blockquote wrapping for the current block selection. */
     toggleBlockquote(): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorToggleBlockquoteAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head
-              )
-            : getNativeModule().editorToggleBlockquote(this._editorId);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorToggleBlockquoteAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head
+                      )
+                    : getNativeModule().editorToggleBlockquote(this._editorId);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Toggle a heading level on the current block selection. */
@@ -773,16 +933,20 @@ export class NativeEditorBridge {
         if (!Number.isInteger(level) || level < 1 || level > 6) {
             throw new Error('NativeEditorBridge: invalid heading level');
         }
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorToggleHeadingAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head,
-                  level
-              )
-            : getNativeModule().editorToggleHeading(this._editorId, level);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorToggleHeadingAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head,
+                          level
+                      )
+                    : getNativeModule().editorToggleHeading(this._editorId, level);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Set the document selection by anchor and head positions. */
@@ -842,22 +1006,25 @@ export class NativeEditorBridge {
     /** Split the block at a position (Enter key). */
     splitBlock(pos: number): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorSplitBlock(this._editorId, pos);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorSplitBlock(this._editorId, pos)
+        );
     }
 
     /** Insert HTML content at the current selection. */
     insertContentHtml(html: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorInsertContentHtml(this._editorId, html);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorInsertContentHtml(this._editorId, html)
+        );
     }
 
     /** Insert JSON content at the current selection. */
     insertContentJson(doc: DocumentJSON): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorInsertContentJson(this._editorId, JSON.stringify(doc));
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorInsertContentJson(this._editorId, JSON.stringify(doc))
+        );
     }
 
     /** Insert JSON content at an explicit scalar selection. */
@@ -866,21 +1033,34 @@ export class NativeEditorBridge {
         scalarHead: number,
         doc: DocumentJSON
     ): EditorUpdate | null {
+        return this.insertContentJsonAtSelectionScalarLazy(scalarAnchor, scalarHead, () => doc);
+    }
+
+    /** Insert lazily-built JSON content at an explicit scalar selection. */
+    insertContentJsonAtSelectionScalarLazy(
+        scalarAnchor: number,
+        scalarHead: number,
+        resolveDoc: () => DocumentJSON
+    ): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorInsertContentJsonAtSelectionScalar(
-            this._editorId,
-            scalarAnchor,
-            scalarHead,
-            JSON.stringify(doc)
+        return this.runPreparedCommand(
+            () =>
+                getNativeModule().editorInsertContentJsonAtSelectionScalar(
+                    this._editorId,
+                    scalarAnchor,
+                    scalarHead,
+                    JSON.stringify(resolveDoc())
+                ),
+            { cancelIfPreflightUpdated: true }
         );
-        return this.parseAndNoteUpdate(json);
     }
 
     /** Replace entire document with HTML via transaction (preserves undo history). */
     replaceHtml(html: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorReplaceHtml(this._editorId, html);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorReplaceHtml(this._editorId, html)
+        );
     }
 
     /** Replace entire document with JSON via transaction (preserves undo history). */
@@ -892,22 +1072,21 @@ export class NativeEditorBridge {
     replaceJsonString(jsonString: string): EditorUpdate | null {
         this.assertNotDestroyed();
         const normalizedJsonString = normalizeDocumentJsonString(jsonString, this._schema);
-        const json = getNativeModule().editorReplaceJson(this._editorId, normalizedJsonString);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() =>
+            getNativeModule().editorReplaceJson(this._editorId, normalizedJsonString)
+        );
     }
 
     /** Undo the last operation. Returns update or null if nothing to undo. */
     undo(): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorUndo(this._editorId);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() => getNativeModule().editorUndo(this._editorId));
     }
 
     /** Redo the last undone operation. Returns update or null if nothing to redo. */
     redo(): EditorUpdate | null {
         this.assertNotDestroyed();
-        const json = getNativeModule().editorRedo(this._editorId);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(() => getNativeModule().editorRedo(this._editorId));
     }
 
     /** Check if undo is available. */
@@ -925,88 +1104,108 @@ export class NativeEditorBridge {
     /** Toggle a list type on the current selection. Wraps if not in list, unwraps if already in that list type. */
     toggleList(listType: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const isActive = this.getCurrentState()?.activeState?.nodes?.[listType] === true;
-        const scalarSelection = this.currentScalarSelection();
+        return this.runPreparedCommand(
+            () => {
+                const isActive = this.getCurrentState()?.activeState?.nodes?.[listType] === true;
+                const scalarSelection = this.currentScalarSelection();
 
-        const json = isActive
-            ? scalarSelection
-                ? getNativeModule().editorUnwrapFromListAtSelectionScalar(
-                      this._editorId,
-                      scalarSelection.anchor,
-                      scalarSelection.head
-                  )
-                : getNativeModule().editorUnwrapFromList(this._editorId)
-            : scalarSelection
-              ? getNativeModule().editorWrapInListAtSelectionScalar(
-                    this._editorId,
-                    scalarSelection.anchor,
-                    scalarSelection.head,
-                    listType
-                )
-              : getNativeModule().editorWrapInList(this._editorId, listType);
-        return this.parseAndNoteUpdate(json);
+                return isActive
+                    ? scalarSelection
+                        ? getNativeModule().editorUnwrapFromListAtSelectionScalar(
+                              this._editorId,
+                              scalarSelection.anchor,
+                              scalarSelection.head
+                          )
+                        : getNativeModule().editorUnwrapFromList(this._editorId)
+                    : scalarSelection
+                      ? getNativeModule().editorWrapInListAtSelectionScalar(
+                            this._editorId,
+                            scalarSelection.anchor,
+                            scalarSelection.head,
+                            listType
+                        )
+                      : getNativeModule().editorWrapInList(this._editorId, listType);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Unwrap the current list item back to a paragraph. */
     unwrapFromList(): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorUnwrapFromListAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head
-              )
-            : getNativeModule().editorUnwrapFromList(this._editorId);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorUnwrapFromListAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head
+                      )
+                    : getNativeModule().editorUnwrapFromList(this._editorId);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Indent the current list item into a nested list. */
     indentListItem(): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorIndentListItemAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head
-              )
-            : getNativeModule().editorIndentListItem(this._editorId);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorIndentListItemAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head
+                      )
+                    : getNativeModule().editorIndentListItem(this._editorId);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Outdent the current list item to the parent list level. */
     outdentListItem(): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorOutdentListItemAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head
-              )
-            : getNativeModule().editorOutdentListItem(this._editorId);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorOutdentListItemAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head
+                      )
+                    : getNativeModule().editorOutdentListItem(this._editorId);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
     /** Insert a void node (e.g. 'horizontalRule') at the current selection. */
     insertNode(nodeType: string): EditorUpdate | null {
         this.assertNotDestroyed();
-        const scalarSelection = this.currentScalarSelection();
-        const json = scalarSelection
-            ? getNativeModule().editorInsertNodeAtSelectionScalar(
-                  this._editorId,
-                  scalarSelection.anchor,
-                  scalarSelection.head,
-                  nodeType
-              )
-            : getNativeModule().editorInsertNode(this._editorId, nodeType);
-        return this.parseAndNoteUpdate(json);
+        return this.runPreparedCommand(
+            () => {
+                const scalarSelection = this.currentScalarSelection();
+                return scalarSelection
+                    ? getNativeModule().editorInsertNodeAtSelectionScalar(
+                          this._editorId,
+                          scalarSelection.anchor,
+                          scalarSelection.head,
+                          nodeType
+                      )
+                    : getNativeModule().editorInsertNode(this._editorId, nodeType);
+            },
+            { refreshSelectionAfterPreflight: true }
+        );
     }
 
-    parseUpdateJson(json: string): EditorUpdate | null {
+    parseUpdateJson(json: string, options?: ParseUpdateOptions): EditorUpdate | null {
         this.assertNotDestroyed();
-        return this.parseAndNoteUpdate(json);
+        return this.parseAndNoteUpdate(json, options);
     }
 
     private noteUpdate(update: EditorUpdate | null): void {
@@ -1021,21 +1220,106 @@ export class NativeEditorBridge {
             this.invalidateContentCaches();
             return;
         }
+        this._hasSeenDocumentVersion = true;
         if (update.documentVersion !== this._documentVersion) {
             this._documentVersion = update.documentVersion;
             this.invalidateContentCaches();
         }
     }
 
-    private parseAndNoteUpdate(json: string): EditorUpdate | null {
-        let update = parseEditorUpdateJson(json, this._renderBlocksCache ?? undefined);
-        if (update?.renderPatch && !update.renderBlocks) {
-            update = parseEditorUpdateJson(
-                getNativeModule().editorGetCurrentState(this._editorId),
-                this._renderBlocksCache ?? undefined
+    private shouldRejectUpdate(
+        update: EditorUpdate | null,
+        json: string,
+        options?: ParseUpdateOptions
+    ): boolean {
+        if (!update) {
+            return false;
+        }
+        if (typeof update.documentVersion !== 'number') {
+            return (
+                options?.rejectVersionlessAfterDocumentVersion === true &&
+                Platform.OS === 'android' &&
+                this._hasSeenDocumentVersion
             );
         }
+        if (Platform.OS === 'android') {
+            this._hasSeenDocumentVersion = true;
+        }
+        if (update.documentVersion < this._documentVersion) {
+            return true;
+        }
+        if (options?.rejectSameDocumentVersion === true) {
+            return (
+                update.documentVersion === this._documentVersion &&
+                json === this._lastAcceptedUpdateJson
+            );
+        }
+        return false;
+    }
+
+    private parseAndNoteUpdate(json: string, options?: ParseUpdateOptions): EditorUpdate | null {
+        let update = parseEditorUpdateJson(json, this._renderBlocksCache ?? undefined);
+        if (this.shouldRejectUpdate(update, json, options)) {
+            return null;
+        }
+        if (update?.renderPatch && !update.renderBlocks) {
+            json = getNativeModule().editorGetCurrentState(this._editorId);
+            update = parseEditorUpdateJson(json, this._renderBlocksCache ?? undefined);
+            if (this.shouldRejectUpdate(update, json, options)) {
+                return null;
+            }
+        }
         this.noteUpdate(update);
+        if (update) {
+            this._lastAcceptedUpdateJson = json;
+        }
+        return update;
+    }
+
+    private prepareForCommand(): boolean {
+        this._lastCommandBlocked = false;
+        this._lastCommandBlockedReason = null;
+        this._lastCommandPreflightUpdate = null;
+        const nativeModule = getNativeModule();
+        const prepareForCommand = nativeModule.editorPrepareForCommand;
+        if (typeof prepareForCommand !== 'function') {
+            return true;
+        }
+
+        const preparation = parseCommandPreparationJson(prepareForCommand(this._editorId));
+        if (preparation.updateJSON) {
+            this._lastCommandPreflightUpdate = this.parseAndNoteUpdate(preparation.updateJSON, {
+                rejectVersionlessAfterDocumentVersion: true,
+            });
+        }
+        if (!preparation.ready) {
+            this._lastCommandBlocked = true;
+            this._lastCommandBlockedReason = preparation.blockedReason ?? 'unknown';
+            return false;
+        }
+        return true;
+    }
+
+    private runPreparedCommand(
+        mutate: () => string,
+        options?: RunPreparedCommandOptions
+    ): EditorUpdate | null {
+        if (!this.prepareForCommand()) {
+            return null;
+        }
+        if (
+            options?.cancelIfPreflightUpdated === true &&
+            this._lastCommandPreflightUpdate != null
+        ) {
+            return null;
+        }
+        if (options?.refreshSelectionAfterPreflight === true && Platform.OS === 'android') {
+            this.getSelection();
+        }
+        const update = this.parseAndNoteUpdate(mutate());
+        if (update) {
+            this._lastCommandPreflightUpdate = null;
+        }
         return update;
     }
 

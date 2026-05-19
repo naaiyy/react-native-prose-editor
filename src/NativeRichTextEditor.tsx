@@ -24,6 +24,7 @@ import { requireNativeViewManager } from 'expo-modules-core';
 import {
     NativeEditorBridge,
     type ActiveState,
+    type CommandBlockedInfo,
     type DocumentJSON,
     type EditorUpdate,
     type HistoryState,
@@ -68,7 +69,7 @@ interface NativeEditorViewHandle {
     focus?: () => void;
     blur?: () => void;
     getCaretRect?: () => Promise<string | null> | string | null;
-    applyEditorUpdate: (updateJson: string) => void | Promise<void>;
+    applyEditorUpdate: (updateJson: string) => boolean | void | Promise<boolean | void>;
 }
 
 interface NativeEditorViewProps {
@@ -90,11 +91,13 @@ interface NativeEditorViewProps {
     toolbarFrameJson?: string;
     remoteSelectionsJson?: string;
     editorUpdateJson?: string;
+    editorUpdateEditorId?: number;
     editorUpdateRevision?: number;
     onEditorUpdate: (event: NativeSyntheticEvent<NativeUpdateEvent>) => void;
     onSelectionChange: (event: NativeSyntheticEvent<NativeSelectionEvent>) => void;
     onFocusChange: (event: NativeSyntheticEvent<NativeFocusEvent>) => void;
     onContentHeightChange: (event: NativeSyntheticEvent<NativeContentHeightEvent>) => void;
+    onEditorReady?: (event: NativeSyntheticEvent<NativeEditorReadyEvent>) => void;
     onToolbarAction: (event: NativeSyntheticEvent<NativeToolbarActionEvent>) => void;
     onAddonEvent: (event: NativeSyntheticEvent<NativeAddonEvent>) => void;
 }
@@ -176,6 +179,10 @@ function mapToolbarItemsForNative(
 
 function isImageDataUrl(value: string): boolean {
     return /^data:image\//i.test(value.trim());
+}
+
+function isRetryableNativeCommandBlock(reason: CommandBlockedInfo['reason']): boolean {
+    return reason === 'composition' || (Platform.OS === 'android' && reason === 'pendingUpdate');
 }
 
 function isPromiseLike(value: unknown): value is Promise<unknown> {
@@ -634,30 +641,65 @@ function didContentChange(
     );
 }
 
+function documentVersionFromUpdateJson(json: string): number | null {
+    try {
+        const parsed = JSON.parse(json) as { documentVersion?: unknown };
+        return typeof parsed.documentVersion === 'number' ? parsed.documentVersion : null;
+    } catch {
+        return null;
+    }
+}
+
 interface NativeUpdateEvent {
     updateJson: string;
+    editorId?: number;
 }
 
 interface NativeSelectionEvent {
     anchor: number;
     head: number;
     stateJson?: string;
+    editorId?: number;
+    documentVersion?: number;
 }
 
 interface NativeFocusEvent {
     isFocused: boolean;
+    editorId?: number;
 }
 
 interface NativeContentHeightEvent {
     contentHeight: number;
+    editorId?: number;
+}
+
+interface NativeEditorReadyEvent {
+    editorId?: number;
+    editorUpdateRevision?: number;
 }
 
 interface NativeToolbarActionEvent {
     key: string;
+    editorId?: number;
+    updateJson?: string;
+    stateJson?: string;
+    documentVersion?: number;
 }
 
 interface NativeAddonEvent {
     eventJson: string;
+    editorId?: number;
+}
+
+function isCurrentNativeEditorEvent(
+    event: { editorId?: number },
+    bridge: NativeEditorBridge | null
+): boolean {
+    if (Platform.OS === 'android') {
+        return typeof event.editorId === 'number' && bridge?.editorId === event.editorId;
+    }
+    if (typeof event.editorId !== 'number') return true;
+    return event.editorId === 0 || bridge?.editorId === event.editorId;
 }
 
 function computeRenderedTextLength(elements: RenderElement[]): number {
@@ -665,9 +707,11 @@ function computeRenderedTextLength(elements: RenderElement[]): number {
     let blockCount = 0;
     for (const el of elements) {
         if (el.type === 'blockStart' && el.listContext) {
-            len += el.listContext.ordered ? `${el.listContext.index}. `.length : '• '.length;
+            len += el.listContext.ordered
+                ? unicodeScalarCount(`${el.listContext.index}. `)
+                : unicodeScalarCount('• ');
         } else if (el.type === 'textRun' && el.text) {
-            len += el.text.length;
+            len += unicodeScalarCount(el.text);
         } else if (
             el.type === 'voidInline' ||
             el.type === 'voidBlock' ||
@@ -677,7 +721,7 @@ function computeRenderedTextLength(elements: RenderElement[]): number {
             if (el.type === 'opaqueInlineAtom' || el.type === 'opaqueBlockAtom') {
                 const visibleText =
                     el.nodeType === 'mention' ? (el.label ?? '?') : `[${el.label ?? '?'}]`;
-                len += visibleText.length;
+                len += unicodeScalarCount(visibleText);
             } else {
                 // U+FFFC placeholder / hard break
                 len += 1;
@@ -991,6 +1035,55 @@ interface RunAndApplyOptions {
     preserveLiveTextSelection?: boolean;
     /** Internal: skip the autolink pass for this mutation. */
     skipAutoDetectLinks?: boolean;
+    /** Internal: retry callback when native preflight is temporarily blocked. */
+    retryBlockedCommand?: () => boolean;
+    /** Internal: called when a retry callback is queued. */
+    onBlockedCommandRetryQueued?: () => void;
+}
+
+interface CommandRetryScope {
+    editorId: number;
+    documentVersion: number | null;
+    scalarAnchor?: number;
+    scalarHead?: number;
+    mentionRange?: {
+        anchor: number;
+        head: number;
+    };
+    mentionQuery?: MentionQueryChangeEvent;
+    nativeMentionSelectRequest?: NativeMentionSelectRetryScope;
+}
+
+interface NativeMentionSelectRetryScope {
+    trigger: string;
+    suggestionKey: string;
+    range: {
+        anchor: number;
+        head: number;
+    };
+}
+
+function doesLiveMentionQueryConflictWithNativeSelectRequest(
+    request: NativeMentionSelectRetryScope,
+    currentQuery: MentionQueryChangeEvent | null,
+    requestDocumentVersion: number | null,
+    currentDocumentVersion: number | null
+): boolean {
+    if (currentQuery == null) return false;
+
+    const currentQueryDocumentVersion =
+        typeof currentQuery.documentVersion === 'number' ? currentQuery.documentVersion : null;
+    const isSameDocument =
+        currentQueryDocumentVersion != null
+            ? currentQueryDocumentVersion === requestDocumentVersion
+            : requestDocumentVersion == null || requestDocumentVersion === currentDocumentVersion;
+    if (!isSameDocument) return false;
+
+    return (
+        currentQuery.trigger !== request.trigger ||
+        currentQuery.range.anchor !== request.range.anchor ||
+        currentQuery.range.head !== request.range.head
+    );
 }
 
 export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRichTextEditorProps>(
@@ -1046,11 +1139,29 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const registeredToolbarFrames = useEditorToolbarFrames();
         const [pendingNativeUpdate, setPendingNativeUpdate] = useState<{
             json?: string;
+            editorId?: number;
             revision: number;
         }>({
             json: undefined,
+            editorId: undefined,
             revision: 0,
         });
+        const pendingNativeUpdateRef = useRef(pendingNativeUpdate);
+        pendingNativeUpdateRef.current = pendingNativeUpdate;
+        const pendingNativeUpdateInFlightRef = useRef<{
+            editorId?: number;
+            revision: number;
+        } | null>(null);
+        const [blockedNativeCommandRetry, setBlockedNativeCommandRetry] = useState(0);
+        const [detachedControlledSyncRetry, setDetachedControlledSyncRetry] = useState(0);
+        const [controlledNativeUpdateRetry, setControlledNativeUpdateRetry] = useState(0);
+        const pendingDetachedControlledSyncRef = useRef(false);
+        const pendingControlledSyncAfterNativeUpdateRef = useRef(false);
+        const pendingBlockedNativeCommandRetryRef = useRef(false);
+        const pendingNativeCommandRetryRef = useRef<(() => boolean) | null>(null);
+        const blockedNativeCommandRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+            null
+        );
         const [autoGrowHeight, setAutoGrowHeight] = useState<number | null>(null);
 
         // Toolbar state from EditorUpdate events
@@ -1062,6 +1173,8 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             allowedMarks: [],
             insertableNodes: [],
         });
+        const activeStateRef = useRef(activeState);
+        activeStateRef.current = activeState;
         const [historyState, setHistoryState] = useState<HistoryState>({
             canUndo: false,
             canRedo: false,
@@ -1074,9 +1187,37 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const selectionRef = useRef<Selection>({ type: 'text', anchor: 0, head: 0 });
         const renderedTextLengthRef = useRef(0);
         const documentVersionRef = useRef<number | null>(null);
+        const controlledHtmlSyncRef = useRef<{
+            value?: string | null;
+            documentVersion: number | null;
+        }>({
+            value: undefined,
+            documentVersion: null,
+        });
+        const controlledJsonSyncRef = useRef<{
+            value?: string | null;
+            documentVersion: number | null;
+        }>({
+            value: undefined,
+            documentVersion: null,
+        });
         const toolbarRef = useRef<View | null>(null);
         const mentionQueryEventRef = useRef<MentionQueryChangeEvent | null>(null);
+        const mentionQueryEditorIdRef = useRef<number | null>(null);
         mentionQueryEventRef.current = mentionQueryEvent;
+        const setMentionQueryEventState = useCallback(
+            (nextEvent: MentionQueryChangeEvent | null, editorId?: number | null) => {
+                mentionQueryEventRef.current = nextEvent;
+                mentionQueryEditorIdRef.current =
+                    nextEvent == null
+                        ? null
+                        : typeof editorId === 'number'
+                          ? editorId
+                          : (bridgeRef.current?.editorId ?? null);
+                setMentionQueryEvent(nextEvent);
+            },
+            []
+        );
         const toolbarItemsSerializationCacheRef = useRef<{
             toolbarItems: readonly EditorToolbarItem[];
             editable: boolean;
@@ -1136,26 +1277,94 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             serializeRemoteSelections(selections)
         );
 
+        const clearBlockedNativeCommandRetryTimer = useCallback(() => {
+            const timer = blockedNativeCommandRetryTimerRef.current;
+            if (timer == null) return;
+            clearTimeout(timer);
+            blockedNativeCommandRetryTimerRef.current = null;
+        }, []);
+
+        const flushBlockedNativeCommandRetry = useCallback(() => {
+            const hadPendingRetry =
+                pendingBlockedNativeCommandRetryRef.current ||
+                blockedNativeCommandRetryTimerRef.current != null;
+            if (!hadPendingRetry) return;
+            pendingBlockedNativeCommandRetryRef.current = false;
+            clearBlockedNativeCommandRetryTimer();
+            setBlockedNativeCommandRetry((revision) => revision + 1);
+        }, [clearBlockedNativeCommandRetryTimer]);
+
+        const scheduleBlockedNativeCommandRetry = useCallback(() => {
+            pendingBlockedNativeCommandRetryRef.current = true;
+            if (blockedNativeCommandRetryTimerRef.current != null) return;
+            blockedNativeCommandRetryTimerRef.current = setTimeout(() => {
+                blockedNativeCommandRetryTimerRef.current = null;
+                if (!pendingBlockedNativeCommandRetryRef.current) return;
+                pendingBlockedNativeCommandRetryRef.current = false;
+                setBlockedNativeCommandRetry((revision) => revision + 1);
+            }, 50);
+        }, []);
+
+        const enqueueBlockedNativeCommandRetry = useCallback(
+            (retry: () => boolean) => {
+                pendingNativeCommandRetryRef.current = retry;
+                scheduleBlockedNativeCommandRetry();
+            },
+            [scheduleBlockedNativeCommandRetry]
+        );
+
+        const clearStaleMentionQueryForDocumentVersion = useCallback(
+            (documentVersion: number) => {
+                const currentMentionQuery = mentionQueryEventRef.current;
+                if (
+                    currentMentionQuery != null &&
+                    (typeof currentMentionQuery.documentVersion !== 'number' ||
+                        currentMentionQuery.documentVersion < documentVersion)
+                ) {
+                    setMentionQueryEventState(null);
+                }
+            },
+            [setMentionQueryEventState]
+        );
+
         const syncStateFromUpdate = useCallback((update: EditorUpdate | null) => {
             if (!update) return;
+            activeStateRef.current = update.activeState;
             setActiveState(update.activeState);
             setHistoryState(update.historyState);
             selectionRef.current = update.selection;
             renderedTextLengthRef.current = computeRenderedTextLength(update.renderElements);
             if (typeof update.documentVersion === 'number') {
+                const previousDocumentVersion = documentVersionRef.current;
                 documentVersionRef.current = update.documentVersion;
+                if (
+                    previousDocumentVersion == null ||
+                    update.documentVersion > previousDocumentVersion
+                ) {
+                    clearStaleMentionQueryForDocumentVersion(update.documentVersion);
+                }
             }
-        }, []);
+            flushBlockedNativeCommandRetry();
+        }, [clearStaleMentionQueryForDocumentVersion, flushBlockedNativeCommandRetry]);
 
         const syncSelectionStateFromUpdate = useCallback((update: EditorUpdate | null) => {
             if (!update) return;
+            activeStateRef.current = update.activeState;
             setActiveState(update.activeState);
             setHistoryState(update.historyState);
             selectionRef.current = update.selection;
             if (typeof update.documentVersion === 'number') {
+                const previousDocumentVersion = documentVersionRef.current;
                 documentVersionRef.current = update.documentVersion;
+                if (
+                    previousDocumentVersion == null ||
+                    update.documentVersion > previousDocumentVersion
+                ) {
+                    clearStaleMentionQueryForDocumentVersion(update.documentVersion);
+                }
             }
-        }, []);
+            flushBlockedNativeCommandRetry();
+        }, [clearStaleMentionQueryForDocumentVersion, flushBlockedNativeCommandRetry]);
 
         const emitContentCallbacksForUpdate = useCallback(
             (update: EditorUpdate | null, previousDocumentVersion: number | null) => {
@@ -1189,29 +1398,114 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             []
         );
 
+        const clearPendingNativeUpdateForCurrentEditor = useCallback(() => {
+            if (Platform.OS !== 'android') return;
+            const editorId = bridgeRef.current?.editorId;
+            if (typeof editorId !== 'number') return;
+            const inFlight = pendingNativeUpdateInFlightRef.current;
+            if (inFlight != null && inFlight.editorId === editorId) {
+                pendingNativeUpdateInFlightRef.current = null;
+            }
+            setPendingNativeUpdate((current) => {
+                if (current.json == null && current.editorId === editorId) {
+                    return current;
+                }
+                const next = {
+                    json: undefined,
+                    editorId,
+                    revision: current.revision + 1,
+                };
+                pendingNativeUpdateRef.current = next;
+                return next;
+            });
+        }, []);
+
+        const consumeBlockedCommandInfoForRetry = useCallback((bridge: NativeEditorBridge): CommandBlockedInfo => {
+            const blockedInfo = bridge.consumeLastCommandBlockedInfo();
+            if (!blockedInfo.blocked) return blockedInfo;
+            if (blockedInfo.reason === 'detached') {
+                pendingDetachedControlledSyncRef.current = true;
+            } else if (blockedInfo.reason === 'destroyed') {
+                pendingDetachedControlledSyncRef.current = false;
+                pendingBlockedNativeCommandRetryRef.current = false;
+                pendingNativeCommandRetryRef.current = null;
+                clearBlockedNativeCommandRetryTimer();
+                clearPendingNativeUpdateForCurrentEditor();
+            } else {
+                scheduleBlockedNativeCommandRetry();
+            }
+            return blockedInfo;
+        }, [
+            clearBlockedNativeCommandRetryTimer,
+            clearPendingNativeUpdateForCurrentEditor,
+            scheduleBlockedNativeCommandRetry,
+        ]);
+
+        const consumeBlockedCommandForRetry = useCallback(
+            (bridge: NativeEditorBridge): boolean =>
+                consumeBlockedCommandInfoForRetry(bridge).blocked,
+            [consumeBlockedCommandInfoForRetry]
+        );
+
+        useEffect(() => {
+            const retry = pendingNativeCommandRetryRef.current;
+            if (retry == null) return;
+            pendingNativeCommandRetryRef.current = null;
+            retry();
+        }, [blockedNativeCommandRetry]);
+
+        const hasPendingNativeUpdateInFlightForCurrentEditor = useCallback((): boolean => {
+            if (Platform.OS !== 'android') return false;
+            const editorId = bridgeRef.current?.editorId;
+            if (typeof editorId !== 'number') return false;
+            const inFlight = pendingNativeUpdateInFlightRef.current;
+            return inFlight != null && inFlight.editorId === editorId;
+        }, []);
+
         const applyUpdateToNativeView = useCallback(
             (
                 update: EditorUpdate,
                 previousDocumentVersion: number | null,
                 skipNativeApplyIfContentUnchanged = false
-            ) => {
+            ): boolean => {
                 const contentChanged = didContentChange(previousDocumentVersion, update);
+                const handleApplyResult = (result: unknown): boolean => {
+                    if (result === false) {
+                        setBlockedNativeCommandRetry((revision) => revision + 1);
+                        return false;
+                    }
+                    return true;
+                };
 
                 if (!skipNativeApplyIfContentUnchanged || contentChanged) {
                     const updateJson = JSON.stringify(update);
                     if (Platform.OS === 'android') {
-                        setPendingNativeUpdate((current) => ({
-                            json: updateJson,
-                            revision: current.revision + 1,
-                        }));
+                        const editorId = bridgeRef.current?.editorId;
+                        setPendingNativeUpdate((current) => {
+                            const revision = current.revision + 1;
+                            const next = {
+                                json: updateJson,
+                                editorId,
+                                revision,
+                            };
+                            pendingNativeUpdateRef.current = next;
+                            pendingNativeUpdateInFlightRef.current = { editorId, revision };
+                            return next;
+                        });
                     } else {
                         try {
                             const applyResult =
                                 nativeViewRef.current?.applyEditorUpdate(updateJson);
                             if (isPromiseLike(applyResult)) {
-                                void applyResult.catch(() => {
-                                    // The native view may already be torn down during navigation.
-                                });
+                                void applyResult
+                                    .then((result) => {
+                                        handleApplyResult(result);
+                                    })
+                                    .catch(() => {
+                                        // The native view may already be torn down during navigation.
+                                    });
+                            } else {
+                                return handleApplyResult(applyResult);
                             }
                         } catch {
                             // The native view may already be torn down during navigation.
@@ -1219,69 +1513,126 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     }
                 }
 
-                return contentChanged;
+                return true;
             },
             []
         );
 
         const maybeApplyAutoDetectedLink = useCallback(
             (update: EditorUpdate | null, previousDocumentVersion: number | null) => {
-                if (
-                    !autoDetectLinks ||
-                    !update ||
-                    !didContentChange(previousDocumentVersion, update) ||
-                    !bridgeRef.current ||
-                    bridgeRef.current.isDestroyed ||
-                    !update.activeState.allowedMarks.includes('link') ||
-                    update.selection.type !== 'text' ||
-                    update.selection.anchor == null ||
-                    update.selection.head == null ||
-                    update.selection.anchor !== update.selection.head
-                ) {
-                    return update;
-                }
-
-                const cursorDocPos = update.selection.head;
-                const candidate = findAutoLinkCandidateInDocument(
-                    bridgeRef.current.getJson(),
-                    cursorDocPos
-                );
-                if (!candidate) {
-                    return update;
-                }
-
-                const scalarFrom = bridgeRef.current.docToScalar(candidate.docFrom);
-                const scalarTo = bridgeRef.current.docToScalar(candidate.docTo);
-                if (!(scalarTo > scalarFrom)) {
-                    return update;
-                }
-
-                const autoLinkUpdate = bridgeRef.current.setMarkAtSelectionScalar(
-                    scalarFrom,
-                    scalarTo,
-                    'link',
-                    { href: candidate.href }
-                );
-                if (!autoLinkUpdate) {
-                    return update;
-                }
-
-                bridgeRef.current.setSelection(update.selection.anchor, update.selection.head);
-                const selectionState = bridgeRef.current.getSelectionState();
-                if (selectionState) {
-                    autoLinkUpdate.selection = selectionState.selection;
-                    autoLinkUpdate.activeState = selectionState.activeState;
-                    autoLinkUpdate.historyState = selectionState.historyState;
-                    if (typeof selectionState.documentVersion === 'number') {
-                        autoLinkUpdate.documentVersion = selectionState.documentVersion;
+                const applyAutoLink = (
+                    candidateUpdate: EditorUpdate | null,
+                    allowPreflightRetry: boolean
+                ): EditorUpdate | null => {
+                    if (
+                        !autoDetectLinks ||
+                        !candidateUpdate ||
+                        !didContentChange(previousDocumentVersion, candidateUpdate) ||
+                        !bridgeRef.current ||
+                        bridgeRef.current.isDestroyed ||
+                        !candidateUpdate.activeState.allowedMarks.includes('link') ||
+                        candidateUpdate.selection.type !== 'text' ||
+                        candidateUpdate.selection.anchor == null ||
+                        candidateUpdate.selection.head == null ||
+                        candidateUpdate.selection.anchor !== candidateUpdate.selection.head
+                    ) {
+                        return candidateUpdate;
                     }
-                } else {
-                    autoLinkUpdate.selection = update.selection;
+
+                    const cursorDocPos = candidateUpdate.selection.head;
+                    const candidate = findAutoLinkCandidateInDocument(
+                        bridgeRef.current.getJson(),
+                        cursorDocPos
+                    );
+                    if (!candidate) {
+                        return candidateUpdate;
+                    }
+
+                    const scalarFrom = bridgeRef.current.docToScalar(candidate.docFrom);
+                    const scalarTo = bridgeRef.current.docToScalar(candidate.docTo);
+                    if (!(scalarTo > scalarFrom)) {
+                        return candidateUpdate;
+                    }
+
+                    const autoLinkUpdate = bridgeRef.current.setMarkAtSelectionScalar(
+                        scalarFrom,
+                        scalarTo,
+                        'link',
+                        { href: candidate.href }
+                    );
+                    if (!autoLinkUpdate) {
+                        const preflightUpdate =
+                            bridgeRef.current.consumeLastCommandPreflightUpdate();
+                        if (preflightUpdate) {
+                            return allowPreflightRetry
+                                ? applyAutoLink(preflightUpdate, false)
+                                : preflightUpdate;
+                        }
+                        consumeBlockedCommandForRetry(bridgeRef.current);
+                        return candidateUpdate;
+                    }
+
+                    bridgeRef.current.setSelection(
+                        candidateUpdate.selection.anchor,
+                        candidateUpdate.selection.head
+                    );
+                    const selectionState = bridgeRef.current.getSelectionState();
+                    if (selectionState) {
+                        autoLinkUpdate.selection = selectionState.selection;
+                        autoLinkUpdate.activeState = selectionState.activeState;
+                        autoLinkUpdate.historyState = selectionState.historyState;
+                        if (typeof selectionState.documentVersion === 'number') {
+                            autoLinkUpdate.documentVersion = selectionState.documentVersion;
+                        }
+                    } else {
+                        autoLinkUpdate.selection = candidateUpdate.selection;
+                    }
+
+                    return autoLinkUpdate;
+                };
+
+                return applyAutoLink(update, true);
+            },
+            [autoDetectLinks, consumeBlockedCommandForRetry]
+        );
+
+        const syncNativeUpdateFromBridge = useCallback(
+            (
+                nativeUpdate: EditorUpdate,
+                previousDocumentVersion: number | null,
+                options?: Pick<
+                    RunAndApplyOptions,
+                    'skipNativeApplyIfContentUnchanged' | 'suppressContentCallbacks'
+                >
+            ): EditorUpdate | null => {
+                const update = maybeApplyAutoDetectedLink(nativeUpdate, previousDocumentVersion);
+                if (!update) return null;
+                if (update !== nativeUpdate) {
+                    applyUpdateToNativeView(
+                        update,
+                        previousDocumentVersion,
+                        options?.skipNativeApplyIfContentUnchanged
+                    );
                 }
 
-                return autoLinkUpdate;
+                syncStateFromUpdate(update);
+
+                onActiveStateChangeRef.current?.(update.activeState);
+                onHistoryStateChangeRef.current?.(update.historyState);
+
+                if (!options?.suppressContentCallbacks) {
+                    emitContentCallbacksForUpdate(update, previousDocumentVersion);
+                }
+
+                onSelectionChangeRef.current?.(update.selection);
+                return update;
             },
-            [autoDetectLinks]
+            [
+                applyUpdateToNativeView,
+                emitContentCallbacksForUpdate,
+                maybeApplyAutoDetectedLink,
+                syncStateFromUpdate,
+            ]
         );
 
         // Warn if both value and valueJSON are set
@@ -1297,11 +1648,35 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 mutate: () => EditorUpdate | null,
                 options?: RunAndApplyOptions
             ): EditorUpdate | null => {
+                if (hasPendingNativeUpdateInFlightForCurrentEditor()) {
+                    if (options?.retryBlockedCommand != null) {
+                        enqueueBlockedNativeCommandRetry(options.retryBlockedCommand);
+                        options.onBlockedCommandRetryQueued?.();
+                    }
+                    return null;
+                }
                 const previousDocumentVersion = documentVersionRef.current;
                 const preservedSelection =
                     options?.preserveLiveTextSelection === true ? selectionRef.current : null;
                 let update = mutate();
-                if (!update) return null;
+                if (!update) {
+                    const bridge = bridgeRef.current;
+                    if (bridge != null && !bridge.isDestroyed) {
+                        const preflightUpdate = bridge.consumeLastCommandPreflightUpdate();
+                        if (preflightUpdate) {
+                            syncNativeUpdateFromBridge(preflightUpdate, previousDocumentVersion);
+                        }
+                        const blockedInfo = consumeBlockedCommandInfoForRetry(bridge);
+                        if (
+                            options?.retryBlockedCommand != null &&
+                            isRetryableNativeCommandBlock(blockedInfo.reason)
+                        ) {
+                            enqueueBlockedNativeCommandRetry(options.retryBlockedCommand);
+                            options.onBlockedCommandRetryQueued?.();
+                        }
+                    }
+                    return null;
+                }
 
                 if (!options?.skipAutoDetectLinks) {
                     update = maybeApplyAutoDetectedLink(update, previousDocumentVersion);
@@ -1314,6 +1689,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     preservedSelection?.type === 'text' &&
                     typeof preservedSelection.anchor === 'number' &&
                     typeof preservedSelection.head === 'number' &&
+                    !didContentChange(previousDocumentVersion, update) &&
                     bridgeRef.current != null &&
                     !bridgeRef.current.isDestroyed
                 ) {
@@ -1349,10 +1725,66 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             },
             [
                 applyUpdateToNativeView,
+                consumeBlockedCommandInfoForRetry,
+                enqueueBlockedNativeCommandRetry,
                 emitContentCallbacksForUpdate,
+                hasPendingNativeUpdateInFlightForCurrentEditor,
                 maybeApplyAutoDetectedLink,
+                syncNativeUpdateFromBridge,
                 syncStateFromUpdate,
             ]
+        );
+
+        const prepareBridgeForExternalContentRead = useCallback(
+            (options?: { skipWhenContentChanged?: boolean }): boolean => {
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed) return false;
+
+                const previousDocumentVersion = documentVersionRef.current;
+                const ready = bridge.prepareForNativeCommand();
+                const preflightUpdate = bridge.consumeLastCommandPreflightUpdate();
+                if (preflightUpdate) {
+                    syncNativeUpdateFromBridge(preflightUpdate, previousDocumentVersion);
+                }
+                if (!ready) {
+                    consumeBlockedCommandForRetry(bridge);
+                    return false;
+                }
+
+                return (
+                    options?.skipWhenContentChanged !== true ||
+                    !didContentChange(previousDocumentVersion, preflightUpdate)
+                );
+            },
+            [consumeBlockedCommandForRetry, syncNativeUpdateFromBridge]
+        );
+
+        const syncPreflightUpdateFromNativeEvent = useCallback(
+            (updateJson?: string): boolean => {
+                if (typeof updateJson !== 'string' || updateJson.length === 0) {
+                    return true;
+                }
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed) return false;
+                const previousDocumentVersion = documentVersionRef.current;
+                try {
+                    const parsed = JSON.parse(updateJson) as { documentVersion?: unknown };
+                    if (
+                        Platform.OS === 'android' &&
+                        typeof previousDocumentVersion === 'number' &&
+                        typeof parsed.documentVersion !== 'number'
+                    ) {
+                        return false;
+                    }
+                    const update = bridge.parseUpdateJson(updateJson);
+                    if (!update) return false;
+                    syncNativeUpdateFromBridge(update, previousDocumentVersion);
+                    return true;
+                } catch {
+                    return false;
+                }
+            },
+            [syncNativeUpdateFromBridge]
         );
 
         useEffect(() => {
@@ -1386,39 +1818,172 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 bridge.destroy();
                 bridgeRef.current = null;
                 nativeViewRef.current = null;
+                pendingNativeUpdateInFlightRef.current = null;
+                pendingDetachedControlledSyncRef.current = false;
+                pendingControlledSyncAfterNativeUpdateRef.current = false;
+                pendingBlockedNativeCommandRetryRef.current = false;
+                pendingNativeCommandRetryRef.current = null;
+                documentVersionRef.current = null;
+                mentionQueryEventRef.current = null;
+                mentionQueryEditorIdRef.current = null;
+                clearBlockedNativeCommandRetryTimer();
+                setMentionQueryEvent(null);
+                setPendingNativeUpdate((current) => {
+                    const next = {
+                        json: undefined,
+                        editorId: undefined,
+                        revision: current.revision + 1,
+                    };
+                    pendingNativeUpdateRef.current = next;
+                    return next;
+                });
                 setEditorInstanceId(0);
                 setIsReady(false);
             };
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [maxLength, syncStateFromUpdate, allowBase64Images, serializedSchemaJson]);
+        }, [
+            maxLength,
+            syncStateFromUpdate,
+            allowBase64Images,
+            serializedSchemaJson,
+            clearBlockedNativeCommandRetryTimer,
+        ]);
 
         useEffect(() => {
             if (value == null) return;
             if (!bridgeRef.current || bridgeRef.current.isDestroyed) return;
+            const previousSync = controlledHtmlSyncRef.current;
+            const didControlledValueChange = previousSync.value !== value;
+            const didDocumentAdvanceForSameValue =
+                !didControlledValueChange &&
+                previousSync.documentVersion !== documentVersionRef.current;
+            if (
+                !prepareBridgeForExternalContentRead({
+                    skipWhenContentChanged: !didControlledValueChange,
+                })
+            ) {
+                controlledHtmlSyncRef.current = {
+                    value,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
+            if (didDocumentAdvanceForSameValue) {
+                controlledHtmlSyncRef.current = {
+                    value,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
 
             const currentHtml = bridgeRef.current.getHtml();
-            if (currentHtml === value) return;
+            if (currentHtml === value) {
+                clearPendingNativeUpdateForCurrentEditor();
+                controlledHtmlSyncRef.current = {
+                    value,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
 
-            runAndApply(() => bridgeRef.current!.replaceHtml(value), {
+            if (hasPendingNativeUpdateInFlightForCurrentEditor()) {
+                pendingControlledSyncAfterNativeUpdateRef.current = true;
+                return;
+            }
+
+            const update = runAndApply(() => bridgeRef.current!.replaceHtml(value), {
                 suppressContentCallbacks: true,
                 preserveLiveTextSelection: true,
                 skipAutoDetectLinks: true,
             });
-        }, [value, runAndApply]);
+            if (!update && hasPendingNativeUpdateInFlightForCurrentEditor()) {
+                pendingControlledSyncAfterNativeUpdateRef.current = true;
+                return;
+            }
+            controlledHtmlSyncRef.current = {
+                value,
+                documentVersion: documentVersionRef.current,
+            };
+        }, [
+            value,
+            runAndApply,
+            blockedNativeCommandRetry,
+            controlledNativeUpdateRetry,
+            detachedControlledSyncRetry,
+            prepareBridgeForExternalContentRead,
+            clearPendingNativeUpdateForCurrentEditor,
+            hasPendingNativeUpdateInFlightForCurrentEditor,
+        ]);
 
         useEffect(() => {
             if (serializedValueJson == null || value != null) return;
             if (!bridgeRef.current || bridgeRef.current.isDestroyed) return;
+            const previousSync = controlledJsonSyncRef.current;
+            const didControlledValueChange = previousSync.value !== serializedValueJson;
+            const didDocumentAdvanceForSameValue =
+                !didControlledValueChange &&
+                previousSync.documentVersion !== documentVersionRef.current;
+            if (
+                !prepareBridgeForExternalContentRead({
+                    skipWhenContentChanged: !didControlledValueChange,
+                })
+            ) {
+                controlledJsonSyncRef.current = {
+                    value: serializedValueJson,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
+            if (didDocumentAdvanceForSameValue) {
+                controlledJsonSyncRef.current = {
+                    value: serializedValueJson,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
 
             const currentJson = bridgeRef.current.getJsonString();
-            if (currentJson === serializedValueJson) return;
+            if (currentJson === serializedValueJson) {
+                clearPendingNativeUpdateForCurrentEditor();
+                controlledJsonSyncRef.current = {
+                    value: serializedValueJson,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
 
-            runAndApply(() => bridgeRef.current!.replaceJsonString(serializedValueJson), {
-                suppressContentCallbacks: true,
-                preserveLiveTextSelection: true,
-                skipAutoDetectLinks: true,
-            });
-        }, [serializedValueJson, value, runAndApply]);
+            if (hasPendingNativeUpdateInFlightForCurrentEditor()) {
+                pendingControlledSyncAfterNativeUpdateRef.current = true;
+                return;
+            }
+
+            const update = runAndApply(
+                () => bridgeRef.current!.replaceJsonString(serializedValueJson),
+                {
+                    suppressContentCallbacks: true,
+                    preserveLiveTextSelection: true,
+                    skipAutoDetectLinks: true,
+                }
+            );
+            if (!update && hasPendingNativeUpdateInFlightForCurrentEditor()) {
+                pendingControlledSyncAfterNativeUpdateRef.current = true;
+                return;
+            }
+            controlledJsonSyncRef.current = {
+                value: serializedValueJson,
+                documentVersion: documentVersionRef.current,
+            };
+        }, [
+            serializedValueJson,
+            value,
+            runAndApply,
+            blockedNativeCommandRetry,
+            controlledNativeUpdateRetry,
+            detachedControlledSyncRetry,
+            prepareBridgeForExternalContentRead,
+            clearPendingNativeUpdateForCurrentEditor,
+            hasPendingNativeUpdateInFlightForCurrentEditor,
+        ]);
 
         const updateToolbarFrame = useCallback(() => {
             const toolbar = toolbarRef.current;
@@ -1460,52 +2025,101 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
 
         const handleUpdate = useCallback(
             (event: NativeSyntheticEvent<NativeUpdateEvent>) => {
-                if (!bridgeRef.current || bridgeRef.current.isDestroyed) return;
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed) return;
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridge)) return;
 
                 try {
                     const previousDocumentVersion = documentVersionRef.current;
-                    const nativeUpdate = bridgeRef.current.parseUpdateJson(
-                        event.nativeEvent.updateJson
+                    if (Platform.OS === 'android' && typeof previousDocumentVersion === 'number') {
+                        const parsed = JSON.parse(event.nativeEvent.updateJson) as {
+                            documentVersion?: unknown;
+                        };
+                        if (typeof parsed.documentVersion !== 'number') {
+                            return;
+                        }
+                    }
+                    const nativeUpdate = bridge.parseUpdateJson(
+                        event.nativeEvent.updateJson,
+                        { rejectSameDocumentVersion: true }
                     );
                     if (!nativeUpdate) return;
-                    const update = maybeApplyAutoDetectedLink(
-                        nativeUpdate,
-                        previousDocumentVersion
-                    );
-                    if (!update) return;
-                    if (update !== nativeUpdate) {
-                        applyUpdateToNativeView(update, previousDocumentVersion);
-                    }
-                    syncStateFromUpdate(update);
-
-                    onActiveStateChangeRef.current?.(update.activeState);
-                    onHistoryStateChangeRef.current?.(update.historyState);
-
-                    emitContentCallbacksForUpdate(update, previousDocumentVersion);
-
-                    onSelectionChangeRef.current?.(update.selection);
+                    syncNativeUpdateFromBridge(nativeUpdate, previousDocumentVersion);
                 } catch {
                     // Invalid JSON from native — skip
                 }
             },
-            [
-                applyUpdateToNativeView,
-                emitContentCallbacksForUpdate,
-                maybeApplyAutoDetectedLink,
-                syncStateFromUpdate,
-            ]
+            [syncNativeUpdateFromBridge]
         );
 
         const handleSelectionChange = useCallback(
             (event: NativeSyntheticEvent<NativeSelectionEvent>) => {
-                if (!bridgeRef.current || bridgeRef.current.isDestroyed) return;
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed) return;
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridge)) return;
 
-                const { anchor, head, stateJson } = event.nativeEvent;
+                const { anchor, head, stateJson, documentVersion } = event.nativeEvent;
+                const currentDocumentVersion = documentVersionRef.current;
+                if (
+                    typeof documentVersion === 'number' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    documentVersion < currentDocumentVersion
+                ) {
+                    return;
+                }
+                let currentState: EditorUpdate | null = null;
+                if (typeof stateJson === 'string' && stateJson.length > 0) {
+                    if (
+                        Platform.OS === 'android' &&
+                        typeof currentDocumentVersion === 'number'
+                    ) {
+                        const stateDocumentVersion = documentVersionFromUpdateJson(stateJson);
+                        if (
+                            typeof stateDocumentVersion !== 'number' ||
+                            stateDocumentVersion < currentDocumentVersion
+                        ) {
+                            return;
+                        }
+                    }
+                    try {
+                        currentState = bridge.parseUpdateJson(stateJson);
+                        if (!currentState) return;
+                    } catch {
+                        currentState = bridge.getSelectionState();
+                    }
+                } else {
+                    currentState = bridge.getSelectionState();
+                }
+                if (
+                    currentState != null &&
+                    typeof currentState.documentVersion === 'number' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    currentState.documentVersion < currentDocumentVersion
+                ) {
+                    return;
+                }
+                if (
+                    currentState != null &&
+                    Platform.OS === 'android' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    typeof currentState.documentVersion !== 'number'
+                ) {
+                    return;
+                }
+                if (
+                    currentState == null &&
+                    Platform.OS === 'android' &&
+                    typeof currentDocumentVersion === 'number'
+                ) {
+                    return;
+                }
                 let selection: Selection;
+                const selectionStart = Math.min(anchor, head);
+                const selectionEnd = Math.max(anchor, head);
 
                 if (
-                    anchor === 0 &&
-                    head >= renderedTextLengthRef.current &&
+                    selectionStart === 0 &&
+                    selectionEnd >= renderedTextLengthRef.current &&
                     renderedTextLengthRef.current > 0
                 ) {
                     selection = { type: 'all' };
@@ -1513,20 +2127,12 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     selection = { type: 'text', anchor, head };
                 }
 
-                bridgeRef.current.updateSelectionFromNative(anchor, head);
-                let currentState: EditorUpdate | null = null;
-                if (typeof stateJson === 'string' && stateJson.length > 0) {
-                    try {
-                        currentState = bridgeRef.current.parseUpdateJson(stateJson);
-                    } catch {
-                        currentState = bridgeRef.current.getSelectionState();
-                    }
-                } else {
-                    currentState = bridgeRef.current.getSelectionState();
-                }
-                syncSelectionStateFromUpdate(currentState);
                 const nextSelection =
                     selection.type === 'all' ? selection : (currentState?.selection ?? selection);
+                if (currentState == null) {
+                    bridge.updateSelectionFromNative(anchor, head);
+                }
+                syncSelectionStateFromUpdate(currentState);
                 selectionRef.current = nextSelection;
                 if (currentState) {
                     onActiveStateChangeRef.current?.(currentState.activeState);
@@ -1549,6 +2155,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
 
         const handleFocusChange = useCallback(
             (event: NativeSyntheticEvent<NativeFocusEvent>) => {
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridgeRef.current)) return;
                 const { isFocused: focused } = event.nativeEvent;
                 if (
                     !focused &&
@@ -1565,7 +2172,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 isFocusedRef.current = focused;
                 setIsFocused(focused);
                 if (!focused) {
-                    setMentionQueryEvent(null);
+                    setMentionQueryEventState(null);
                 }
                 if (focused) {
                     if (!wasFocused) {
@@ -1575,18 +2182,19 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     onBlurRef.current?.();
                 }
             },
-            [editable, refocusAfterToolbarInteraction]
+            [editable, refocusAfterToolbarInteraction, setMentionQueryEventState]
         );
 
         useEffect(() => {
             if (addons?.mentions != null) {
                 return;
             }
-            setMentionQueryEvent(null);
-        }, [addons?.mentions]);
+            setMentionQueryEventState(null);
+        }, [addons?.mentions, setMentionQueryEventState]);
 
         const handleContentHeightChange = useCallback(
             (event: NativeSyntheticEvent<NativeContentHeightEvent>) => {
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridgeRef.current)) return;
                 if (heightBehavior !== 'autoGrow') return;
                 const density = Platform.OS === 'android' ? PixelRatio.get() : 1;
                 const nextHeight = Math.ceil(event.nativeEvent.contentHeight / density);
@@ -1594,6 +2202,52 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 setAutoGrowHeight((prev) => (prev === nextHeight ? prev : nextHeight));
             },
             [autoGrowHeight, heightBehavior]
+        );
+
+        const handleEditorReady = useCallback(
+            (event: NativeSyntheticEvent<NativeEditorReadyEvent>) => {
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridgeRef.current)) return;
+                const editorId = bridgeRef.current?.editorId;
+                const acknowledgedRevision = event.nativeEvent.editorUpdateRevision;
+                const inFlight = pendingNativeUpdateInFlightRef.current;
+                let didClearInFlight = false;
+                if (inFlight != null) {
+                    const matchesRevision =
+                        typeof acknowledgedRevision === 'number' &&
+                        inFlight.editorId === editorId &&
+                        inFlight.revision === acknowledgedRevision;
+                    if (!matchesRevision) {
+                        return;
+                    }
+                    pendingNativeUpdateInFlightRef.current = null;
+                    didClearInFlight = true;
+                    setPendingNativeUpdate((current) => {
+                        if (
+                            current.editorId !== editorId ||
+                            current.revision !== acknowledgedRevision ||
+                            current.json == null
+                        ) {
+                            return current;
+                        }
+                        const next = {
+                            json: undefined,
+                            editorId,
+                            revision: current.revision,
+                        };
+                        pendingNativeUpdateRef.current = next;
+                        return next;
+                    });
+                }
+                flushBlockedNativeCommandRetry();
+                if (didClearInFlight && pendingControlledSyncAfterNativeUpdateRef.current) {
+                    pendingControlledSyncAfterNativeUpdateRef.current = false;
+                    setControlledNativeUpdateRetry((revision) => revision + 1);
+                }
+                if (!pendingDetachedControlledSyncRef.current) return;
+                pendingDetachedControlledSyncRef.current = false;
+                setDetachedControlledSyncRetry((revision) => revision + 1);
+            },
+            [flushBlockedNativeCommandRetry]
         );
 
         const restoreSelection = useCallback((selection: Selection) => {
@@ -1614,6 +2268,182 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 bridgeRef.current?.setSelection(pos, pos);
             }
         }, []);
+
+        const isAsyncRequestCurrent = useCallback(
+            (requestEditorId: number | null, requestDocumentVersion: number | null): boolean => {
+                const bridge = bridgeRef.current;
+                return (
+                    bridge != null &&
+                    !bridge.isDestroyed &&
+                    bridge.editorId === requestEditorId &&
+                    documentVersionRef.current === requestDocumentVersion
+                );
+            },
+            []
+        );
+
+        const scalarRangeFromSelection = useCallback(
+            (selection: Selection): { anchor: number; head: number } | null => {
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed) return null;
+                if (selection.type === 'text') {
+                    const anchor = selection.anchor ?? 0;
+                    const head = selection.head ?? anchor;
+                    return {
+                        anchor: bridge.docToScalar(anchor),
+                        head: bridge.docToScalar(head),
+                    };
+                }
+                if (selection.type === 'node' && typeof selection.pos === 'number') {
+                    const scalar = bridge.docToScalar(selection.pos);
+                    return { anchor: scalar, head: scalar };
+                }
+                return null;
+            },
+            []
+        );
+
+        const isCommandRetryScopeCurrent = useCallback(
+            (scope: CommandRetryScope): boolean => {
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed || bridge.editorId !== scope.editorId) {
+                    return false;
+                }
+                const currentDocumentVersion = documentVersionRef.current;
+                const hasMentionScope =
+                    scope.mentionQuery != null ||
+                    scope.mentionRange != null ||
+                    scope.nativeMentionSelectRequest != null;
+                if (currentDocumentVersion !== scope.documentVersion) {
+                    if (!hasMentionScope) {
+                        return false;
+                    }
+                    if (
+                        typeof currentDocumentVersion === 'number' &&
+                        typeof scope.documentVersion === 'number' &&
+                        currentDocumentVersion > scope.documentVersion
+                    ) {
+                        return false;
+                    }
+                }
+                if (
+                    hasMentionScope &&
+                    typeof currentDocumentVersion === 'number' &&
+                    scope.documentVersion == null
+                ) {
+                    return false;
+                }
+                if (
+                    typeof scope.scalarAnchor === 'number' &&
+                    typeof scope.scalarHead === 'number'
+                ) {
+                    const currentRange = scalarRangeFromSelection(selectionRef.current);
+                    if (
+                        currentRange?.anchor !== scope.scalarAnchor ||
+                        currentRange?.head !== scope.scalarHead
+                    ) {
+                        return false;
+                    }
+                }
+                if (scope.mentionQuery) {
+                    const mentionQueryEditorId = mentionQueryEditorIdRef.current;
+                    if (
+                        mentionQueryEditorId != null &&
+                        mentionQueryEditorId !== scope.editorId
+                    ) {
+                        return false;
+                    }
+                    const currentQuery = mentionQueryEventRef.current;
+                    if (
+                        currentQuery == null ||
+                        currentQuery.trigger !== scope.mentionQuery.trigger ||
+                        currentQuery.query !== scope.mentionQuery.query ||
+                        currentQuery.range.anchor !== scope.mentionQuery.range.anchor ||
+                        currentQuery.range.head !== scope.mentionQuery.range.head ||
+                        currentQuery.documentVersion !== scope.mentionQuery.documentVersion
+                    ) {
+                        return false;
+                    }
+                }
+                if (scope.mentionRange) {
+                    const mentionQueryEditorId = mentionQueryEditorIdRef.current;
+                    if (
+                        mentionQueryEditorId != null &&
+                        mentionQueryEditorId !== scope.editorId
+                    ) {
+                        return false;
+                    }
+                    const currentQuery = mentionQueryEventRef.current;
+                    if (
+                        currentQuery == null ||
+                        currentQuery.range.anchor !== scope.mentionRange.anchor ||
+                        currentQuery.range.head !== scope.mentionRange.head ||
+                        (currentQuery.documentVersion ?? null) !== scope.documentVersion
+                    ) {
+                        return false;
+                    }
+                }
+                if (scope.nativeMentionSelectRequest) {
+                    const mentionQueryEditorId = mentionQueryEditorIdRef.current;
+                    if (
+                        mentionQueryEditorId != null &&
+                        mentionQueryEditorId !== scope.editorId
+                    ) {
+                        return false;
+                    }
+                    if (
+                        doesLiveMentionQueryConflictWithNativeSelectRequest(
+                            scope.nativeMentionSelectRequest,
+                            mentionQueryEventRef.current,
+                            scope.documentVersion,
+                            currentDocumentVersion
+                        )
+                    ) {
+                        return false;
+                    }
+                }
+                return true;
+            },
+            [scalarRangeFromSelection]
+        );
+
+        const runAndApplyWithCommandRetry = useCallback(
+            (
+                scope: CommandRetryScope,
+                mutate: () => EditorUpdate | null,
+                options?: RunAndApplyOptions,
+                onApplied?: (update: EditorUpdate) => void
+            ): { update: EditorUpdate | null; queued: boolean } => {
+                let didQueueRetry = false;
+                let run: (() => EditorUpdate | null) | null = null;
+                const runIfScopeCurrent = (): EditorUpdate | null => {
+                    if (!isCommandRetryScopeCurrent(scope)) return null;
+                    return run?.() ?? null;
+                };
+                const retry = (): boolean => {
+                    const update = runIfScopeCurrent();
+                    if (update) {
+                        onApplied?.(update);
+                    }
+                    return update != null;
+                };
+                run = () =>
+                    runAndApply(mutate, {
+                        ...options,
+                        retryBlockedCommand: retry,
+                        onBlockedCommandRetryQueued: () => {
+                            didQueueRetry = true;
+                            options?.onBlockedCommandRetryQueued?.();
+                        },
+                    });
+                const update = runIfScopeCurrent();
+                if (update) {
+                    onApplied?.(update);
+                }
+                return { update, queued: didQueueRetry };
+            },
+            [isCommandRetryScopeCurrent, runAndApply]
+        );
 
         const insertImage = useCallback(
             (src: string, attrs?: Omit<ImageNodeAttributes, 'src'>, selection?: Selection) => {
@@ -1641,51 +2471,140 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
 
         const openLinkRequest = useCallback(() => {
             const requestSelection = selectionRef.current;
+            const requestDocumentVersion = documentVersionRef.current;
+            const requestEditorId = bridgeRef.current?.editorId ?? null;
+            const linkState = activeStateRef.current;
+            const requestLinkHref =
+                typeof linkState.markAttrs?.link?.href === 'string'
+                    ? (linkState.markAttrs.link.href as string)
+                    : undefined;
 
             onRequestLink?.({
-                href: currentLinkHref,
-                isActive: activeState.marks.link === true,
+                href: requestLinkHref,
+                isActive: linkState.marks.link === true,
                 selection: requestSelection,
                 setLink: (href: string) => {
                     const trimmedHref = href.trim();
                     if (!trimmedHref) return;
-                    runAndApply(
-                        () => {
-                            restoreSelection(requestSelection);
-                            return (
-                                bridgeRef.current?.setMark('link', {
-                                    href: trimmedHref,
-                                }) ?? null
-                            );
+                    if (!isAsyncRequestCurrent(requestEditorId, requestDocumentVersion)) return;
+                    const bridge = bridgeRef.current;
+                    if (!bridge || bridge.isDestroyed) return;
+                    const scalarSelection = scalarRangeFromSelection(requestSelection);
+                    if (!scalarSelection) return;
+                    runAndApplyWithCommandRetry(
+                        {
+                            editorId: bridge.editorId,
+                            documentVersion: requestDocumentVersion,
+                            scalarAnchor: scalarSelection.anchor,
+                            scalarHead: scalarSelection.head,
                         },
+                        () =>
+                            bridgeRef.current?.setMarkAtSelectionScalar(
+                                scalarSelection.anchor,
+                                scalarSelection.head,
+                                'link',
+                                { href: trimmedHref }
+                            ) ?? null,
                         { skipNativeApplyIfContentUnchanged: true }
                     );
                 },
                 unsetLink: () => {
-                    runAndApply(
-                        () => {
-                            restoreSelection(requestSelection);
-                            return bridgeRef.current?.unsetMark('link') ?? null;
+                    if (!isAsyncRequestCurrent(requestEditorId, requestDocumentVersion)) return;
+                    const bridge = bridgeRef.current;
+                    if (!bridge || bridge.isDestroyed) return;
+                    const scalarSelection = scalarRangeFromSelection(requestSelection);
+                    if (!scalarSelection) return;
+                    runAndApplyWithCommandRetry(
+                        {
+                            editorId: bridge.editorId,
+                            documentVersion: requestDocumentVersion,
+                            scalarAnchor: scalarSelection.anchor,
+                            scalarHead: scalarSelection.head,
                         },
+                        () =>
+                            bridgeRef.current?.unsetMarkAtSelectionScalar(
+                                scalarSelection.anchor,
+                                scalarSelection.head,
+                                'link'
+                            ) ?? null,
                         { skipNativeApplyIfContentUnchanged: true }
                     );
                 },
             });
-        }, [activeState.marks.link, currentLinkHref, onRequestLink, restoreSelection, runAndApply]);
+        }, [
+            isAsyncRequestCurrent,
+            onRequestLink,
+            runAndApplyWithCommandRetry,
+            scalarRangeFromSelection,
+        ]);
 
         const openImageRequest = useCallback(() => {
             const requestSelection = selectionRef.current;
+            const requestDocumentVersion = documentVersionRef.current;
+            const requestEditorId = bridgeRef.current?.editorId ?? null;
 
             onRequestImage?.({
                 selection: requestSelection,
                 allowBase64: allowBase64Images,
-                insertImage: (src: string, attrs?: Omit<ImageNodeAttributes, 'src'>) =>
-                    insertImage(src, attrs, requestSelection),
+                insertImage: (src: string, attrs?: Omit<ImageNodeAttributes, 'src'>) => {
+                    const trimmedSrc = src.trim();
+                    if (!trimmedSrc) return;
+                    if (!allowBase64Images && isImageDataUrl(trimmedSrc)) return;
+                    if (!isAsyncRequestCurrent(requestEditorId, requestDocumentVersion)) return;
+                    const bridge = bridgeRef.current;
+                    if (!bridge || bridge.isDestroyed) return;
+                    const scalarSelection = scalarRangeFromSelection(requestSelection);
+                    if (!scalarSelection) return;
+                    runAndApplyWithCommandRetry(
+                        {
+                            editorId: bridge.editorId,
+                            documentVersion: requestDocumentVersion,
+                            scalarAnchor: scalarSelection.anchor,
+                            scalarHead: scalarSelection.head,
+                        },
+                        () =>
+                            bridgeRef.current?.insertContentJsonAtSelectionScalar(
+                                scalarSelection.anchor,
+                                scalarSelection.head,
+                                buildImageFragmentJson({
+                                    src: trimmedSrc,
+                                    ...(attrs ?? {}),
+                                })
+                            ) ?? null
+                    );
+                },
             });
-        }, [allowBase64Images, insertImage, onRequestImage]);
+        }, [
+            allowBase64Images,
+            isAsyncRequestCurrent,
+            onRequestImage,
+            runAndApplyWithCommandRetry,
+            scalarRangeFromSelection,
+        ]);
 
         const handleToolbarAction = useCallback(
             (event: NativeSyntheticEvent<NativeToolbarActionEvent>) => {
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridgeRef.current)) return;
+                const currentDocumentVersion = documentVersionRef.current;
+                const eventDocumentVersion = event.nativeEvent.documentVersion;
+                if (
+                    typeof eventDocumentVersion === 'number' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    eventDocumentVersion < currentDocumentVersion
+                ) {
+                    return;
+                }
+                if (
+                    Platform.OS === 'android' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    typeof eventDocumentVersion !== 'number' &&
+                    typeof event.nativeEvent.updateJson !== 'string'
+                ) {
+                    return;
+                }
+                if (!syncPreflightUpdateFromNativeEvent(event.nativeEvent.updateJson)) {
+                    return;
+                }
                 if (event.nativeEvent.key === LINK_TOOLBAR_ACTION_KEY) {
                     openLinkRequest();
                     return;
@@ -1696,7 +2615,12 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 }
                 onToolbarAction?.(event.nativeEvent.key);
             },
-            [onToolbarAction, openImageRequest, openLinkRequest]
+            [
+                onToolbarAction,
+                openImageRequest,
+                openLinkRequest,
+                syncPreflightUpdateFromNativeEvent,
+            ]
         );
 
         const resolveMentionSelectionAttrs = useCallback(
@@ -1753,37 +2677,111 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 ) {
                     return;
                 }
+                const currentDocumentVersion = documentVersionRef.current;
+                if (
+                    typeof mentionQuery.documentVersion === 'number' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    mentionQuery.documentVersion < currentDocumentVersion
+                ) {
+                    setMentionQueryEventState(null);
+                    return;
+                }
 
-                const attrs = resolveMentionInsertionAttrs({
-                    trigger: mentionQuery.trigger,
-                    suggestion,
-                    attrs: resolveMentionSuggestionAttrs(suggestion, mentionQuery.trigger),
-                    range: mentionQuery.range,
-                });
+                let attrs: Record<string, unknown> | null = null;
 
-                const update = runAndApply(
-                    () =>
-                        bridgeRef.current?.insertContentJsonAtSelectionScalar(
-                            mentionQuery.range.anchor,
-                            mentionQuery.range.head,
-                            buildMentionFragmentJson(attrs)
-                        ) ?? null
-                );
-
-                if (update) {
-                    setMentionQueryEvent(null);
+                const requestDocumentVersion =
+                    typeof mentionQuery.documentVersion === 'number'
+                        ? mentionQuery.documentVersion
+                        : currentDocumentVersion;
+                const retryScope: CommandRetryScope = {
+                    editorId: bridgeRef.current.editorId,
+                    documentVersion: requestDocumentVersion,
+                    mentionQuery,
+                };
+                let queuedRetry = false;
+                let retry: (() => boolean) | null = null;
+                const finishSelection = (selectedAttrs: Record<string, unknown>) => {
+                    setMentionQueryEventState(null);
                     mentions.onSelect?.({
                         trigger: mentionQuery.trigger,
                         suggestion,
-                        attrs,
+                        attrs: selectedAttrs,
+                        ...(typeof mentionQuery.documentVersion === 'number'
+                            ? { documentVersion: mentionQuery.documentVersion }
+                            : {}),
                     });
+                };
+                const attemptInsertion = (): boolean => {
+                    if (!isCommandRetryScopeCurrent(retryScope)) return false;
+                    attrs = null;
+                    const update = runAndApply(
+                        () =>
+                            bridgeRef.current?.insertContentJsonAtSelectionScalarLazy(
+                                mentionQuery.range.anchor,
+                                mentionQuery.range.head,
+                                () => {
+                                    attrs = resolveMentionInsertionAttrs({
+                                        trigger: mentionQuery.trigger,
+                                        suggestion,
+                                        attrs: resolveMentionSuggestionAttrs(
+                                            suggestion,
+                                            mentionQuery.trigger
+                                        ),
+                                        range: mentionQuery.range,
+                                        ...(typeof mentionQuery.documentVersion === 'number'
+                                            ? { documentVersion: mentionQuery.documentVersion }
+                                            : {}),
+                                    });
+                                    return buildMentionFragmentJson(attrs);
+                                }
+                            ) ?? null,
+                        {
+                            retryBlockedCommand: () => retry?.() === true,
+                            onBlockedCommandRetryQueued: () => {
+                                queuedRetry = true;
+                            },
+                        }
+                    );
+                    if (update && attrs) {
+                        finishSelection(attrs);
+                        return true;
+                    }
+                    return false;
+                };
+                retry = attemptInsertion;
+
+                if (attemptInsertion()) {
+                    return;
+                }
+
+                if (queuedRetry) {
+                    return;
+                }
+
+                const latestMentionQuery = mentionQueryEventRef.current;
+                if (
+                    latestMentionQuery == null ||
+                    (latestMentionQuery.trigger === mentionQuery.trigger &&
+                        latestMentionQuery.query === mentionQuery.query &&
+                        latestMentionQuery.range.anchor === mentionQuery.range.anchor &&
+                        latestMentionQuery.range.head === mentionQuery.range.head &&
+                        latestMentionQuery.documentVersion === mentionQuery.documentVersion)
+                ) {
+                    setMentionQueryEventState(null);
                 }
             },
-            [resolveMentionInsertionAttrs, runAndApply]
+            [
+                isCommandRetryScopeCurrent,
+                resolveMentionInsertionAttrs,
+                runAndApply,
+                setMentionQueryEventState,
+            ]
         );
 
         const handleAddonEvent = useCallback(
             (event: NativeSyntheticEvent<NativeAddonEvent>) => {
+                const bridge = bridgeRef.current;
+                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridge)) return;
                 let parsed: EditorAddonEvent | null = null;
                 try {
                     parsed = JSON.parse(event.nativeEvent.eventJson) as EditorAddonEvent;
@@ -1791,66 +2789,149 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     return;
                 }
                 if (!parsed) return;
+                let parsedDocumentVersion =
+                    typeof parsed.documentVersion === 'number' ? parsed.documentVersion : undefined;
+                if (
+                    typeof parsedDocumentVersion !== 'number' &&
+                    parsed.type === 'mentionsSelectRequest' &&
+                    typeof parsed.updateJson === 'string'
+                ) {
+                    try {
+                        const parsedUpdate = JSON.parse(parsed.updateJson) as {
+                            documentVersion?: unknown;
+                        };
+                        if (typeof parsedUpdate.documentVersion === 'number') {
+                            parsedDocumentVersion = parsedUpdate.documentVersion;
+                        }
+                    } catch {
+                        return;
+                    }
+                }
+                const currentDocumentVersion = documentVersionRef.current;
+                const isStaleAddonEvent =
+                    typeof parsedDocumentVersion === 'number' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    parsedDocumentVersion < currentDocumentVersion;
+                const isVersionlessAndroidAddonEvent =
+                    Platform.OS === 'android' &&
+                    typeof currentDocumentVersion === 'number' &&
+                    typeof parsedDocumentVersion !== 'number';
 
                 if (parsed.type === 'mentionsQueryChange') {
+                    if (isStaleAddonEvent || isVersionlessAndroidAddonEvent) return;
                     const nextEvent: MentionQueryChangeEvent = {
                         query: parsed.query,
                         trigger: parsed.trigger,
                         range: parsed.range,
                         isActive: parsed.isActive,
+                        documentVersion: parsedDocumentVersion,
                     };
-                    setMentionQueryEvent(parsed.isActive ? nextEvent : null);
+                    setMentionQueryEventState(
+                        parsed.isActive ? nextEvent : null,
+                        event.nativeEvent.editorId ?? bridgeRef.current?.editorId ?? null
+                    );
                     addonsRef.current?.mentions?.onQueryChange?.({
                         query: nextEvent.query,
                         trigger: nextEvent.trigger,
                         range: nextEvent.range,
                         isActive: nextEvent.isActive,
+                        ...(typeof nextEvent.documentVersion === 'number'
+                            ? { documentVersion: nextEvent.documentVersion }
+                            : {}),
                     });
                     return;
                 }
 
                 if (parsed.type === 'mentionsSelectRequest') {
+                    if (isStaleAddonEvent || isVersionlessAndroidAddonEvent) return;
+                    const requestDocumentVersion =
+                        typeof parsedDocumentVersion === 'number'
+                            ? parsedDocumentVersion
+                            : currentDocumentVersion;
+                    const nativeMentionSelectRequest: NativeMentionSelectRetryScope = {
+                        trigger: parsed.trigger,
+                        suggestionKey: parsed.suggestionKey,
+                        range: parsed.range,
+                    };
+                    if (
+                        doesLiveMentionQueryConflictWithNativeSelectRequest(
+                            nativeMentionSelectRequest,
+                            mentionQueryEventRef.current,
+                            requestDocumentVersion,
+                            currentDocumentVersion
+                        )
+                    ) {
+                        return;
+                    }
+                    if (!syncPreflightUpdateFromNativeEvent(parsed.updateJson)) return;
                     const suggestion = mentionSuggestionsByKeyRef.current.get(parsed.suggestionKey);
                     if (!suggestion || !bridgeRef.current || bridgeRef.current.isDestroyed) return;
 
-                    const selectionEvent: MentionSelectionAttrsEvent = {
-                        trigger: parsed.trigger,
-                        suggestion,
-                        attrs: parsed.attrs,
-                        range: parsed.range,
-                    };
-                    const finalAttrs = resolveMentionInsertionAttrs(selectionEvent);
-
-                    const update = runAndApply(
-                        () =>
-                            bridgeRef.current?.insertContentJsonAtSelectionScalar(
-                                parsed.range.anchor,
-                                parsed.range.head,
-                                buildMentionFragmentJson(finalAttrs)
-                            ) ?? null
+                    let finalAttrs: Record<string, unknown> | null = null;
+                    runAndApplyWithCommandRetry(
+                        {
+                            editorId: bridgeRef.current.editorId,
+                            documentVersion: requestDocumentVersion,
+                            nativeMentionSelectRequest,
+                        },
+                        () => {
+                            return (
+                                bridgeRef.current?.insertContentJsonAtSelectionScalarLazy(
+                                    parsed.range.anchor,
+                                    parsed.range.head,
+                                    () => {
+                                        const selectionEvent: MentionSelectionAttrsEvent = {
+                                            trigger: parsed.trigger,
+                                            suggestion,
+                                            attrs: parsed.attrs,
+                                            range: parsed.range,
+                                            ...(typeof parsedDocumentVersion === 'number'
+                                                ? { documentVersion: parsedDocumentVersion }
+                                                : {}),
+                                        };
+                                        const attrs = resolveMentionInsertionAttrs(selectionEvent);
+                                        finalAttrs = attrs;
+                                        return buildMentionFragmentJson(attrs);
+                                    }
+                                ) ?? null
+                            );
+                        },
+                        undefined,
+                        () => {
+                            if (!finalAttrs) return;
+                            addonsRef.current?.mentions?.onSelect?.({
+                                trigger: parsed.trigger,
+                                suggestion,
+                                attrs: finalAttrs,
+                                ...(typeof parsedDocumentVersion === 'number'
+                                    ? { documentVersion: parsedDocumentVersion }
+                                    : {}),
+                            });
+                        }
                     );
-
-                    if (update) {
-                        addonsRef.current?.mentions?.onSelect?.({
-                            trigger: parsed.trigger,
-                            suggestion,
-                            attrs: finalAttrs,
-                        });
-                    }
                     return;
                 }
 
                 if (parsed.type === 'mentionsSelect') {
+                    if (isStaleAddonEvent || isVersionlessAndroidAddonEvent) return;
                     const suggestion = mentionSuggestionsByKeyRef.current.get(parsed.suggestionKey);
                     if (!suggestion) return;
                     addonsRef.current?.mentions?.onSelect?.({
                         trigger: parsed.trigger,
                         suggestion,
                         attrs: parsed.attrs,
+                        ...(typeof parsedDocumentVersion === 'number'
+                            ? { documentVersion: parsedDocumentVersion }
+                            : {}),
                     });
                 }
             },
-            [resolveMentionInsertionAttrs, runAndApply]
+            [
+                resolveMentionInsertionAttrs,
+                runAndApplyWithCommandRetry,
+                setMentionQueryEventState,
+                syncPreflightUpdateFromNativeEvent,
+            ]
         );
 
         useImperativeHandle(
@@ -1918,14 +2999,23 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 },
                 getContent(): string {
                     if (!bridgeRef.current || bridgeRef.current.isDestroyed) return '';
+                    if (!prepareBridgeForExternalContentRead()) {
+                        return bridgeRef.current.getCachedHtml() ?? '';
+                    }
                     return bridgeRef.current.getHtml();
                 },
                 getContentJson(): DocumentJSON {
                     if (!bridgeRef.current || bridgeRef.current.isDestroyed) return {};
+                    if (!prepareBridgeForExternalContentRead()) {
+                        return bridgeRef.current.getCachedJson() ?? {};
+                    }
                     return bridgeRef.current.getJson();
                 },
                 getTextContent(): string {
                     if (!bridgeRef.current || bridgeRef.current.isDestroyed) return '';
+                    if (!prepareBridgeForExternalContentRead()) {
+                        return (bridgeRef.current.getCachedHtml() ?? '').replace(/<[^>]+>/g, '');
+                    }
                     return bridgeRef.current.getHtml().replace(/<[^>]+>/g, '');
                 },
                 async getCaretRect(): Promise<NativeRichTextEditorCaretRect | null> {
@@ -1949,7 +3039,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     return bridgeRef.current.canRedo();
                 },
             }),
-            [insertImage, runAndApply]
+            [insertImage, prepareBridgeForExternalContentRead, runAndApply]
         );
 
         const activeMentionTrigger = mentionQueryEvent?.trigger || resolveMentionTrigger(addons);
@@ -1983,6 +3073,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     suggestion,
                     attrs: resolveMentionSuggestionAttrs(suggestion, activeMentionTrigger),
                     range: mentionQueryEvent.range,
+                    ...(typeof mentionQueryEvent.documentVersion === 'number'
+                        ? { documentVersion: mentionQueryEvent.documentVersion }
+                        : {}),
                 };
                 const attrs = resolveMentionSelectionAttrs(selectionEvent);
                 let resolvedTheme: EditorMentionTheme | undefined;
@@ -2201,12 +3294,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                                                     : (suggestionTheme?.backgroundColor ??
                                                       '#F2F2F7'),
                                                 borderColor:
-                                                    suggestionTheme?.borderColor ??
-                                                    'transparent',
-                                                borderWidth:
-                                                    suggestionTheme?.borderWidth ?? 0,
-                                                borderRadius:
-                                                    suggestionTheme?.borderRadius ?? 12,
+                                                    suggestionTheme?.borderColor ?? 'transparent',
+                                                borderWidth: suggestionTheme?.borderWidth ?? 0,
+                                                borderRadius: suggestionTheme?.borderRadius ?? 12,
                                             },
                                         ]}>
                                         {({ pressed }) => (
@@ -2365,11 +3455,13 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     remoteSelectionsJson={remoteSelectionsJson}
                     toolbarFrameJson={toolbarFrameJson}
                     editorUpdateJson={pendingNativeUpdate.json}
+                    editorUpdateEditorId={pendingNativeUpdate.editorId}
                     editorUpdateRevision={pendingNativeUpdate.revision}
                     onEditorUpdate={handleUpdate}
                     onSelectionChange={handleSelectionChange}
                     onFocusChange={handleFocusChange}
                     onContentHeightChange={handleContentHeightChange}
+                    {...(Platform.OS === 'android' ? { onEditorReady: handleEditorReady } : {})}
                     onToolbarAction={handleToolbarAction}
                     onAddonEvent={handleAddonEvent}
                 />

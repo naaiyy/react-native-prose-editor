@@ -61,6 +61,33 @@ object PositionBridge {
         return if (nextBoundary == BreakIterator.DONE) text.length else nextBoundary
     }
 
+    /**
+     * Snaps a UTF-16 offset out of the middle of a surrogate pair without
+     * applying full grapheme-cluster expansion.
+     */
+    fun snapToScalarBoundary(
+        utf16Offset: Int,
+        text: String,
+        biasForward: Boolean
+    ): Int {
+        val clampedOffset = utf16Offset.coerceIn(0, text.length)
+        if (clampedOffset <= 0 || clampedOffset >= text.length) return clampedOffset
+
+        val previous = text[clampedOffset - 1]
+        val current = text[clampedOffset]
+        if (Character.isHighSurrogate(previous) && Character.isLowSurrogate(current)) {
+            return if (biasForward) clampedOffset + 1 else clampedOffset - 1
+        }
+        return clampedOffset
+    }
+
+    fun snapRangeToScalarBoundaries(start: Int, end: Int, text: String): Pair<Int, Int> {
+        val lower = minOf(start, end).coerceIn(0, text.length)
+        val upper = maxOf(start, end).coerceIn(0, text.length)
+        return snapToScalarBoundary(lower, text, biasForward = false) to
+            snapToScalarBoundary(upper, text, biasForward = true)
+    }
+
     private fun conversionTableFor(text: String): ConversionTable {
         val lastText = cachedText
         val lastTable = cachedTable

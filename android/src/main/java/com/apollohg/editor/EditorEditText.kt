@@ -1,15 +1,18 @@
 package com.apollohg.editor
 
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.SystemClock
 import android.text.Annotation
 import android.text.Editable
 import android.text.InputType
 import android.text.Layout
 import android.text.Spanned
+import android.text.SpannableStringBuilder
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextWatcher
@@ -80,6 +83,17 @@ class EditorEditText @JvmOverloads constructor(
         val label: String
     )
 
+    data class CommandPreparation(
+        val ready: Boolean,
+        val updateJSON: String?
+    )
+
+    private data class HardwareKeyEventSignature(
+        val keyCode: Int,
+        val downTime: Long,
+        val repeatCount: Int
+    )
+
     data class LinkHit(
         val href: String,
         val text: String
@@ -112,7 +126,21 @@ class EditorEditText @JvmOverloads constructor(
         val scalarFrom: Int,
         val scalarTo: Int,
         val replacementText: String,
-        val resultingText: String
+        val resultingText: String,
+        val selectionScalarAnchor: Int?,
+        val selectionScalarHead: Int?
+    )
+
+    private data class NativeTextMutationAfterBlurWindow(
+        val editorId: Long,
+        val authorizedTextRevision: Long,
+        val deadlineMs: Long,
+        var didAdoptMutation: Boolean = false
+    )
+
+    private data class NativeTextMutationAdoptionSuppression(
+        val editorId: Long,
+        val authorizedTextRevision: Long
     )
 
     /**
@@ -137,6 +165,13 @@ class EditorEditText @JvmOverloads constructor(
      * focus, text selection, and copy capability.
      */
     var isEditable: Boolean = true
+        set(value) {
+            if (field == value) return
+            if (!value) {
+                discardTransientNativeInputForReadOnly()
+            }
+            field = value
+        }
 
     /**
      * Guard flag to prevent re-entrant input interception while we're
@@ -192,12 +227,25 @@ class EditorEditText @JvmOverloads constructor(
     var reconciliationCount: Int = 0
         private set
 
-    private var lastHandledHardwareKeyCode: Int? = null
-    private var lastHandledHardwareKeyDownTime: Long? = null
+    private var lastHandledHardwareKeySignature: HardwareKeyEventSignature? = null
+    private var recentHandledHardwareKeyDownSignature: HardwareKeyEventSignature? = null
+    private var recentHandledHardwareKeyDownUptimeMs: Long = 0L
+    private var activeInputConnection: EditorInputConnection? = null
+    private var inputConnectionGeneration: Long = 0L
+    private var composingText: String? = null
+    private var composingReplacementStartUtf16: Int? = null
+    private var composingReplacementEndUtf16: Int? = null
+    private var composingReplacementAuthorizedTextRevision: Long? = null
+    private var didInvalidateCompositionReplacementRange = false
+    private var nativeTextMutationAfterBlurWindow: NativeTextMutationAfterBlurWindow? = null
+    private var nativeTextMutationAdoptionSuppression: NativeTextMutationAdoptionSuppression? = null
+    private var lastAuthorizedTextRevision: Long = 0L
+    private var lastAuthorizedRenderedText: CharSequence? = null
     private var explicitSelectedImageRange: ImageSelectionRange? = null
     private var lastRenderAppliedPatchForTesting: Boolean = false
     internal var captureApplyUpdateTraceForTesting: Boolean = false
     private var lastApplyUpdateTraceForTesting: ApplyUpdateTrace? = null
+    private val imeTraceForTesting = java.util.ArrayDeque<String>()
     private var currentRenderBlocksJson: org.json.JSONArray? = null
     private var renderAppearanceRevision: Long = 1L
     private var lastAppliedRenderAppearanceRevision: Long = 0L
@@ -205,9 +253,31 @@ class EditorEditText @JvmOverloads constructor(
     internal var onDeleteBackwardAtSelectionScalarInRustForTesting: ((Int, Int) -> Unit)? = null
     internal var onInsertTextInRustForTesting: ((String, Int) -> Unit)? = null
     internal var onReplaceTextInRustForTesting: ((Int, Int, String) -> Unit)? = null
+    internal var onSetSelectionScalarInRustForTesting: ((Int, Int) -> Unit)? = null
+    internal var onDeleteAndSplitScalarInRustForTesting: ((Int, Int) -> Unit)? = null
+    internal var onInsertContentHtmlInRustForTesting: ((String) -> Unit)? = null
+    internal var onInsertContentJsonAtSelectionScalarForTesting: ((Int, Int, String) -> Unit)? = null
+    internal var blockExternalEditorUpdatePreparationForTesting = false
+    internal var blockExternalEditorCommandPreparationForTesting = false
 
     fun lastRenderAppliedPatch(): Boolean = lastRenderAppliedPatchForTesting
     fun lastApplyUpdateTrace(): ApplyUpdateTrace? = lastApplyUpdateTraceForTesting
+
+    internal fun recordImeTraceForTesting(event: String, details: String = "") {
+        if (imeTraceForTesting.size >= IME_TRACE_LIMIT_FOR_TESTING) {
+            imeTraceForTesting.removeFirst()
+        }
+        imeTraceForTesting.addLast(
+            if (details.isEmpty()) event else "$event:$details"
+        )
+    }
+
+    internal fun clearImeTraceForTesting() {
+        imeTraceForTesting.clear()
+    }
+
+    internal fun imeTraceSnapshotForTesting(): List<String> =
+        imeTraceForTesting.toList()
 
     init {
         // Configure for rich text editing.
@@ -283,22 +353,23 @@ class EditorEditText @JvmOverloads constructor(
 
         val currentStart = selectionStart
         val currentEnd = selectionEnd
+        val authorizedSelection = authorizedSelectionForTransientInputRestore(
+            currentStart,
+            currentEnd
+        )
+        discardTransientInputAndRestoreAuthorizedTextForEditor()
         setRawInputType(nextInputType)
 
         val editable = text
-        if (
-            editable != null &&
-            currentStart >= 0 &&
-            currentEnd >= 0 &&
-            currentStart <= editable.length &&
-            currentEnd <= editable.length
-        ) {
-            setSelection(currentStart, currentEnd)
+        if (editable != null && authorizedSelection != null) {
+            setSelection(
+                authorizedSelection.first.coerceIn(0, editable.length),
+                authorizedSelection.second.coerceIn(0, editable.length)
+            )
         }
 
         if (hasFocus()) {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.restartInput(this)
+            restartInputForEditor()
         }
     }
 
@@ -346,15 +417,71 @@ class EditorEditText @JvmOverloads constructor(
      */
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         val baseConnection = super.onCreateInputConnection(outAttrs) ?: return null
-        return EditorInputConnection(this, baseConnection)
+        val generation = nextInputConnectionGenerationForEditor()
+        return EditorInputConnection(this, baseConnection, editorId, generation).also {
+            activeInputConnection = it
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!isEditable && isReadOnlyTextMutationKeyEvent(event)) {
+            return true
+        }
+        if (handleCompositionKeyEvent(event) { super.dispatchKeyEvent(event) }) {
+            return true
+        }
         if (handleHardwareKeyEvent(event)) {
+            return true
+        }
+        if (handlePrintableHardwareKeyEvent(event) { super.dispatchKeyEvent(event) }) {
             return true
         }
         return super.dispatchKeyEvent(event)
     }
+
+    internal fun handleCompositionKeyEvent(event: KeyEvent, applyBaseEvent: () -> Boolean): Boolean {
+        val inputConnection = activeInputConnection ?: return false
+        if (!inputConnection.hasPendingComposition()) return false
+        if (!isCompositionKeyCode(event.keyCode)) return false
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val signature = hardwareKeyEventSignature(event)
+            if (
+                lastHandledHardwareKeySignature == signature ||
+                didRecentlyHandleHardwareKeyDown(signature)
+            ) {
+                return true
+            }
+            markHandledHardwareKeyDown(signature)
+            runWithTransientInputMutationGuard {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DEL,
+                    KeyEvent.KEYCODE_FORWARD_DEL -> inputConnection.deleteTransientTextForHardwareKeyEvent(event)
+                    else -> applyBaseEvent()
+                }
+            }
+            inputConnection.refreshComposingTextFromEditableForEditor()
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_UP) {
+            if (lastHandledHardwareKeySignature?.let {
+                    it.keyCode == event.keyCode && it.downTime == event.downTime
+                } == true) {
+                lastHandledHardwareKeySignature = null
+            }
+            return true
+        }
+        return false
+    }
+
+    private fun isCompositionKeyCode(keyCode: Int): Boolean =
+        when (keyCode) {
+            KeyEvent.KEYCODE_DEL,
+            KeyEvent.KEYCODE_FORWARD_DEL,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_TAB -> true
+            else -> false
+        }
 
     override fun onDraw(canvas: android.graphics.Canvas) {
         super.onDraw(canvas)
@@ -492,7 +619,15 @@ class EditorEditText @JvmOverloads constructor(
      * @param id The editor ID from `editor_create()`.
      * @param initialHTML Optional HTML to set as initial content.
      */
-    fun bindEditor(id: Long, initialHTML: String? = null) {
+    fun bindEditor(id: Long, initialHTML: String? = null, notifyListener: Boolean = true) {
+        if (id != 0L && NativeEditorViewRegistry.isDestroyed(id)) {
+            discardTransientNativeInputForEditorRebind()
+            editorId = 0L
+            return
+        }
+        if (editorId != id) {
+            discardTransientNativeInputForEditorRebind()
+        }
         editorId = id
 
         if (!initialHTML.isNullOrEmpty()) {
@@ -502,7 +637,7 @@ class EditorEditText @JvmOverloads constructor(
         } else {
             // Pull current state from Rust (content may already be loaded via bridge).
             val stateJSON = editorGetCurrentState(editorId.toULong())
-            applyUpdateJSON(stateJSON)
+            applyUpdateJSON(stateJSON, notifyListener = notifyListener)
         }
     }
 
@@ -510,6 +645,9 @@ class EditorEditText @JvmOverloads constructor(
      * Unbind from the current editor instance.
      */
     fun unbindEditor() {
+        if (editorId != 0L) {
+            discardTransientNativeInputForEditorRebind()
+        }
         editorId = 0
     }
 
@@ -530,7 +668,7 @@ class EditorEditText @JvmOverloads constructor(
         renderAppearanceRevision += 1L
         setBackgroundColor(theme?.backgroundColor ?: baseBackgroundColor)
         applyContentInsets(theme?.contentInsets)
-        if (editorId != 0L) {
+        if (hasLiveEditor()) {
             val previousScrollX = scrollX
             val previousScrollY = scrollY
             val stateJSON = editorGetCurrentState(editorId.toULong())
@@ -685,17 +823,18 @@ class EditorEditText @JvmOverloads constructor(
      * Called by [EditorInputConnection.commitText]. Routes the text through
      * the Rust editor instead of directly inserting into the EditText.
      */
-    fun handleTextCommit(text: String) {
+    fun handleTextCommit(text: String, newCursorPosition: Int = 1) {
         if (!isEditable) return
         if (isApplyingRustState) return
+        val selectionRange = normalizedUtf16SelectionRange() ?: return
         if (editorId == 0L) {
             // No Rust editor bound — fall through to direct editing (dev mode).
             val editable = this.text ?: return
-            val start = selectionStart
-            val end = selectionEnd
+            val (start, end) = selectionRange
             editable.replace(start, end, text)
             return
         }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
 
         // Handle Enter/Return as a block split operation.
         if (text == "\n") {
@@ -704,18 +843,19 @@ class EditorEditText @JvmOverloads constructor(
         }
 
         val currentText = this.text?.toString() ?: ""
-        val start = selectionStart
-        val end = selectionEnd
-
-        if (start != end) {
-            // Range selection: atomic replace via Rust.
-            val scalarStart = PositionBridge.utf16ToScalar(start, currentText)
-            val scalarEnd = PositionBridge.utf16ToScalar(end, currentText)
-            replaceTextRangeInRust(scalarStart, scalarEnd, text)
-        } else {
-            val scalarPos = PositionBridge.utf16ToScalar(start, currentText)
-            insertTextInRust(text, scalarPos)
-        }
+        val (scalarStart, scalarEnd) = normalizedScalarSelectionRange(currentText) ?: return
+        insertPlainTextRangeInRust(
+            scalarStart,
+            scalarEnd,
+            text,
+            requestedCursorScalar = requestedCursorScalar(
+                scalarStart,
+                scalarEnd,
+                currentText,
+                text,
+                newCursorPosition
+            )
+        )
     }
 
     internal fun runWithTransientInputMutationGuard(block: () -> Boolean): Boolean {
@@ -728,29 +868,495 @@ class EditorEditText @JvmOverloads constructor(
         }
     }
 
-    fun handleCompositionCommit(text: String, replacementStartUtf16: Int, replacementEndUtf16: Int) {
+    internal fun authorizedUtf16Range(start: Int, end: Int): Pair<Int, Int> {
+        if (start == end) {
+            val snapped = PositionBridge.snapToScalarBoundary(
+                start,
+                lastAuthorizedText,
+                biasForward = true
+            )
+            return snapped to snapped
+        }
+        return PositionBridge.snapRangeToScalarBoundaries(start, end, lastAuthorizedText)
+    }
+
+    internal fun isCurrentTextAuthorizedForEditor(): Boolean =
+        (text?.toString() ?: "") == lastAuthorizedText
+
+    internal fun captureCompositionReplacementRangeIfNeeded() {
+        if (didInvalidateCompositionReplacementRange) return
+        if (compositionReplacementRange() != null) return
+        val (start, end) = normalizedUtf16SelectionRange() ?: return
+        setCompositionReplacementRange(start, end)
+    }
+
+    internal fun setCompositionReplacementRange(start: Int, end: Int) {
+        if (didInvalidateCompositionReplacementRange) return
+        val replacementRange = authorizedUtf16Range(start, end)
+        composingReplacementStartUtf16 = replacementRange.first
+        composingReplacementEndUtf16 = replacementRange.second
+        composingReplacementAuthorizedTextRevision = lastAuthorizedTextRevision
+        didInvalidateCompositionReplacementRange = false
+    }
+
+    internal fun compositionReplacementRange(): Pair<Int, Int>? {
+        val start = composingReplacementStartUtf16 ?: return null
+        val end = composingReplacementEndUtf16 ?: return null
+        if (composingReplacementAuthorizedTextRevision != lastAuthorizedTextRevision) {
+            clearCompositionTrackingForEditor()
+            didInvalidateCompositionReplacementRange = true
+            return null
+        }
+        return start to end
+    }
+
+    private fun authorizedSelectionForTransientInputRestore(
+        currentStart: Int,
+        currentEnd: Int
+    ): Pair<Int, Int>? {
+        compositionReplacementRange()?.let { return it }
+        return if (
+            currentStart >= 0 &&
+            currentEnd >= 0 &&
+            currentStart <= lastAuthorizedText.length &&
+            currentEnd <= lastAuthorizedText.length
+        ) {
+            currentStart to currentEnd
+        } else {
+            null
+        }
+    }
+
+    internal fun consumeInvalidatedCompositionReplacementRangeForEditor(): Boolean {
+        val invalidated = didInvalidateCompositionReplacementRange
+        didInvalidateCompositionReplacementRange = false
+        return invalidated
+    }
+
+    internal fun hasInvalidatedCompositionReplacementRangeForEditor(): Boolean =
+        didInvalidateCompositionReplacementRange
+
+    internal fun setComposingTextForEditor(text: String?) {
+        composingText = text
+    }
+
+    internal fun composingTextForEditor(): String? = composingText
+
+    internal fun composingTextFromVisibleReplacementForEditor(): String? {
+        val (start, end) = compositionReplacementRange() ?: return null
+        val authorizedText = lastAuthorizedText
+        val currentText = text?.toString() ?: return null
+        if (start < 0 || end < start || end > authorizedText.length) return null
+
+        val authorizedPrefix = authorizedText.substring(0, start)
+        val authorizedSuffix = authorizedText.substring(end)
+        if (!currentText.startsWith(authorizedPrefix)) return null
+        if (!currentText.endsWith(authorizedSuffix)) return null
+
+        val replacementEnd = currentText.length - authorizedSuffix.length
+        if (replacementEnd < authorizedPrefix.length) return null
+        return currentText.substring(authorizedPrefix.length, replacementEnd)
+    }
+
+    internal fun clearCompositionTrackingForEditor() {
+        composingText = null
+        composingReplacementStartUtf16 = null
+        composingReplacementEndUtf16 = null
+        composingReplacementAuthorizedTextRevision = null
+    }
+
+    private fun hasCompositionTrackingForEditor(): Boolean =
+        composingText != null ||
+            composingReplacementStartUtf16 != null ||
+            composingReplacementEndUtf16 != null ||
+            composingReplacementAuthorizedTextRevision != null
+
+    private fun retireInputConnectionForEditor() {
+        activeInputConnection?.clearCompositionTrackingForEditor()
+        invalidateInputConnectionsForEditor()
+        clearCompositionTrackingForEditor()
+        clearCompositionInvalidationForEditor()
+        clearNativeComposingSpans()
+    }
+
+    internal fun isEditorDestroyedForInput(): Boolean =
+        editorId != 0L && NativeEditorViewRegistry.isDestroyed(editorId)
+
+    private fun hasLiveEditor(): Boolean =
+        editorId != 0L && !isEditorDestroyedForInput()
+
+    private fun discardTransientInputForDestroyedEditorIfNeeded(): Boolean {
+        if (!isEditorDestroyedForInput()) return false
+        retireInputConnectionForEditor()
+        clearNativeTextMutationAfterBlurWindow()
+        clearNativeTextMutationAdoptionSuppression()
+        return true
+    }
+
+    private fun discardTransientInputAndRestoreAuthorizedTextForEditor() {
+        retireInputConnectionForEditor()
+        clearNativeTextMutationAfterBlurWindow()
+        restoreAuthorizedTextSnapshotForEditor()
+        suppressNativeTextMutationAdoptionForCurrentRevision()
+    }
+
+    private fun restoreAuthorizedTextSnapshotForEditor() {
+        if ((text?.toString() ?: "") == lastAuthorizedText) return
+        val authorizedSnapshot = lastAuthorizedRenderedText ?: lastAuthorizedText
+        val wasApplyingRustState = isApplyingRustState
+        isApplyingRustState = true
+        beginBatchEdit()
+        try {
+            setText(authorizedSnapshot)
+        } finally {
+            endBatchEdit()
+            isApplyingRustState = wasApplyingRustState
+        }
+    }
+
+    private fun restartInputAfterCompositionInvalidationIfNeeded(shouldRestart: Boolean) {
+        if (!shouldRestart) return
+        restartInputForEditorIfFocused()
+    }
+
+    private fun restartInputForEditorIfFocused() {
+        if (!hasFocus()) return
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.restartInput(this)
+    }
+
+    private fun restartInputForEditor() {
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.restartInput(this)
+    }
+
+    private fun clearCompositionInvalidationForEditor() {
+        didInvalidateCompositionReplacementRange = false
+    }
+
+    private fun nextInputConnectionGenerationForEditor(): Long {
+        inputConnectionGeneration += 1L
+        return inputConnectionGeneration
+    }
+
+    internal fun isInputConnectionCurrentForEditor(
+        boundEditorId: Long,
+        boundGeneration: Long
+    ): Boolean =
+        editorId == boundEditorId &&
+            inputConnectionGeneration == boundGeneration &&
+            !isEditorDestroyedForInput()
+
+    private fun invalidateInputConnectionsForEditor() {
+        inputConnectionGeneration += 1L
+        activeInputConnection = null
+    }
+
+    private fun clearNativeComposingSpans() {
+        val editable = text ?: return
+        BaseInputConnection.removeComposingSpans(editable)
+    }
+
+    internal fun restoreAuthorizedTextIfNeeded() {
+        if (!hasLiveEditor()) return
+        if ((text?.toString() ?: "") == lastAuthorizedText) return
+        recordImeTraceForTesting(
+            "restoreAuthorizedText",
+            "authorizedLength=${lastAuthorizedText.length}"
+        )
+        val stateJSON = editorGetCurrentState(editorId.toULong())
+        applyUpdateJSON(stateJSON)
+    }
+
+    fun discardTransientNativeInputForEditorRebind() {
+        retireInputConnectionForEditor()
+        nativeTextMutationAfterBlurWindow = null
+        clearNativeTextMutationAdoptionSuppression()
+        clearImeTraceForTesting()
+    }
+
+    internal fun discardTransientNativeInputForExternalRecovery() {
+        retireInputConnectionForEditor()
+        nativeTextMutationAfterBlurWindow = null
+        restoreAuthorizedTextIfNeeded()
+        suppressNativeTextMutationAdoptionForCurrentRevision()
+    }
+
+    private fun discardTransientNativeInputForReadOnly() {
+        discardTransientNativeInputForExternalRecovery()
+    }
+
+    fun prepareForExternalEditorUpdate(): Boolean {
+        if (blockExternalEditorUpdatePreparationForTesting) return false
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return false
+        val inputConnection = activeInputConnection
+        if (inputConnection?.flushPendingCompositionForExternalMutation() == false) {
+            return false
+        }
+        return drainNativeTextMutationIfNeeded(allowAfterBlur = true)
+    }
+
+    fun prepareForExternalEditorCommand(): CommandPreparation {
+        if (blockExternalEditorCommandPreparationForTesting) {
+            return CommandPreparation(ready = false, updateJSON = null)
+        }
+        val previousAuthorizedText = lastAuthorizedText
+        if (!prepareForExternalEditorUpdate()) {
+            return CommandPreparation(ready = false, updateJSON = null)
+        }
+        if (!hasLiveEditor() || lastAuthorizedText == previousAuthorizedText) {
+            return CommandPreparation(ready = true, updateJSON = null)
+        }
+        return CommandPreparation(
+            ready = true,
+            updateJSON = editorGetCurrentState(editorId.toULong())
+        )
+    }
+
+    fun handleCompositionCommit(
+        text: String,
+        replacementStartUtf16: Int,
+        replacementEndUtf16: Int,
+        newCursorPosition: Int = 1
+    ) {
         if (!isEditable) return
         if (isApplyingRustState) return
-        if (editorId == 0L) return
-
-        if (text == "\n") {
-            handleReturnKey()
-            return
-        }
+        if (!hasLiveEditor()) return
 
         val authorizedText = lastAuthorizedText
-        val startUtf16 = minOf(replacementStartUtf16, replacementEndUtf16)
-            .coerceIn(0, authorizedText.length)
-        val endUtf16 = maxOf(replacementStartUtf16, replacementEndUtf16)
-            .coerceIn(0, authorizedText.length)
+        val (startUtf16, endUtf16) = PositionBridge.snapRangeToScalarBoundaries(
+            replacementStartUtf16,
+            replacementEndUtf16,
+            authorizedText
+        )
         val scalarStart = PositionBridge.utf16ToScalar(startUtf16, authorizedText)
         val scalarEnd = PositionBridge.utf16ToScalar(endUtf16, authorizedText)
 
-        if (scalarStart != scalarEnd) {
-            replaceTextRangeInRust(scalarStart, scalarEnd, text)
-        } else {
-            insertTextInRust(text, scalarStart)
+        if (
+            startUtf16 <= endUtf16 &&
+            endUtf16 <= authorizedText.length &&
+            authorizedText.substring(startUtf16, endUtf16) == text
+        ) {
+            val requestedCursor = requestedCursorScalar(
+                scalarStart,
+                scalarEnd,
+                authorizedText,
+                text,
+                newCursorPosition
+            ) ?: scalarEnd
+            restoreAuthorizedTextIfNeeded()
+            applyRequestedCursorScalar(requestedCursor)
+            return
         }
+
+        if (text == "\n") {
+            if (scalarStart != scalarEnd) {
+                deleteAndSplitInRust(scalarStart, scalarEnd)
+            } else {
+                splitBlockInRust(scalarStart)
+            }
+            return
+        }
+
+        insertPlainTextRangeInRust(
+            scalarStart,
+            scalarEnd,
+            text,
+            requestedCursorScalar = requestedCursorScalar(
+                scalarStart,
+                scalarEnd,
+                authorizedText,
+                text,
+                newCursorPosition
+            )
+        )
+    }
+
+    fun handleCorrectionCommit(
+        offsetUtf16: Int,
+        oldText: String,
+        newText: String
+    ): Boolean {
+        if (!isEditable) return true
+        if (isApplyingRustState) return true
+        if (!hasLiveEditor()) return false
+
+        val authorizedText = lastAuthorizedText
+        if (offsetUtf16 < 0) {
+            recordImeTraceForTesting(
+                "correctionExplicitNoop",
+                "reason=invalidOffset offset=$offsetUtf16 oldLength=${oldText.length} newLength=${newText.length}"
+            )
+            return false
+        }
+        val endUtf16 = offsetUtf16 + oldText.length
+        if (endUtf16 < offsetUtf16 || endUtf16 > authorizedText.length) {
+            recordImeTraceForTesting(
+                "correctionExplicitNoop",
+                "reason=outOfBounds offset=$offsetUtf16 oldLength=${oldText.length} authorizedLength=${authorizedText.length}"
+            )
+            return false
+        }
+        if (authorizedText.substring(offsetUtf16, endUtf16) != oldText) {
+            recordImeTraceForTesting(
+                "correctionExplicitNoop",
+                "reason=staleText offset=$offsetUtf16 oldLength=${oldText.length} newLength=${newText.length}"
+            )
+            return false
+        }
+
+        val (startUtf16, snappedEndUtf16) = PositionBridge.snapRangeToScalarBoundaries(
+            offsetUtf16,
+            endUtf16,
+            authorizedText
+        )
+        if (
+            startUtf16 != offsetUtf16 ||
+            snappedEndUtf16 != endUtf16 ||
+            startUtf16 > snappedEndUtf16
+        ) {
+            recordImeTraceForTesting(
+                "correctionExplicitNoop",
+                "reason=unsnappedScalarBoundary range=$offsetUtf16..$endUtf16 snapped=$startUtf16..$snappedEndUtf16"
+            )
+            return false
+        }
+
+        val scalarStart = PositionBridge.utf16ToScalar(startUtf16, authorizedText)
+        val scalarEnd = PositionBridge.utf16ToScalar(snappedEndUtf16, authorizedText)
+        recordImeTraceForTesting(
+            "correctionExplicitApply",
+            "range=$scalarStart..$scalarEnd newLength=${newText.length}"
+        )
+        insertPlainTextRangeInRust(scalarStart, scalarEnd, newText)
+        return true
+    }
+
+    fun handleMissingOldTextCorrectionCommit(
+        offsetUtf16: Int,
+        newText: String
+    ): Boolean {
+        if (!isEditable) return true
+        if (isApplyingRustState) return true
+        if (!hasLiveEditor()) return false
+
+        val authorizedText = lastAuthorizedText
+        val tokenRange = missingOldTextCorrectionTokenRange(authorizedText, offsetUtf16)
+            ?: run {
+                recordImeTraceForTesting(
+                    "correctionInferredNoop",
+                    "reason=noToken offset=$offsetUtf16 newLength=${newText.length}"
+                )
+                return false
+            }
+        val (startUtf16, endUtf16) = tokenRange
+
+        val (snappedStartUtf16, snappedEndUtf16) = PositionBridge.snapRangeToScalarBoundaries(
+            startUtf16,
+            endUtf16,
+            authorizedText
+        )
+        if (snappedStartUtf16 >= snappedEndUtf16) {
+            recordImeTraceForTesting(
+                "correctionInferredNoop",
+                "reason=emptySnappedRange token=$startUtf16..$endUtf16 snapped=$snappedStartUtf16..$snappedEndUtf16"
+            )
+            return false
+        }
+
+        val scalarStart = PositionBridge.utf16ToScalar(snappedStartUtf16, authorizedText)
+        val scalarEnd = PositionBridge.utf16ToScalar(snappedEndUtf16, authorizedText)
+        recordImeTraceForTesting(
+            "correctionInferredApply",
+            "range=$scalarStart..$scalarEnd utf16=$snappedStartUtf16..$snappedEndUtf16 newLength=${newText.length}"
+        )
+        insertPlainTextRangeInRust(scalarStart, scalarEnd, newText)
+        return true
+    }
+
+    private fun missingOldTextCorrectionTokenRange(
+        text: String,
+        offsetUtf16: Int
+    ): Pair<Int, Int>? {
+        if (offsetUtf16 < 0 || offsetUtf16 >= text.length) return null
+
+        val tokenOffset = PositionBridge.snapToScalarBoundary(
+            offsetUtf16,
+            text,
+            biasForward = false
+        )
+        if (tokenOffset < 0 || tokenOffset >= text.length) return null
+        if (!isMissingOldTextCorrectionTokenCodePointAt(text, tokenOffset)) return null
+
+        var startUtf16 = tokenOffset
+        while (startUtf16 > 0) {
+            val previousUtf16 = Character.offsetByCodePoints(text, startUtf16, -1)
+            if (!isMissingOldTextCorrectionTokenCodePointAt(text, previousUtf16)) break
+            startUtf16 = previousUtf16
+        }
+
+        var endUtf16 = tokenOffset + Character.charCount(Character.codePointAt(text, tokenOffset))
+        while (endUtf16 < text.length) {
+            if (!isMissingOldTextCorrectionTokenCodePointAt(text, endUtf16)) break
+            endUtf16 += Character.charCount(Character.codePointAt(text, endUtf16))
+        }
+
+        return if (startUtf16 < endUtf16) startUtf16 to endUtf16 else null
+    }
+
+    private fun isMissingOldTextCorrectionTokenCodePointAt(text: String, utf16Offset: Int): Boolean {
+        if (utf16Offset < 0 || utf16Offset >= text.length) return false
+        val codePoint = Character.codePointAt(text, utf16Offset)
+        if (isMissingOldTextCorrectionCoreTokenCodePoint(codePoint)) return true
+        if (!isMissingOldTextCorrectionJoinerCodePoint(codePoint)) return false
+
+        val previousCodePoint = previousCodePointBefore(text, utf16Offset) ?: return false
+        val nextUtf16Offset = utf16Offset + Character.charCount(codePoint)
+        val nextCodePoint = nextCodePointAt(text, nextUtf16Offset) ?: return false
+        return isMissingOldTextCorrectionCoreTokenCodePoint(previousCodePoint) &&
+            isMissingOldTextCorrectionCoreTokenCodePoint(nextCodePoint)
+    }
+
+    private fun isMissingOldTextCorrectionCoreTokenCodePoint(codePoint: Int): Boolean {
+        if (Character.isLetterOrDigit(codePoint)) return true
+        return when (Character.getType(codePoint)) {
+            Character.NON_SPACING_MARK.toInt(),
+            Character.COMBINING_SPACING_MARK.toInt(),
+            Character.ENCLOSING_MARK.toInt(),
+            Character.CONNECTOR_PUNCTUATION.toInt(),
+            Character.MATH_SYMBOL.toInt(),
+            Character.CURRENCY_SYMBOL.toInt(),
+            Character.MODIFIER_SYMBOL.toInt(),
+            Character.OTHER_SYMBOL.toInt(),
+            Character.SURROGATE.toInt() -> true
+            else -> false
+        }
+    }
+
+    private fun isMissingOldTextCorrectionJoinerCodePoint(codePoint: Int): Boolean =
+        codePoint == '\''.code ||
+            codePoint == 0x2018 ||
+            codePoint == 0x2019 ||
+            codePoint == 0x201B ||
+            codePoint == 0xFF07 ||
+            codePoint == '-'.code ||
+            codePoint == 0x2010 ||
+            codePoint == 0x2011 ||
+            codePoint == 0x2012 ||
+            codePoint == 0x2013 ||
+            codePoint == 0x2014 ||
+            codePoint == 0x2212 ||
+            codePoint == 0x200D
+
+    private fun previousCodePointBefore(text: String, utf16Offset: Int): Int? {
+        if (utf16Offset <= 0 || utf16Offset > text.length) return null
+        val previousUtf16 = Character.offsetByCodePoints(text, utf16Offset, -1)
+        return Character.codePointAt(text, previousUtf16)
+    }
+
+    private fun nextCodePointAt(text: String, utf16Offset: Int): Int? {
+        if (utf16Offset < 0 || utf16Offset >= text.length) return null
+        return Character.codePointAt(text, utf16Offset)
     }
 
     // ── Input Handling: Deletion ────────────────────────────────────────
@@ -766,17 +1372,32 @@ class EditorEditText @JvmOverloads constructor(
     fun handleDelete(beforeLength: Int, afterLength: Int) {
         if (!isEditable) return
         if (isApplyingRustState) return
+        val selectionRange = normalizedUtf16SelectionRange()
         if (editorId == 0L) {
             // Dev mode: direct editing.
             val editable = this.text ?: return
-            val cursor = selectionStart
-            val delStart = maxOf(0, cursor - beforeLength)
-            val delEnd = minOf(editable.length, cursor + afterLength)
+            val (selectionStart, selectionEnd) = selectionRange ?: return
+            val delStart: Int
+            val delEnd: Int
+            if (selectionStart != selectionEnd) {
+                delStart = selectionStart
+                delEnd = selectionEnd
+            } else {
+                delStart = maxOf(0, selectionStart - beforeLength.coerceAtLeast(0))
+                delEnd = minOf(editable.length, selectionStart + afterLength.coerceAtLeast(0))
+            }
             editable.delete(delStart, delEnd)
             return
         }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
 
         val currentText = text?.toString() ?: ""
+        val (selectionStart, selectionEnd) = selectionRange ?: return
+        if (selectionStart != selectionEnd) {
+            val (scalarStart, scalarEnd) = normalizedScalarSelectionRange(currentText) ?: return
+            deleteRangeInRust(scalarStart, scalarEnd)
+            return
+        }
         val cursor = selectionStart
         if (beforeLength > 0 &&
             afterLength == 0 &&
@@ -787,8 +1408,13 @@ class EditorEditText @JvmOverloads constructor(
             deleteBackwardAtSelectionScalarInRust(scalarCursor, scalarCursor)
             return
         }
-        val delStart = maxOf(0, cursor - beforeLength)
-        val delEnd = minOf(currentText.length, cursor + afterLength)
+        val rawDelStart = maxOf(0, cursor - beforeLength.coerceAtLeast(0))
+        val rawDelEnd = minOf(currentText.length, cursor + afterLength.coerceAtLeast(0))
+        val (delStart, delEnd) = PositionBridge.snapRangeToScalarBoundaries(
+            rawDelStart,
+            rawDelEnd,
+            currentText
+        )
 
         val scalarStart = PositionBridge.utf16ToScalar(delStart, currentText)
         val scalarEnd = PositionBridge.utf16ToScalar(delEnd, currentText)
@@ -809,11 +1435,11 @@ class EditorEditText @JvmOverloads constructor(
     fun handleBackspace() {
         if (!isEditable) return
         if (isApplyingRustState) return
+        val selectionRange = normalizedUtf16SelectionRange() ?: return
         if (editorId == 0L) {
             // Dev mode: direct editing.
             val editable = this.text ?: return
-            val start = selectionStart
-            val end = selectionEnd
+            val (start, end) = selectionRange
             if (start != end) {
                 editable.delete(start, end)
             } else if (start > 0) {
@@ -824,15 +1450,14 @@ class EditorEditText @JvmOverloads constructor(
             }
             return
         }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
 
         val currentText = text?.toString() ?: ""
-        val start = selectionStart
-        val end = selectionEnd
+        val (start, end) = selectionRange
 
         if (start != end) {
             // Range selection: delete the range.
-            val scalarStart = PositionBridge.utf16ToScalar(start, currentText)
-            val scalarEnd = PositionBridge.utf16ToScalar(end, currentText)
+            val (scalarStart, scalarEnd) = normalizedScalarSelectionRange(currentText) ?: return
             deleteRangeInRust(scalarStart, scalarEnd)
         } else if (start > 0) {
             if (currentText.getOrNull(start - 1) == EMPTY_BLOCK_PLACEHOLDER) {
@@ -859,6 +1484,57 @@ class EditorEditText @JvmOverloads constructor(
         }
     }
 
+    fun handleForwardDelete() {
+        if (!isEditable) return
+        if (isApplyingRustState) return
+        val selectionRange = normalizedUtf16SelectionRange() ?: return
+        if (editorId == 0L) {
+            val editable = this.text ?: return
+            val (start, end) = selectionRange
+            if (start != end) {
+                editable.delete(start, end)
+            } else if (start < editable.length) {
+                val breakIter = java.text.BreakIterator.getCharacterInstance()
+                breakIter.setText(editable.toString())
+                val nextBoundary = breakIter.following(start)
+                val nextUtf16 = if (nextBoundary == java.text.BreakIterator.DONE) {
+                    editable.length
+                } else {
+                    nextBoundary
+                }
+                editable.delete(start, nextUtf16.coerceIn(start, editable.length))
+            }
+            return
+        }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
+
+        val currentText = text?.toString() ?: ""
+        val (start, end) = selectionRange
+        if (start != end) {
+            val (scalarStart, scalarEnd) = normalizedScalarSelectionRange(currentText) ?: return
+            deleteRangeInRust(scalarStart, scalarEnd)
+        } else if (start < currentText.length) {
+            val breakIter = java.text.BreakIterator.getCharacterInstance()
+            breakIter.setText(currentText)
+            val nextBoundary = breakIter.following(start)
+            val nextUtf16 = if (nextBoundary == java.text.BreakIterator.DONE) {
+                currentText.length
+            } else {
+                nextBoundary
+            }
+            val (utf16Start, utf16End) = PositionBridge.snapRangeToScalarBoundaries(
+                start,
+                nextUtf16.coerceIn(start, currentText.length),
+                currentText
+            )
+            val scalarStart = PositionBridge.utf16ToScalar(utf16Start, currentText)
+            val scalarEnd = PositionBridge.utf16ToScalar(utf16End, currentText)
+            if (scalarStart < scalarEnd) {
+                deleteRangeInRust(scalarStart, scalarEnd)
+            }
+        }
+    }
+
     // ── Input Handling: Return Key ──────────────────────────────────────
 
     /**
@@ -869,8 +1545,7 @@ class EditorEditText @JvmOverloads constructor(
         if (isApplyingRustState) return
 
         val currentText = text?.toString() ?: ""
-        val start = selectionStart
-        val end = selectionEnd
+        val (start, end) = normalizedUtf16SelectionRange() ?: return
 
         if (editorId == 0L) {
             // Dev mode: insert newline directly.
@@ -878,15 +1553,12 @@ class EditorEditText @JvmOverloads constructor(
             editable.replace(start, end, "\n")
             return
         }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
 
         if (start != end) {
             // Range selection: atomic delete-and-split via Rust.
-            val scalarStart = PositionBridge.utf16ToScalar(start, currentText)
-            val scalarEnd = PositionBridge.utf16ToScalar(end, currentText)
-            val updateJSON = editorDeleteAndSplitScalar(
-                editorId.toULong(), scalarStart.toUInt(), scalarEnd.toUInt()
-            )
-            applyUpdateJSON(updateJSON)
+            val (scalarStart, scalarEnd) = normalizedScalarSelectionRange(currentText) ?: return
+            deleteAndSplitInRust(scalarStart, scalarEnd)
         } else {
             val scalarPos = PositionBridge.utf16ToScalar(start, currentText)
             splitBlockInRust(scalarPos)
@@ -907,6 +1579,7 @@ class EditorEditText @JvmOverloads constructor(
             editable.replace(start, end, "\n")
             return
         }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
 
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorInsertNodeAtSelectionScalar(
@@ -924,7 +1597,7 @@ class EditorEditText @JvmOverloads constructor(
     fun handleTab(shiftPressed: Boolean): Boolean {
         if (!isEditable) return false
         if (isApplyingRustState) return false
-        if (editorId == 0L) return false
+        if (!hasLiveEditor()) return false
         if (!isSelectionInsideList()) return false
         val selection = currentScalarSelection() ?: return false
 
@@ -952,6 +1625,10 @@ class EditorEditText @JvmOverloads constructor(
                 handleBackspace()
                 true
             }
+            KeyEvent.KEYCODE_FORWARD_DEL -> {
+                handleForwardDelete()
+                true
+            }
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
                 if (shiftPressed) {
                     handleHardBreak()
@@ -965,28 +1642,55 @@ class EditorEditText @JvmOverloads constructor(
         }
     }
 
+    private fun isSupportedHardwareMutationKey(keyCode: Int): Boolean =
+        when (keyCode) {
+            KeyEvent.KEYCODE_DEL,
+            KeyEvent.KEYCODE_FORWARD_DEL,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_TAB -> true
+            else -> false
+        }
+
+    internal fun isReadOnlyTextMutationKeyEvent(event: KeyEvent): Boolean {
+        if (isSupportedHardwareMutationKey(event.keyCode) ||
+            event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL
+        ) {
+            return true
+        }
+        if (event.keyCode == KeyEvent.KEYCODE_INSERT && event.isShiftPressed) {
+            return true
+        }
+        if (event.isCtrlPressed || event.isMetaPressed) {
+            return when (event.keyCode) {
+                KeyEvent.KEYCODE_V,
+                KeyEvent.KEYCODE_X,
+                KeyEvent.KEYCODE_Z,
+                KeyEvent.KEYCODE_Y -> true
+                else -> false
+            }
+        }
+        if (!keyEventCharacters(event).isNullOrEmpty()) return true
+        return event.unicodeChar != 0
+    }
+
     fun handleHardwareKeyEvent(event: KeyEvent?): Boolean {
         if (event == null || !isEditable || isApplyingRustState) return false
 
         return when (event.action) {
             KeyEvent.ACTION_DOWN -> {
-                val supported = when (event.keyCode) {
-                    KeyEvent.KEYCODE_DEL,
-                    KeyEvent.KEYCODE_ENTER,
-                    KeyEvent.KEYCODE_NUMPAD_ENTER,
-                    KeyEvent.KEYCODE_TAB -> true
-                    else -> false
-                }
-                if (!supported) return false
+                if (!isSupportedHardwareMutationKey(event.keyCode)) return false
 
-                if (lastHandledHardwareKeyCode == event.keyCode &&
-                    lastHandledHardwareKeyDownTime == event.downTime) {
+                val signature = hardwareKeyEventSignature(event)
+                if (
+                    lastHandledHardwareKeySignature == signature ||
+                    didRecentlyHandleHardwareKeyDown(signature)
+                ) {
                     return true
                 }
 
                 if (handleHardwareKeyDown(event.keyCode, event.isShiftPressed)) {
-                    lastHandledHardwareKeyCode = event.keyCode
-                    lastHandledHardwareKeyDownTime = event.downTime
+                    markHandledHardwareKeyDown(signature)
                     true
                 } else {
                     false
@@ -994,10 +1698,10 @@ class EditorEditText @JvmOverloads constructor(
             }
 
             KeyEvent.ACTION_UP -> {
-                if (lastHandledHardwareKeyCode == event.keyCode &&
-                    lastHandledHardwareKeyDownTime == event.downTime) {
-                    lastHandledHardwareKeyCode = null
-                    lastHandledHardwareKeyDownTime = null
+                if (lastHandledHardwareKeySignature?.let {
+                        it.keyCode == event.keyCode && it.downTime == event.downTime
+                    } == true) {
+                    lastHandledHardwareKeySignature = null
                     true
                 } else {
                     false
@@ -1008,8 +1712,119 @@ class EditorEditText @JvmOverloads constructor(
         }
     }
 
+    internal fun handlePrintableHardwareKeyEvent(
+        event: KeyEvent,
+        applyBaseEvent: () -> Boolean
+    ): Boolean {
+        if (!isEditable || isApplyingRustState || !isPrintableHardwareMutationKey(event)) {
+            return false
+        }
+        val signature = hardwareKeyEventSignature(event)
+        return when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (
+                    lastHandledHardwareKeySignature == signature ||
+                    didRecentlyHandleHardwareKeyDown(signature)
+                ) {
+                    true
+                } else {
+                    val inputConnection = activeInputConnection?.takeIf {
+                        it.hasPendingComposition()
+                    }
+                    if (inputConnection != null) {
+                        var didMutate = false
+                        runWithTransientInputMutationGuard {
+                            didMutate = insertTransientHardwareText(keyEventText(event))
+                            didMutate
+                        }
+                        if (!didMutate) return false
+                        inputConnection.refreshComposingTextFromEditableForEditor()
+                    } else {
+                        applyBaseEvent()
+                    }
+                    markHandledHardwareKeyDown(signature)
+                    true
+                }
+            }
+            KeyEvent.ACTION_UP -> {
+                if (lastHandledHardwareKeySignature?.let {
+                        it.keyCode == event.keyCode && it.downTime == event.downTime
+                    } == true) {
+                    lastHandledHardwareKeySignature = null
+                }
+                false
+            }
+            else -> false
+        }
+    }
+
+    private fun isPrintableHardwareMutationKey(event: KeyEvent): Boolean {
+        if (isSupportedHardwareMutationKey(event.keyCode)) return false
+        if (event.isCtrlPressed || event.isMetaPressed) return false
+        return !keyEventText(event).isNullOrEmpty()
+    }
+
+    private fun hardwareKeyEventSignature(event: KeyEvent): HardwareKeyEventSignature =
+        HardwareKeyEventSignature(
+            keyCode = event.keyCode,
+            downTime = event.downTime,
+            repeatCount = event.repeatCount
+        )
+
+    @Suppress("DEPRECATION")
+    private fun keyEventCharacters(event: KeyEvent): String? = event.characters
+
+    private fun keyEventText(event: KeyEvent): String? {
+        val characters = keyEventCharacters(event)
+        if (!characters.isNullOrEmpty()) return characters
+        val unicodeChar = event.unicodeChar
+        if (unicodeChar == 0) return null
+        return runCatching {
+            String(Character.toChars(unicodeChar))
+        }.getOrNull()
+    }
+
+    private fun insertTransientHardwareText(insertedText: String?): Boolean {
+        if (insertedText.isNullOrEmpty()) return false
+        val editable = text ?: return false
+        val currentText = editable.toString()
+        val rawStart = selectionStart
+        val rawEnd = selectionEnd
+        if (rawStart < 0 || rawEnd < 0) return false
+        val start = rawStart.coerceIn(0, editable.length)
+        val end = rawEnd.coerceIn(0, editable.length)
+        val normalizedStart = minOf(start, end)
+        val normalizedEnd = maxOf(start, end)
+        val (replaceStart, replaceEnd) = PositionBridge.snapRangeToScalarBoundaries(
+            normalizedStart,
+            normalizedEnd,
+            currentText
+        )
+        editable.replace(replaceStart, replaceEnd, insertedText)
+        val cursor = (replaceStart + insertedText.length).coerceIn(0, editable.length)
+        setSelection(cursor)
+        return true
+    }
+
+    private fun markHandledHardwareKeyDown(signature: HardwareKeyEventSignature) {
+        lastHandledHardwareKeySignature = signature
+        recentHandledHardwareKeyDownSignature = signature
+        recentHandledHardwareKeyDownUptimeMs = SystemClock.uptimeMillis()
+    }
+
+    private fun didRecentlyHandleHardwareKeyDown(signature: HardwareKeyEventSignature): Boolean {
+        val recentSignature = recentHandledHardwareKeyDownSignature ?: return false
+        val elapsedMs = SystemClock.uptimeMillis() - recentHandledHardwareKeyDownUptimeMs
+        if (elapsedMs > RECENT_HANDLED_HARDWARE_KEY_DOWN_WINDOW_MS) {
+            recentHandledHardwareKeyDownSignature = null
+            recentHandledHardwareKeyDownUptimeMs = 0L
+            return false
+        }
+        return recentSignature == signature
+    }
+
     fun performToolbarToggleMark(markName: String) {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorToggleMarkAtSelectionScalar(
             editorId.toULong(),
@@ -1021,7 +1836,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarToggleList(listType: String, isActive: Boolean) {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = if (isActive) {
             editorUnwrapFromListAtSelectionScalar(
@@ -1041,7 +1856,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarToggleBlockquote() {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorToggleBlockquoteAtSelectionScalar(
             editorId.toULong(),
@@ -1052,7 +1867,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarToggleHeading(level: Int) {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         if (level !in 1..6) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorToggleHeadingAtSelectionScalar(
@@ -1065,7 +1880,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarIndentListItem() {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorIndentListItemAtSelectionScalar(
             editorId.toULong(),
@@ -1076,7 +1891,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarOutdentListItem() {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorOutdentListItemAtSelectionScalar(
             editorId.toULong(),
@@ -1087,7 +1902,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarInsertNode(nodeType: String) {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         val selection = currentScalarSelection() ?: return
         val updateJSON = editorInsertNodeAtSelectionScalar(
             editorId.toULong(),
@@ -1099,12 +1914,12 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun performToolbarUndo() {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         applyUpdateJSON(editorUndo(editorId.toULong()))
     }
 
     fun performToolbarRedo() {
-        if (!isEditable || isApplyingRustState || editorId == 0L) return
+        if (!isEditable || isApplyingRustState || !hasLiveEditor()) return
         applyUpdateJSON(editorRedo(editorId.toULong()))
     }
 
@@ -1117,32 +1932,52 @@ class EditorEditText @JvmOverloads constructor(
      * falling back to plain text.
      */
     override fun onTextContextMenuItem(id: Int): Boolean {
-        if (!isEditable && id == android.R.id.paste) return true
-        if (id == android.R.id.paste) {
-            handlePaste()
+        if (!isEditable && isMutatingContextMenuItem(id)) return true
+        if (id == android.R.id.cut) {
+            handleCut()
+            return true
+        }
+        if (id == android.R.id.paste || id == android.R.id.pasteAsPlainText) {
+            handlePaste(plainTextOnly = id == android.R.id.pasteAsPlainText)
             return true
         }
         return super.onTextContextMenuItem(id)
     }
 
+    private fun isMutatingContextMenuItem(id: Int): Boolean =
+        id == android.R.id.paste ||
+            id == android.R.id.pasteAsPlainText ||
+            id == android.R.id.cut
+
     /**
-     * Block accessibility-initiated text mutations (paste, set text) when not editable.
+     * Block accessibility-initiated text mutations (paste, cut, set text) when not editable.
      * Selection and copy actions remain available.
      */
     override fun performAccessibilityAction(action: Int, arguments: android.os.Bundle?): Boolean {
-        if (!isEditable && (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT
-                    || action == android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE)) {
+        if (!isEditable && (
+                action == android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT ||
+                    action == android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE ||
+                    action == android.view.accessibility.AccessibilityNodeInfo.ACTION_CUT
+                )
+        ) {
             return false
+        }
+        if (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT) {
+            return handleAccessibilitySetText(arguments)
         }
         return super.performAccessibilityAction(action, arguments)
     }
 
-    private fun handlePaste() {
+    private fun handlePaste(plainTextOnly: Boolean) {
         if (editorId == 0L) {
             // Dev mode: default paste behavior.
-            super.onTextContextMenuItem(android.R.id.paste)
+            super.onTextContextMenuItem(
+                if (plainTextOnly) android.R.id.pasteAsPlainText else android.R.id.paste
+            )
             return
         }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
+        if (!prepareForExternalEditorUpdate()) return
 
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: return
@@ -1153,16 +1988,67 @@ class EditorEditText @JvmOverloads constructor(
 
         // Try HTML first for rich paste.
         val htmlText = item.htmlText
-        if (htmlText != null) {
+        if (!plainTextOnly && htmlText != null) {
             pasteHTML(htmlText)
             return
         }
 
         // Fallback to plain text.
-        val plainText = item.text?.toString()
+        val plainText = item.text?.toString() ?: item.coerceToText(context)?.toString()
         if (plainText != null) {
             pastePlainText(plainText)
         }
+    }
+
+    private fun handleCut() {
+        if (editorId == 0L) {
+            super.onTextContextMenuItem(android.R.id.cut)
+            return
+        }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return
+        if (!prepareForExternalEditorUpdate()) return
+
+        val currentText = text?.toString() ?: return
+        val (selectionStart, selectionEnd) = normalizedUtf16SelectionRange(currentText) ?: return
+        if (selectionStart == selectionEnd) return
+
+        val (utf16Start, utf16End) = PositionBridge.snapRangeToScalarBoundaries(
+            selectionStart,
+            selectionEnd,
+            currentText
+        )
+        if (utf16Start >= utf16End) return
+
+        val selectedText = currentText.substring(utf16Start, utf16End)
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText(null, selectedText))
+
+        val scalarStart = PositionBridge.utf16ToScalar(utf16Start, currentText)
+        val scalarEnd = PositionBridge.utf16ToScalar(utf16End, currentText)
+        deleteRangeInRust(scalarStart, scalarEnd)
+    }
+
+    private fun handleAccessibilitySetText(arguments: android.os.Bundle?): Boolean {
+        val replacement = arguments
+            ?.getCharSequence(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE
+            )
+            ?.toString()
+            ?: return false
+        if (editorId == 0L) {
+            return super.performAccessibilityAction(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+                arguments
+            )
+        }
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return false
+        if (!prepareForExternalEditorUpdate()) return false
+
+        val currentText = text?.toString() ?: return false
+        val scalarStart = 0
+        val scalarEnd = currentText.codePointCount(0, currentText.length)
+        insertPlainTextRangeInRust(scalarStart, scalarEnd, replacement)
+        return true
     }
 
     // ── Selection Change ────────────────────────────────────────────────
@@ -1183,23 +2069,35 @@ class EditorEditText @JvmOverloads constructor(
         ensureSelectionVisible()
         onSelectionOrContentMayChange?.invoke()
 
-        if (editorId == 0L) return
+        syncCurrentSelectionToRust()
+    }
+
+    private fun syncCurrentSelectionToRust() {
+        if (!hasLiveEditor()) return
 
         val currentText = text?.toString() ?: ""
         if (currentText != lastAuthorizedText) return
-        val scalarAnchor = PositionBridge.utf16ToScalar(selStart, currentText)
-        val scalarHead = PositionBridge.utf16ToScalar(selEnd, currentText)
+        val (scalarAnchor, scalarHead) = rawScalarSelection(currentText) ?: return
 
-        // Sync selection to Rust (converts scalar→doc internally).
-        editorSetSelectionScalar(
-            editorId.toULong(),
-            scalarAnchor.toUInt(),
-            scalarHead.toUInt()
-        )
+        val selectionHook = onSetSelectionScalarInRustForTesting
+        val docAnchor: Int
+        val docHead: Int
+        if (selectionHook != null) {
+            selectionHook(scalarAnchor, scalarHead)
+            docAnchor = scalarAnchor
+            docHead = scalarHead
+        } else {
+            // Sync selection to Rust (converts scalar→doc internally).
+            editorSetSelectionScalar(
+                editorId.toULong(),
+                scalarAnchor.toUInt(),
+                scalarHead.toUInt()
+            )
 
-        // Emit doc positions (not scalar offsets) to match the Selection contract.
-        val docAnchor = editorScalarToDoc(editorId.toULong(), scalarAnchor.toUInt()).toInt()
-        val docHead = editorScalarToDoc(editorId.toULong(), scalarHead.toUInt()).toInt()
+            // Emit doc positions (not scalar offsets) to match the Selection contract.
+            docAnchor = editorScalarToDoc(editorId.toULong(), scalarAnchor.toUInt()).toInt()
+            docHead = editorScalarToDoc(editorId.toULong(), scalarHead.toUInt()).toInt()
+        }
         editorListener?.onSelectionChanged(docAnchor, docHead)
     }
 
@@ -1209,6 +2107,7 @@ class EditorEditText @JvmOverloads constructor(
      * Insert text at a scalar position via the Rust editor.
      */
     private fun insertTextInRust(text: String, atScalarPos: Int) {
+        if (!hasLiveEditor()) return
         onInsertTextInRustForTesting?.let { callback ->
             callback(text, atScalarPos)
             return
@@ -1218,6 +2117,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     private fun replaceTextRangeInRust(scalarFrom: Int, scalarTo: Int, text: String) {
+        if (!hasLiveEditor()) return
         onReplaceTextInRustForTesting?.let { callback ->
             callback(scalarFrom, scalarTo, text)
             return
@@ -1229,6 +2129,109 @@ class EditorEditText @JvmOverloads constructor(
             text
         )
         applyUpdateJSON(updateJSON)
+    }
+
+    private fun insertPlainTextRangeInRust(
+        scalarFrom: Int,
+        scalarTo: Int,
+        text: String,
+        requestedCursorScalar: Int? = null
+    ) {
+        if (!hasLiveEditor()) return
+        if (text.isEmpty()) {
+            if (scalarFrom != scalarTo) {
+                deleteRangeInRust(scalarFrom, scalarTo)
+            }
+            applyRequestedCursorScalar(requestedCursorScalar)
+            return
+        }
+        if (text.indexOf('\n') >= 0 || text.indexOf('\r') >= 0) {
+            val docJson = plainTextDocumentFragmentJson(text)
+            onInsertContentJsonAtSelectionScalarForTesting?.let { callback ->
+                callback(scalarFrom, scalarTo, docJson)
+                applyRequestedCursorScalar(requestedCursorScalar)
+                return
+            }
+            val updateJSON = editorInsertContentJsonAtSelectionScalar(
+                editorId.toULong(),
+                scalarFrom.toUInt(),
+                scalarTo.toUInt(),
+                docJson
+            )
+            applyUpdateJSON(updateJSON)
+            applyRequestedCursorScalar(requestedCursorScalar)
+            return
+        }
+
+        if (scalarFrom != scalarTo) {
+            replaceTextRangeInRust(scalarFrom, scalarTo, text)
+        } else {
+            insertTextInRust(text, scalarFrom)
+        }
+        applyRequestedCursorScalar(requestedCursorScalar)
+    }
+
+    private fun requestedCursorScalar(
+        scalarFrom: Int,
+        scalarTo: Int,
+        currentText: String,
+        insertedText: String,
+        newCursorPosition: Int
+    ): Int? {
+        if (newCursorPosition == 1) return null
+        val insertedScalarLength = insertedText.codePointCount(0, insertedText.length)
+        val currentScalarLength = currentText.codePointCount(0, currentText.length)
+        val nextScalarLength =
+            (currentScalarLength - (scalarTo - scalarFrom) + insertedScalarLength).coerceAtLeast(0)
+        val requested = if (newCursorPosition > 0) {
+            scalarFrom + insertedScalarLength + newCursorPosition - 1
+        } else {
+            scalarFrom + newCursorPosition
+        }
+        return requested.coerceIn(0, nextScalarLength)
+    }
+
+    private fun applyRequestedCursorScalar(requestedCursorScalar: Int?) {
+        val requested = requestedCursorScalar ?: return
+        if (!hasLiveEditor()) return
+        val currentText = text?.toString().orEmpty()
+        val safeScalar = requested.coerceAtLeast(0)
+        onSetSelectionScalarInRustForTesting?.let { callback ->
+            callback(safeScalar, safeScalar)
+        } ?: editorSetSelectionScalar(
+            editorId.toULong(),
+            safeScalar.toUInt(),
+            safeScalar.toUInt()
+        )
+        val localScalar = safeScalar.coerceIn(0, currentText.codePointCount(0, currentText.length))
+        val safeUtf16 = PositionBridge.scalarToUtf16(localScalar, currentText)
+            .coerceIn(0, currentText.length)
+        if (selectionStart != safeUtf16 || selectionEnd != safeUtf16) {
+            setSelection(safeUtf16, safeUtf16)
+        }
+    }
+
+    private fun plainTextDocumentFragmentJson(text: String): String {
+        val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
+        val content = org.json.JSONArray()
+        for (line in normalizedText.split('\n')) {
+            val paragraph = org.json.JSONObject().put("type", "paragraph")
+            if (line.isNotEmpty()) {
+                paragraph.put(
+                    "content",
+                    org.json.JSONArray().put(
+                        org.json.JSONObject()
+                            .put("type", "text")
+                            .put("text", line)
+                    )
+                )
+            }
+            content.put(paragraph)
+        }
+        return org.json.JSONObject()
+            .put("type", "doc")
+            .put("content", content)
+            .toString()
     }
 
     private fun nativeTextMutationFromAuthorizedDiff(currentText: String): NativeTextMutation? {
@@ -1243,6 +2246,10 @@ class EditorEditText @JvmOverloads constructor(
         ) {
             prefix++
         }
+        prefix = minOf(
+            PositionBridge.snapToScalarBoundary(prefix, authorizedText, biasForward = false),
+            PositionBridge.snapToScalarBoundary(prefix, currentText, biasForward = false)
+        )
 
         var authorizedEnd = authorizedText.length
         var currentEnd = currentText.length
@@ -1254,41 +2261,190 @@ class EditorEditText @JvmOverloads constructor(
             authorizedEnd--
             currentEnd--
         }
+        authorizedEnd = PositionBridge.snapToScalarBoundary(
+            authorizedEnd,
+            authorizedText,
+            biasForward = true
+        )
+        currentEnd = PositionBridge.snapToScalarBoundary(
+            currentEnd,
+            currentText,
+            biasForward = true
+        )
 
         val replacementText = currentText.substring(prefix, currentEnd)
+        val rawSelectionStart = selectionStart
+        val rawSelectionEnd = selectionEnd
+        val selectionAnchorUtf16 = rawSelectionStart
+            .takeIf { it >= 0 }
+            ?.let { PositionBridge.snapToScalarBoundary(it, currentText, biasForward = true) }
+        val selectionHeadUtf16 = rawSelectionEnd
+            .takeIf { it >= 0 }
+            ?.let { PositionBridge.snapToScalarBoundary(it, currentText, biasForward = true) }
         return NativeTextMutation(
             scalarFrom = PositionBridge.utf16ToScalar(prefix, authorizedText),
             scalarTo = PositionBridge.utf16ToScalar(authorizedEnd, authorizedText),
             replacementText = replacementText,
-            resultingText = currentText
+            resultingText = currentText,
+            selectionScalarAnchor = selectionAnchorUtf16?.let {
+                PositionBridge.utf16ToScalar(it, currentText)
+            },
+            selectionScalarHead = selectionHeadUtf16?.let {
+                PositionBridge.utf16ToScalar(it, currentText)
+            }
         )
     }
 
-    private fun shouldAdoptNativeTextMutation(editable: Editable?): Boolean {
-        if (!isEditable || !hasFocus()) return false
-        if (editable == null) return true
+    private fun shouldAdoptNativeTextMutation(
+        mutation: NativeTextMutation,
+        allowAfterBlur: Boolean = false
+    ): Boolean {
+        if (!isEditable) return false
+        if (isNativeTextMutationAdoptionSuppressedForCurrentRevision()) return false
+        if (!hasFocus()) {
+            return allowAfterBlur &&
+                canAdoptNativeTextMutationAfterBlur() &&
+                shouldAdoptFinalNativeTextMutation(mutation)
+        }
+        return shouldAdoptFinalNativeTextMutation(mutation)
+    }
 
-        val composingStart = BaseInputConnection.getComposingSpanStart(editable)
-        val composingEnd = BaseInputConnection.getComposingSpanEnd(editable)
-        return composingStart < 0 || composingEnd < 0 || composingStart == composingEnd
+    private fun shouldAdoptFinalNativeTextMutation(mutation: NativeTextMutation): Boolean {
+        if (composingTextForEditor() != null) return false
+        val trackedRange = compositionReplacementRange() ?: return true
+        val authorizedText = lastAuthorizedText
+        val trackedStart = PositionBridge.utf16ToScalar(trackedRange.first, authorizedText)
+        val trackedEnd = PositionBridge.utf16ToScalar(trackedRange.second, authorizedText)
+        if (trackedStart == trackedEnd) {
+            return mutation.scalarFrom == trackedStart &&
+                mutation.scalarTo == trackedStart &&
+                mutation.replacementText.isNotEmpty()
+        }
+        if (mutation.scalarFrom == mutation.scalarTo) {
+            return mutation.replacementText.isNotEmpty() &&
+                mutation.scalarFrom >= trackedStart &&
+                mutation.scalarFrom <= trackedEnd
+        }
+        return mutation.scalarFrom < trackedEnd && mutation.scalarTo > trackedStart
+    }
+
+    private fun drainNativeTextMutationIfNeeded(allowAfterBlur: Boolean): Boolean {
+        if (editorId == 0L) return true
+        if (discardTransientInputForDestroyedEditorIfNeeded()) return false
+        val editable = text
+        val currentText = editable?.toString() ?: ""
+        if (currentText == lastAuthorizedText) return true
+
+        val mutation = nativeTextMutationFromAuthorizedDiff(currentText)
+        if (mutation != null && shouldAdoptNativeTextMutation(mutation, allowAfterBlur)) {
+            commitNativeTextMutation(mutation)
+            return true
+        }
+        recordImeTraceForTesting(
+            "nativeMutationNoop",
+            "reason=${if (mutation == null) "noDiffRange" else "notAdoptable"} allowAfterBlur=$allowAfterBlur currentLength=${currentText.length} authorizedLength=${lastAuthorizedText.length}"
+        )
+        return false
+    }
+
+    private fun beginNativeTextMutationAfterBlurWindow() {
+        if (!hasLiveEditor()) {
+            clearNativeTextMutationAfterBlurWindow()
+            return
+        }
+        nativeTextMutationAfterBlurWindow = NativeTextMutationAfterBlurWindow(
+            editorId = editorId,
+            authorizedTextRevision = lastAuthorizedTextRevision,
+            deadlineMs = SystemClock.uptimeMillis() + NATIVE_TEXT_MUTATION_AFTER_BLUR_WINDOW_MS
+        )
+    }
+
+    private fun clearNativeTextMutationAfterBlurWindow() {
+        nativeTextMutationAfterBlurWindow = null
+    }
+
+    private fun suppressNativeTextMutationAdoptionForCurrentRevision() {
+        if (!hasLiveEditor()) {
+            clearNativeTextMutationAdoptionSuppression()
+            return
+        }
+        nativeTextMutationAdoptionSuppression = NativeTextMutationAdoptionSuppression(
+            editorId = editorId,
+            authorizedTextRevision = lastAuthorizedTextRevision
+        )
+    }
+
+    private fun clearNativeTextMutationAdoptionSuppression() {
+        nativeTextMutationAdoptionSuppression = null
+    }
+
+    private fun isNativeTextMutationAdoptionSuppressedForCurrentRevision(): Boolean {
+        val suppression = nativeTextMutationAdoptionSuppression ?: return false
+        if (
+            suppression.editorId != editorId ||
+            suppression.authorizedTextRevision != lastAuthorizedTextRevision
+        ) {
+            nativeTextMutationAdoptionSuppression = null
+            return false
+        }
+        return true
+    }
+
+    private fun canAdoptNativeTextMutationAfterBlur(): Boolean {
+        val window = nativeTextMutationAfterBlurWindow ?: return false
+        val now = SystemClock.uptimeMillis()
+        if (now > window.deadlineMs ||
+            window.editorId != editorId ||
+            window.authorizedTextRevision != lastAuthorizedTextRevision ||
+            window.didAdoptMutation
+        ) {
+            nativeTextMutationAfterBlurWindow = null
+            return false
+        }
+        return true
     }
 
     private fun commitNativeTextMutation(mutation: NativeTextMutation) {
-        if ((text?.toString() ?: "") != mutation.resultingText) return
+        if (!hasLiveEditor()) return
+        if ((text?.toString() ?: "") != mutation.resultingText) {
+            recordImeTraceForTesting(
+                "nativeMutationNoop",
+                "reason=staleResult range=${mutation.scalarFrom}..${mutation.scalarTo} replacementLength=${mutation.replacementText.length}"
+            )
+            return
+        }
+        val shouldRestartInput = hasFocus()
+        retireInputConnectionForEditor()
+        nativeTextMutationAfterBlurWindow?.didAdoptMutation = true
+        clearNativeTextMutationAfterBlurWindow()
 
-        if (mutation.scalarFrom == mutation.scalarTo) {
-            if (mutation.replacementText.isNotEmpty()) {
-                insertTextInRust(mutation.replacementText, mutation.scalarFrom)
-            }
-        } else if (mutation.replacementText.isEmpty()) {
+        recordImeTraceForTesting(
+            "nativeMutationApply",
+            "range=${mutation.scalarFrom}..${mutation.scalarTo} replacementLength=${mutation.replacementText.length} restartInput=$shouldRestartInput"
+        )
+        if (mutation.replacementText.isEmpty()) {
             deleteRangeInRust(mutation.scalarFrom, mutation.scalarTo)
         } else {
-            replaceTextRangeInRust(
+            insertPlainTextRangeInRust(
                 mutation.scalarFrom,
                 mutation.scalarTo,
                 mutation.replacementText
             )
         }
+        restoreSelectionAfterNativeTextMutation(mutation)
+        if (shouldRestartInput) {
+            restartInputForEditor()
+        }
+    }
+
+    private fun restoreSelectionAfterNativeTextMutation(mutation: NativeTextMutation) {
+        val selectionScalarAnchor = mutation.selectionScalarAnchor ?: return
+        val selectionScalarHead = mutation.selectionScalarHead ?: return
+        val currentText = text?.toString() ?: return
+        val anchorUtf16 = PositionBridge.scalarToUtf16(selectionScalarAnchor, currentText)
+        val headUtf16 = PositionBridge.scalarToUtf16(selectionScalarHead, currentText)
+        val length = currentText.length
+        setSelection(anchorUtf16.coerceIn(0, length), headUtf16.coerceIn(0, length))
     }
 
     /**
@@ -1298,6 +2454,7 @@ class EditorEditText @JvmOverloads constructor(
      * @param scalarTo End scalar offset (exclusive).
      */
     private fun deleteRangeInRust(scalarFrom: Int, scalarTo: Int) {
+        if (!hasLiveEditor()) return
         if (scalarFrom >= scalarTo) return
         onDeleteRangeInRustForTesting?.let { callback ->
             callback(scalarFrom, scalarTo)
@@ -1308,6 +2465,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     private fun deleteBackwardAtSelectionScalarInRust(scalarAnchor: Int, scalarHead: Int) {
+        if (!hasLiveEditor()) return
         onDeleteBackwardAtSelectionScalarInRustForTesting?.let { callback ->
             callback(scalarAnchor, scalarHead)
             return
@@ -1324,16 +2482,84 @@ class EditorEditText @JvmOverloads constructor(
      * Split a block at a scalar position via the Rust editor.
      */
     private fun splitBlockInRust(atScalarPos: Int) {
+        if (!hasLiveEditor()) return
         val updateJSON = editorSplitBlockScalar(editorId.toULong(), atScalarPos.toUInt())
         applyUpdateJSON(updateJSON)
     }
 
-    private fun currentScalarSelection(): Pair<Int, Int>? {
-        val currentText = text?.toString() ?: return null
-        return Pair(
-            PositionBridge.utf16ToScalar(selectionStart, currentText),
-            PositionBridge.utf16ToScalar(selectionEnd, currentText)
+    private fun deleteAndSplitInRust(scalarFrom: Int, scalarTo: Int) {
+        if (!hasLiveEditor()) return
+        onDeleteAndSplitScalarInRustForTesting?.let { callback ->
+            callback(scalarFrom, scalarTo)
+            return
+        }
+        val updateJSON = editorDeleteAndSplitScalar(
+            editorId.toULong(),
+            scalarFrom.toUInt(),
+            scalarTo.toUInt()
         )
+        applyUpdateJSON(updateJSON)
+    }
+
+    internal fun currentScalarSelection(): Pair<Int, Int>? {
+        val currentText = text?.toString() ?: return null
+        return normalizedScalarSelectionRange(currentText)
+    }
+
+    private fun normalizedUtf16SelectionRange(currentText: String): Pair<Int, Int>? {
+        val start = selectionStart
+        val end = selectionEnd
+        if (start < 0 || end < 0) return null
+        val clampedStart = start.coerceIn(0, currentText.length)
+        val clampedEnd = end.coerceIn(0, currentText.length)
+        return minOf(clampedStart, clampedEnd) to maxOf(clampedStart, clampedEnd)
+    }
+
+    private fun normalizedUtf16SelectionRange(): Pair<Int, Int>? {
+        val currentText = text?.toString() ?: return null
+        return normalizedUtf16SelectionRange(currentText)
+    }
+
+    private fun normalizedScalarSelectionRange(currentText: String): Pair<Int, Int>? {
+        val (start, end) = normalizedUtf16SelectionRange(currentText) ?: return null
+        val (snappedStart, snappedEnd) = if (start == end) {
+            val snapped = PositionBridge.snapToScalarBoundary(
+                start,
+                currentText,
+                biasForward = true
+            )
+            snapped to snapped
+        } else {
+            PositionBridge.snapRangeToScalarBoundaries(start, end, currentText)
+        }
+        return PositionBridge.utf16ToScalar(snappedStart, currentText) to
+            PositionBridge.utf16ToScalar(snappedEnd, currentText)
+    }
+
+    private fun rawScalarSelection(currentText: String): Pair<Int, Int>? {
+        val anchor = selectionStart
+        val head = selectionEnd
+        if (anchor < 0 || head < 0) return null
+        val clampedAnchor = anchor.coerceIn(0, currentText.length)
+        val clampedHead = head.coerceIn(0, currentText.length)
+        if (clampedAnchor == clampedHead) {
+            val snapped = PositionBridge.snapToScalarBoundary(
+                clampedAnchor,
+                currentText,
+                biasForward = true
+            )
+            val scalar = PositionBridge.utf16ToScalar(snapped, currentText)
+            return scalar to scalar
+        }
+        val (rangeStart, rangeEnd) = PositionBridge.snapRangeToScalarBoundaries(
+            minOf(clampedAnchor, clampedHead),
+            maxOf(clampedAnchor, clampedHead),
+            currentText
+        )
+        val snappedAnchor = if (clampedAnchor < clampedHead) rangeStart else rangeEnd
+        val snappedHead = if (clampedAnchor < clampedHead) rangeEnd else rangeStart
+        return PositionBridge.utf16ToScalar(snappedAnchor, currentText) to
+            PositionBridge.utf16ToScalar(snappedHead, currentText)
     }
 
     fun selectedImageGeometry(): SelectedImageGeometry? {
@@ -1352,7 +2578,7 @@ class EditorEditText @JvmOverloads constructor(
         val textLayout = layout ?: return null
         val currentText = text?.toString() ?: return null
         val scalarPos = PositionBridge.utf16ToScalar(spanStart, currentText)
-        val docPos = if (editorId != 0L) {
+        val docPos = if (hasLiveEditor()) {
             editorScalarToDoc(editorId.toULong(), scalarPos.toUInt()).toInt()
         } else {
             0
@@ -1366,7 +2592,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     fun resizeImageAtDocPos(docPos: Int, widthPx: Float, heightPx: Float) {
-        if (editorId == 0L) return
+        if (!hasLiveEditor()) return
         val density = resources.displayMetrics.density
         val widthDp = maxOf(48, (widthPx / density).roundToInt())
         val heightDp = maxOf(48, (heightPx / density).roundToInt())
@@ -1380,7 +2606,7 @@ class EditorEditText @JvmOverloads constructor(
     }
 
     private fun isSelectionInsideList(): Boolean {
-        if (editorId == 0L) return false
+        if (!hasLiveEditor()) return false
 
         return try {
             val state = org.json.JSONObject(editorGetCurrentState(editorId.toULong()))
@@ -1396,6 +2622,12 @@ class EditorEditText @JvmOverloads constructor(
      * Paste HTML content through Rust.
      */
     private fun pasteHTML(html: String) {
+        if (!hasLiveEditor()) return
+        syncCurrentSelectionToRust()
+        onInsertContentHtmlInRustForTesting?.let { callback ->
+            callback(html)
+            return
+        }
         val updateJSON = editorInsertContentHtml(editorId.toULong(), html)
         applyUpdateJSON(updateJSON)
     }
@@ -1404,9 +2636,8 @@ class EditorEditText @JvmOverloads constructor(
      * Paste plain text through Rust.
      */
     private fun pastePlainText(text: String) {
-        val currentText = this.text?.toString() ?: ""
-        val scalarPos = PositionBridge.utf16ToScalar(selectionStart, currentText)
-        insertTextInRust(text, scalarPos)
+        val (scalarStart, scalarEnd) = currentScalarSelection() ?: return
+        insertPlainTextRangeInRust(scalarStart, scalarEnd, text)
     }
 
     // ── Applying Rust State ─────────────────────────────────────────────
@@ -1477,6 +2708,8 @@ class EditorEditText @JvmOverloads constructor(
         replaceRange: RenderReplaceRange? = null,
         usedPatch: Boolean
     ) {
+        val hadCompositionTracking = hasCompositionTrackingForEditor()
+        var shouldRestartInput = false
         isApplyingRustState = true
         beginBatchEdit()
         try {
@@ -1486,11 +2719,22 @@ class EditorEditText @JvmOverloads constructor(
                 setText(spannable)
             }
             lastAuthorizedText = text?.toString().orEmpty()
+            lastAuthorizedRenderedText = text?.let { SpannableStringBuilder(it) }
+            lastAuthorizedTextRevision += 1L
+            clearNativeTextMutationAdoptionSuppression()
+            if (hadCompositionTracking) {
+                retireInputConnectionForEditor()
+                shouldRestartInput = true
+            } else {
+                clearCompositionTrackingForEditor()
+            }
             lastRenderAppliedPatchForTesting = usedPatch
+            clearNativeTextMutationAfterBlurWindow()
         } finally {
             endBatchEdit()
             isApplyingRustState = false
         }
+        restartInputAfterCompositionInvalidationIfNeeded(shouldRestartInput)
     }
 
     private fun buildPatchedSpannable(patch: ParsedRenderPatch): android.text.SpannableStringBuilder =
@@ -1691,6 +2935,8 @@ class EditorEditText @JvmOverloads constructor(
         if (shouldSkipRender) {
             lastRenderAppliedPatchForTesting = false
             currentRenderBlocksJson = resolvedRenderBlocks?.let(::cloneJsonArray)
+            clearNativeTextMutationAdoptionSuppression()
+            clearNativeTextMutationAfterBlurWindow()
             buildRenderNanos = 0L
             applyRenderNanos = 0L
         } else {
@@ -1911,7 +3157,10 @@ class EditorEditText @JvmOverloads constructor(
 
     override fun onFocusChanged(focused: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
         super.onFocusChanged(focused, direction, previouslyFocusedRect)
-        if (!focused) {
+        if (focused) {
+            clearNativeTextMutationAfterBlurWindow()
+        } else {
+            beginNativeTextMutationAfterBlurWindow()
             clearExplicitSelectedImageRange()
         }
     }
@@ -2018,6 +3267,7 @@ class EditorEditText @JvmOverloads constructor(
      */
     private fun applySelectionFromJSON(selection: org.json.JSONObject) {
         val type = selection.optString("type", "") ?: return
+        if (isEditorDestroyedForInput()) return
 
         isApplyingRustState = true
         try {
@@ -2029,12 +3279,12 @@ class EditorEditText @JvmOverloads constructor(
                     // Convert doc positions to scalar offsets.
                     val scalarAnchor = editorDocToScalar(editorId.toULong(), docAnchor.toUInt()).toInt()
                     val scalarHead = editorDocToScalar(editorId.toULong(), docHead.toUInt()).toInt()
-                    val startUtf16 = PositionBridge.scalarToUtf16(minOf(scalarAnchor, scalarHead), currentText)
-                    val endUtf16 = PositionBridge.scalarToUtf16(maxOf(scalarAnchor, scalarHead), currentText)
+                    val anchorUtf16 = PositionBridge.scalarToUtf16(scalarAnchor, currentText)
+                    val headUtf16 = PositionBridge.scalarToUtf16(scalarHead, currentText)
                     val len = text?.length ?: 0
                     setSelection(
-                        startUtf16.coerceIn(0, len),
-                        endUtf16.coerceIn(0, len)
+                        anchorUtf16.coerceIn(0, len),
+                        headUtf16.coerceIn(0, len)
                     )
                 }
                 "node" -> {
@@ -2081,13 +3331,13 @@ class EditorEditText @JvmOverloads constructor(
 
         override fun afterTextChanged(s: Editable?) {
             if (isApplyingRustState) return
-            if (editorId == 0L) return
+            if (!hasLiveEditor()) return
 
             val currentText = s?.toString() ?: ""
             if (currentText == lastAuthorizedText) return
 
             val mutation = nativeTextMutationFromAuthorizedDiff(currentText)
-            if (mutation != null && shouldAdoptNativeTextMutation(s)) {
+            if (mutation != null && shouldAdoptNativeTextMutation(mutation, allowAfterBlur = true)) {
                 commitNativeTextMutation(mutation)
                 return
             }
@@ -2113,6 +3363,9 @@ class EditorEditText @JvmOverloads constructor(
         private const val DEFAULT_AUTO_CORRECT = true
         private const val DEFAULT_KEYBOARD_TYPE = "default"
         private const val EMPTY_BLOCK_PLACEHOLDER = '\u200B'
+        private const val IME_TRACE_LIMIT_FOR_TESTING = 80
+        private const val NATIVE_TEXT_MUTATION_AFTER_BLUR_WINDOW_MS = 750L
+        private const val RECENT_HANDLED_HARDWARE_KEY_DOWN_WINDOW_MS = 750L
         private const val LOG_TAG = "NativeEditor"
     }
 }

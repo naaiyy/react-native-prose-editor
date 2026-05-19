@@ -1208,6 +1208,1440 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertEqual(view.textView.textStorage.string, "Hello there")
     }
 
+    func testFocusedNativeAutocompleteInsertionCommitsToRustOnNextRunLoop() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 6)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 6, length: 0),
+            with: "there"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello there")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testFocusedNativeDeletionCorrectionCommitsToRustOnNextRunLoop() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello  world</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 7)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 5, length: 1),
+            with: ""
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: 5)
+
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello world</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello world")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeTextMutationFlushesBeforeNextTypedCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        XCTAssertEqual(view.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeTextMutationInListUsesAdjustedScalarOffsetsBeforeNextTypedCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<ul><li><p>teh </p></li></ul>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<ul><li><p>the n</p></li></ul>")
+        XCTAssertEqual(view.textView.textStorage.string, "the n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeTextMutationInSecondListItemUsesAdjustedScalarOffsets() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 140))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<ul><li><p>one</p></li><li><p>teh </p></li></ul>")
+        let correctionRange = (view.textView.textStorage.string as NSString).range(of: "teh")
+        XCTAssertNotEqual(correctionRange.location, NSNotFound)
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(in: correctionRange, with: "the")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<ul><li><p>one</p></li><li><p>the n</p></li></ul>"
+        )
+        XCTAssertEqual(view.textView.textStorage.string, "one\nthe n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeTextMutationInNestedListUsesAdjustedScalarOffsets() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<ul><li><p>parent</p><ul><li><p>teh </p></li></ul></li></ul>")
+        let correctionRange = (view.textView.textStorage.string as NSString).range(of: "teh")
+        XCTAssertNotEqual(correctionRange.location, NSNotFound)
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(in: correctionRange, with: "the")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<ul><li><p>parent</p><ul><li><p>the n</p></li></ul></li></ul>"
+        )
+        XCTAssertEqual(view.textView.textStorage.string, "parent\nthe n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeTextMutationInTwoDigitOrderedListUsesAdjustedScalarOffsets() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<ol start=\"10\"><li><p>one</p></li><li><p>teh </p></li></ol>")
+        let correctionRange = (view.textView.textStorage.string as NSString).range(of: "teh")
+        XCTAssertNotEqual(correctionRange.location, NSNotFound)
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(in: correctionRange, with: "the")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<ol start=\"10\"><li><p>one</p></li><li><p>the n</p></li></ol>"
+        )
+        XCTAssertEqual(view.textView.textStorage.string, "one\nthe n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPasteFlushesPendingNativeAutocorrectBeforePlainTextPaste() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            UIPasteboard.general.items = []
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+
+        UIPasteboard.general.string = "now"
+        view.textView.paste(nil)
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the now</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the now")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPasteFlushesPendingNativeAutocorrectBeforeReplacingSelectedText() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            UIPasteboard.general.items = []
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh old</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 3)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        let oldRange = (view.textView.textStorage.string as NSString).range(of: "old")
+        XCTAssertNotEqual(oldRange.location, NSNotFound)
+        setSelection(in: view.textView, utf16Range: oldRange)
+
+        UIPasteboard.general.string = "now"
+        view.textView.paste(nil)
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the now</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the now")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testHTMLPasteFlushesPendingNativeAutocorrectBeforePaste() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            UIPasteboard.general.items = []
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+
+        UIPasteboard.general.setData(
+            Data("<strong>now</strong>".utf8),
+            forPasteboardType: "public.html"
+        )
+        view.textView.paste(nil)
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p><p><strong>now</strong></p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the \nnow")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testRTFPasteFlushesPendingNativeAutocorrectBeforePaste() throws {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            UIPasteboard.general.items = []
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+
+        let attributedPaste = NSAttributedString(
+            string: "now",
+            attributes: [.font: UIFont.boldSystemFont(ofSize: 14)]
+        )
+        let rtfData = try attributedPaste.data(
+            from: NSRange(location: 0, length: attributedPaste.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        UIPasteboard.general.setData(rtfData, forPasteboardType: "public.rtf")
+        XCTAssertNotNil(UIPasteboard.general.data(forPasteboardType: "public.rtf"))
+
+        view.textView.paste(nil)
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("the"), "RTF paste should preserve native correction, got: \(html)")
+        XCTAssertTrue(html.contains("now"), "RTF paste should insert converted rich text, got: \(html)")
+        XCTAssertTrue(view.textView.textStorage.string.contains("the"))
+        XCTAssertTrue(view.textView.textStorage.string.contains("now"))
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testInterceptWindowAutocorrectCommitsBeforeImmediateNextCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 3)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        view.textView.insertText(" ")
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testNativeReplaceAutocorrectWithEmojiPrefixCommitsBeforeNextCharacter() throws {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>😀 teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        let start = try XCTUnwrap(view.textView.position(from: view.textView.beginningOfDocument, offset: 3))
+        let end = try XCTUnwrap(view.textView.position(from: start, offset: 3))
+        let correctionRange = try XCTUnwrap(view.textView.textRange(from: start, to: end))
+        view.textView.replace(correctionRange, withText: "the")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>😀 the n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "😀 the n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testNativeEmojiReplacementAutocorrectDoesNotSplitSurrogatePairs() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>😀 test</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 2),
+            with: "😁"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>😁 test!</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "😁 test!")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testNativeAutocorrectAfterComplexEmojiGraphemesPreservesScalarMapping() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>👨‍👩‍👧‍👦 🇦🇺 1️⃣ teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        let correctionRange = (view.textView.textStorage.string as NSString).range(of: "teh")
+        XCTAssertNotEqual(correctionRange.location, NSNotFound)
+        view.textView.textStorage.replaceCharacters(in: correctionRange, with: "the")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>👨‍👩‍👧‍👦 🇦🇺 1️⃣ the n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "👨‍👩‍👧‍👦 🇦🇺 1️⃣ the n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testLengthChangingAutocorrectInvalidatesCachedPositionMappingBeforeSelectionCapture() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>dont </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        _ = PositionBridge.cursorScalarOffset(in: view.textView)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 4),
+            with: "don't"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>don't n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "don't n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testBlurTimeAutocorrectAfterResignStillCommitsToRust() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        XCTAssertTrue(view.textView.resignFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testBlurTimeAutocorrectAfterNextMainQueueTurnStillCommitsToRust() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        XCTAssertTrue(view.textView.resignFirstResponder())
+        flushMainQueue()
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testBlurTimeAutocorrectAfterGracePeriodReconcilesInsteadOfCommitting() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        XCTAssertTrue(view.textView.resignFirstResponder())
+        view.textView.expireNativeTextMutationAfterBlurDeadlineForTesting()
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>teh </p>")
+        XCTAssertEqual(view.textView.textStorage.string, "teh ")
+        XCTAssertEqual(view.textView.reconciliationCount, 1)
+    }
+
+    func testBlurTimeAutocorrectAfterContentReplacementReconcilesInsteadOfCommitting() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        XCTAssertTrue(view.textView.resignFirstResponder())
+
+        view.setContent(html: "<p>Remote</p>")
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: view.textView.textStorage.length),
+            with: "the "
+        )
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Remote</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Remote")
+        XCTAssertEqual(view.textView.reconciliationCount, 1)
+    }
+
+    func testBlurTimeAutocorrectGraceWindowIsConsumedAfterCommit() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        XCTAssertTrue(view.textView.resignFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "xxx"
+        )
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.textView.reconciliationCount, 1)
+    }
+
+    func testThemeRefreshDrainsPendingNativeAutocorrectBeforeApplyingRustState() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.textView.applyTheme(EditorTheme(dictionary: [
+            "textColor": "#123456",
+        ]))
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testSetEditableFalseDrainsPendingNativeAutocorrectBeforeReadOnly() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>teh </p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.setEditable(false)
+
+        XCTAssertFalse(view.richTextView.textView.isEditable)
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.richTextView.textView.reconciliationCount, 0)
+    }
+
+    func testInputTraitChangesDrainPendingNativeAutocorrectBeforeReload() {
+        assertPendingNativeAutocorrectSurvivesInputTraitChange {
+            $0.setAutoCorrect(true)
+        }
+        assertPendingNativeAutocorrectSurvivesInputTraitChange {
+            $0.setAutoCapitalize("characters")
+        }
+        assertPendingNativeAutocorrectSurvivesInputTraitChange {
+            $0.setKeyboardType("email-address")
+        }
+    }
+
+    func testInputTraitChangeFlushesActiveMarkedCompositionBeforeReload() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello world</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 6)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.setMarkedText("brave ", selectedRange: NSRange(location: 6, length: 0))
+
+        view.textView.setKeyboardType("email-address")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello brave world</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello brave world")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testBlockedAutoCorrectRetryDoesNotOverrideNewerValue() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello world</p>")
+        beginEmptyMarkedComposition(in: view, utf16Offset: 6)
+
+        view.textView.setAutoCorrect(true)
+        view.textView.setAutoCorrect(false)
+        flushMainQueue()
+
+        XCTAssertEqual(view.textView.autocorrectionType, .no)
+        XCTAssertEqual(view.textView.spellCheckingType, .no)
+    }
+
+    func testBlockedAutoCapitalizeRetryDoesNotOverrideNewerValue() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello world</p>")
+        beginEmptyMarkedComposition(in: view, utf16Offset: 6)
+
+        view.textView.setAutoCapitalize("characters")
+        view.textView.setAutoCapitalize("none")
+        flushMainQueue()
+
+        XCTAssertEqual(view.textView.autocapitalizationType, .none)
+    }
+
+    func testBlockedKeyboardTypeRetryDoesNotOverrideNewerValue() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello world</p>")
+        beginEmptyMarkedComposition(in: view, utf16Offset: 6)
+
+        view.textView.setKeyboardType("email-address")
+        view.textView.setKeyboardType("url")
+        flushMainQueue()
+
+        XCTAssertEqual(view.textView.keyboardType, .URL)
+    }
+
+    func testPendingAutoCorrectRetryIsInvalidatedAndDesiredTraitReplayedOnEditorRebind() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = firstEditorId
+        view.setContent(html: "<p>Hello world</p>")
+        beginEmptyMarkedComposition(in: view, utf16Offset: 6)
+
+        view.textView.setAutoCorrect(true)
+        view.editorId = secondEditorId
+        flushMainQueue()
+
+        XCTAssertEqual(view.textView.autocorrectionType, .yes)
+        XCTAssertEqual(view.textView.spellCheckingType, .default)
+    }
+
+    func testPendingAutoCapitalizeRetryIsInvalidatedAndDesiredTraitReplayedOnEditorRebind() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = firstEditorId
+        view.setContent(html: "<p>Hello world</p>")
+        beginEmptyMarkedComposition(in: view, utf16Offset: 6)
+
+        view.textView.setAutoCapitalize("characters")
+        view.editorId = secondEditorId
+        flushMainQueue()
+
+        XCTAssertEqual(view.textView.autocapitalizationType, .allCharacters)
+    }
+
+    func testPendingKeyboardTypeRetryIsInvalidatedAndDesiredTraitReplayedOnEditorRebind() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = firstEditorId
+        view.setContent(html: "<p>Hello world</p>")
+        beginEmptyMarkedComposition(in: view, utf16Offset: 6)
+
+        view.textView.setKeyboardType("email-address")
+        view.editorId = secondEditorId
+        flushMainQueue()
+
+        XCTAssertEqual(view.textView.keyboardType, .emailAddress)
+    }
+
+    func testAccessoryToolbarPlacementDrainsPendingNativeAutocorrectBeforeReload() {
+        assertPendingNativeAutocorrectSurvivesAccessoryChange { view in
+            view.setToolbarPlacement("inline")
+        } verify: { view, _, file, line in
+            XCTAssertTrue(view.isUsingAccessoryPlaceholderForTesting(), file: file, line: line)
+            XCTAssertFalse(view.isUsingAccessoryToolbarForTesting(), file: file, line: line)
+        }
+    }
+
+    func testAccessoryToolbarVisibilityDrainsPendingNativeAutocorrectBeforeReload() {
+        assertPendingNativeAutocorrectSurvivesAccessoryChange { view in
+            view.setShowToolbar(false)
+        } verify: { view, _, file, line in
+            XCTAssertTrue(view.isUsingAccessoryPlaceholderForTesting(), file: file, line: line)
+            XCTAssertFalse(view.isUsingAccessoryToolbarForTesting(), file: file, line: line)
+        }
+    }
+
+    func testThemeAccessoryReloadDrainsPendingNativeAutocorrectBeforeReload() {
+        assertPendingNativeAutocorrectSurvivesAccessoryChange { view in
+            view.setThemeJson(#"{"toolbar":{"appearance":"native"}}"#)
+        }
+    }
+
+    func testBlockedThemeRetryIsClearedWhenDesiredThemeRevertsBeforeRetry() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>Hello</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        let themeA = "{\"backgroundColor\":\"#101820\"}"
+        let themeB = "{\"backgroundColor\":\"#ffeedd\"}"
+        view.setEditorId(editorId)
+        view.setThemeJson(themeA)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 5)
+        flushMainQueue()
+
+        XCTAssertEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#101820"))
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.setThemeJson(themeB)
+        XCTAssertEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#101820"))
+
+        view.setThemeJson(themeA)
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#101820"))
+        XCTAssertNotEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#ffeedd"))
+    }
+
+    func testBlockedThemeRetryAppliesDesiredThemeAfterEditorRebind() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+        _ = editorSetHtml(id: firstEditorId, html: "<p>First</p>")
+        _ = editorSetHtml(id: secondEditorId, html: "<p>Second</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        let themeA = "{\"backgroundColor\":\"#101820\"}"
+        let themeB = "{\"backgroundColor\":\"#ffeedd\"}"
+        view.setEditorId(firstEditorId)
+        view.setThemeJson(themeA)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 5)
+        flushMainQueue()
+
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setThemeJson(themeB)
+        XCTAssertEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#101820"))
+
+        view.setEditorId(secondEditorId)
+        XCTAssertEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#ffeedd"))
+
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#ffeedd"))
+        XCTAssertNotEqual(view.richTextView.textView.theme?.backgroundColor, EditorTheme.color(from: "#101820"))
+    }
+
+    func testMentionAddonRefreshDrainsPendingNativeAutocorrectBeforeReload() {
+        assertPendingNativeAutocorrectSurvivesAccessoryChange(
+            initialHTML: "<p>teh @al</p>",
+            selectionOffset: 7
+        ) { view in
+            view.setAddonsJson(self.aliceMentionAddonsJson())
+        } verify: { view, _, file, line in
+            XCTAssertNotNil(
+                view.currentMentionQueryStateForTesting(trigger: "@"),
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    func testMentionAddonClearDrainsPendingNativeAutocorrectBeforeReload() {
+        assertPendingNativeAutocorrectSurvivesAccessoryChange(
+            initialHTML: "<p>teh @al</p>",
+            selectionOffset: 7,
+            configure: { view, _ in
+                view.setAddonsJson(self.aliceMentionAddonsJson())
+            }
+        ) { view in
+            view.setAddonsJson(nil)
+        }
+    }
+
+    func testStaleMentionClearRetryDoesNotHideFreshSuggestionsAfterRefreshSucceeds() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.setAddonsJson(aliceMentionAddonsJson())
+        XCTAssertTrue(view.isShowingMentionSuggestionsForTesting())
+
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setAddonsJson(nil)
+        view.setAddonsJson(aliceMentionAddonsJson())
+
+        XCTAssertTrue(
+            view.isShowingMentionSuggestionsForTesting(),
+            "successful mention refresh should show suggestions before the stale clear retry runs"
+        )
+
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertTrue(
+            view.isShowingMentionSuggestionsForTesting(),
+            "stale clear retry should not hide suggestions from a later successful refresh"
+        )
+    }
+
+    func testAccessoryRetryBatchKeepsNonConflictingToolbarVisibilityActionAfterMentionClear() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        view.setToolbarPlacement("keyboard")
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.setAddonsJson(aliceMentionAddonsJson())
+        XCTAssertTrue(view.isUsingAccessoryToolbarForTesting())
+
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setAddonsJson(nil)
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setShowToolbar(false)
+
+        XCTAssertTrue(
+            view.isUsingAccessoryToolbarForTesting(),
+            "toolbar visibility should remain unchanged while the accessory update is queued"
+        )
+
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertTrue(
+            view.isUsingAccessoryPlaceholderForTesting(),
+            "successful mention clear retry should not cancel a queued toolbar visibility retry"
+        )
+        XCTAssertFalse(view.isUsingAccessoryToolbarForTesting())
+    }
+
+    func testAccessoryRetryBatchKeepsRemainingActionsWhenFirstRetryRequeues() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        view.setToolbarPlacement("keyboard")
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.setAddonsJson(aliceMentionAddonsJson())
+        XCTAssertTrue(view.isShowingMentionSuggestionsForTesting())
+        XCTAssertTrue(view.isUsingAccessoryToolbarForTesting())
+
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setAddonsJson(nil)
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        view.setShowToolbar(false)
+
+        flushMainQueue()
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertTrue(
+            view.isShowingMentionSuggestionsForTesting(),
+            "a refresh queued behind a requeued clear should still run"
+        )
+        XCTAssertTrue(
+            view.isUsingAccessoryPlaceholderForTesting(),
+            "toolbar visibility queued behind a requeued clear should still run"
+        )
+        XCTAssertFalse(view.isUsingAccessoryToolbarForTesting())
+    }
+
+    func testApplyEditorUpdateRetriesAfterBlockedCompositionOnSameEditor() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>First</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 0)
+
+        let updateJSON = editorReplaceHtml(id: editorId, html: "<p>Remote</p>")
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        XCTAssertFalse(view.applyEditorUpdate(updateJSON))
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "First")
+
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "Remote")
+    }
+
+    func testApplyEditorUpdateRetryIsDroppedAfterEditorRebind() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+        _ = editorSetHtml(id: firstEditorId, html: "<p>First</p>")
+        _ = editorSetHtml(id: secondEditorId, html: "<p>Second</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(firstEditorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 0)
+
+        let staleUpdateJSON = editorReplaceHtml(id: firstEditorId, html: "<p>Remote</p>")
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        XCTAssertFalse(view.applyEditorUpdate(staleUpdateJSON))
+        view.setEditorId(secondEditorId)
+        flushMainQueue()
+
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "Second")
+    }
+
+    func testSameEditorIdUpdateDoesNotDropPendingNativeAutocorrect() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>teh </p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.setEditorId(editorId)
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "the ")
+        XCTAssertEqual(view.richTextView.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeAutocorrectIsDroppedAfterEditorRebind() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+        _ = editorSetHtml(id: firstEditorId, html: "<p>teh </p>")
+        _ = editorSetHtml(id: secondEditorId, html: "<p>Second</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(firstEditorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.setEditorId(secondEditorId)
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: firstEditorId), "<p>teh </p>")
+        XCTAssertEqual(editorGetHtml(id: secondEditorId), "<p>Second</p>")
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "Second")
+    }
+
+    func testPrepareForCommandAfterEditorRebindDoesNotDrainPreviousEditorMutation() {
+        let firstEditorId = editorCreate(configJson: "{}")
+        let secondEditorId = editorCreate(configJson: "{}")
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+        _ = editorSetHtml(id: firstEditorId, html: "<p>teh </p>")
+        _ = editorSetHtml(id: secondEditorId, html: "<p>Second</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            NativeEditorViewRegistry.shared.unregister(editorId: secondEditorId, view: view)
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(firstEditorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        view.setEditorId(secondEditorId)
+
+        let preparationJSON = NativeEditorViewRegistry.shared.prepareForCommandJSON(
+            editorId: firstEditorId
+        )
+        XCTAssertTrue(preparationJSON.contains("\"ready\":true"))
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: firstEditorId), "<p>teh </p>")
+        XCTAssertEqual(editorGetHtml(id: secondEditorId), "<p>Second</p>")
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "Second")
+    }
+
+    func testDestroyedEditorInvalidatesRegistryAndUnbindsView() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        NativeEditorViewRegistry.shared.markEditorCreated(editorId: editorId)
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        XCTAssertEqual(view.richTextView.editorId, editorId)
+        XCTAssertEqual(view.richTextView.textView.editorId, editorId)
+
+        NativeEditorViewRegistry.shared.invalidateDestroyedEditor(editorId: editorId)
+        let preparation = parseJSONObject(
+            NativeEditorViewRegistry.shared.prepareForCommandJSON(editorId: editorId)
+        )
+
+        XCTAssertEqual(preparation["ready"] as? Bool, false)
+        XCTAssertEqual(preparation["blockedReason"] as? String, "destroyed")
+        XCTAssertEqual(view.richTextView.editorId, 0)
+        XCTAssertEqual(view.richTextView.textView.editorId, 0)
+    }
+
+    func testDestroyedEditorIdCannotRegisterNewView() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        NativeEditorViewRegistry.shared.markEditorCreated(editorId: editorId)
+        NativeEditorViewRegistry.shared.invalidateDestroyedEditor(editorId: editorId)
+
+        let view = NativeEditorExpoView()
+        view.setEditorId(editorId)
+        let preparation = parseJSONObject(
+            NativeEditorViewRegistry.shared.prepareForCommandJSON(editorId: editorId)
+        )
+
+        XCTAssertEqual(view.richTextView.editorId, 0)
+        XCTAssertEqual(view.richTextView.textView.editorId, 0)
+        XCTAssertEqual(preparation["ready"] as? Bool, false)
+        XCTAssertEqual(preparation["blockedReason"] as? String, "destroyed")
+    }
+
+    func testPrepareForCommandReportsCompositionBlockedReasonWhenMarkedTextPreflightDefers() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>Hello</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            NativeEditorViewRegistry.shared.unregister(editorId: editorId, view: view)
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 0)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        let preparation = parseJSONObject(
+            NativeEditorViewRegistry.shared.prepareForCommandJSON(editorId: editorId)
+        )
+
+        XCTAssertEqual(preparation["ready"] as? Bool, false)
+        XCTAssertEqual(preparation["blockedReason"] as? String, "composition")
+        XCTAssertNil(preparation["updateJSON"])
+    }
+
+    func testPrepareForCommandIncludesUpdateJSONAfterNativeAutocorrectDrain() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: "<p>teh </p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            NativeEditorViewRegistry.shared.unregister(editorId: editorId, view: view)
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 4)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        let preparation = parseJSONObject(
+            NativeEditorViewRegistry.shared.prepareForCommandJSON(editorId: editorId)
+        )
+        let updateJSON = preparation["updateJSON"] as? String
+
+        XCTAssertEqual(preparation["ready"] as? Bool, true)
+        XCTAssertNil(preparation["blockedReason"])
+        XCTAssertNotNil(updateJSON)
+        XCTAssertTrue(updateJSON?.contains("the ") == true, "preflight update should include the drained correction")
+        XCTAssertFalse(updateJSON?.contains("teh ") == true, "preflight update should not contain stale text")
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+    }
+
+    func testPrepareForCommandIncludesUpdateJSONAfterSameTextCompositionChangesSelectionState() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        editorSetSelectionScalar(id: editorId, scalarAnchor: 0, scalarHead: 5)
+        setSelection(in: textView, utf16Range: NSRange(location: 0, length: 5))
+
+        textView.setMarkedText("Hello", selectedRange: NSRange(location: 5, length: 0))
+        let preparation = textView.prepareForExternalEditorCommand()
+
+        XCTAssertTrue(preparation.ready)
+        XCTAssertNil(preparation.blockedReason)
+        XCTAssertNotNil(
+            preparation.updateJSON,
+            "same-text composition commits should still forward selection/state changes"
+        )
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello world</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello world")
+    }
+
     func testMarkedTextDoesNotReconcileWhileCompositionIsTransient() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }
@@ -1255,6 +2689,107 @@ final class RichTextEditorViewTests: XCTestCase {
 
         XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there</p>")
         XCTAssertEqual(textView.textStorage.string, "Hello there")
+    }
+
+    func testSetMarkedTextNilCommitsVisibleComposition() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("brave ", selectedRange: NSRange(location: 6, length: 0))
+        textView.setMarkedText(nil, selectedRange: NSRange(location: 0, length: 0))
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello brave world</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+        XCTAssertEqual(textView.authorizedTextForTesting(), "Hello brave world")
+    }
+
+    func testSetMarkedTextNilCommitsEmptyReplacementOverOriginalSelection() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setSelection(in: textView, utf16Range: NSRange(location: 6, length: 5))
+
+        textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        textView.setMarkedText(nil, selectedRange: NSRange(location: 0, length: 0))
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello </p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello ")
+        XCTAssertEqual(textView.authorizedTextForTesting(), "Hello ")
+    }
+
+    func testExternalUpdatePreflightCommitsActiveCompositionOnce() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("brave ", selectedRange: NSRange(location: 6, length: 0))
+
+        XCTAssertTrue(textView.applyTheme(EditorTheme(dictionary: ["textColor": "#123456"])))
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello brave world</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+
+        textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello brave world</p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+    }
+
+    func testToolbarCommandsCommitActiveMarkedCompositionBeforeMutatingEditor() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setCollapsedSelection(in: textView, utf16Offset: 6)
+
+        textView.setMarkedText("brave ", selectedRange: NSRange(location: 6, length: 0))
+        textView.performToolbarToggleMark("bold")
+
+        XCTAssertTrue(
+            editorGetHtml(id: editorId).contains("Hello brave world"),
+            "toolbar mark command should commit the active composition before mutating the editor"
+        )
+        XCTAssertEqual(textView.textStorage.string, "Hello brave world")
+        XCTAssertEqual(textView.reconciliationCount, 0)
+
+        setCollapsedSelection(in: textView, utf16Offset: textView.textStorage.length)
+        textView.setMarkedText("!", selectedRange: NSRange(location: 1, length: 0))
+        textView.performToolbarInsertNode("horizontalRule")
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("Hello brave world"), "toolbar node insert should preserve the earlier composed text, got: \(html)")
+        XCTAssertTrue(html.contains("!"), "toolbar node insert should preserve the newly composed text, got: \(html)")
+        XCTAssertTrue(html.contains("<hr>"), "toolbar node insert should still apply after the composition drain, got: \(html)")
+        XCTAssertEqual(textView.reconciliationCount, 0)
+    }
+
+    func testExternalUpdatePreflightCommitsEmptySelectedCompositionAsDeletion() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        textView.bindEditor(id: editorId, initialHTML: "<p>Hello world</p>")
+        setSelection(in: textView, utf16Range: NSRange(location: 6, length: 5))
+
+        textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        XCTAssertTrue(textView.applyTheme(EditorTheme(dictionary: ["textColor": "#123456"])))
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello </p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello ")
+
+        textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello </p>")
+        XCTAssertEqual(textView.textStorage.string, "Hello ")
     }
 
     func testInsertTextDuringMarkedCompositionUsesOriginalReplacementRange() {
@@ -2470,6 +4005,596 @@ final class RichTextEditorViewTests: XCTestCase {
         )
     }
 
+    func testMentionSuggestionTapDrainsPendingNativeAutocorrectBeforeInsert() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>teh @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        window.makeKeyAndVisible()
+        viewController.view.addSubview(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(
+            """
+            {"mentions":{"trigger":"@","suggestions":[{"key":"alice","title":"Alice Chen","subtitle":"Design","label":"@alice","attrs":{"id":"user_alice","label":"@alice"}}]}}
+            """
+        )
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 4, head: 7)
+        )
+        view.setMentionSuggestionsForTesting([
+            NativeMentionSuggestion(dictionary: [
+                "key": "alice",
+                "title": "Alice Chen",
+                "subtitle": "Design",
+                "label": "@alice",
+                "attrs": ["id": "user_alice", "label": "@alice"],
+            ])!,
+        ])
+        view.layoutIfNeeded()
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("the"), "mention insert should preserve native correction, got: \(html)")
+        XCTAssertFalse(html.contains("teh"), "mention insert should not restore stale text, got: \(html)")
+        XCTAssertFalse(html.contains("@al</p>"), "mention insert should replace the query range, got: \(html)")
+        XCTAssertTrue(
+            html.contains("data-native-editor-mention=\"true\""),
+            "mention insert should still insert the mention node, got: \(html)"
+        )
+        XCTAssertEqual(view.richTextView.textView.reconciliationCount, 0)
+    }
+
+    func testMentionSelectRequestIncludesPreflightUpdateAfterNativeAutocorrectDrain() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>teh @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(
+            """
+            {"mentions":{"trigger":"@","resolveSelectionAttrs":true,"suggestions":[{"key":"alice","title":"Alice Chen","subtitle":"Design","label":"@alice","attrs":{"id":"user_alice","label":"@alice"}}]}}
+            """
+        )
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 4, head: 7)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let event = parseJSONObject(view.lastAddonEventJSONForTesting())
+        XCTAssertEqual(event["type"] as? String, "mentionsSelectRequest")
+        XCTAssertEqual(event["suggestionKey"] as? String, "alice")
+        let range = event["range"] as? [String: Any]
+        XCTAssertEqual(jsonInt(range?["anchor"]), 4)
+        XCTAssertEqual(jsonInt(range?["head"]), 7)
+
+        let updateJSON = event["updateJson"] as? String
+        XCTAssertNotNil(updateJSON)
+        XCTAssertTrue(updateJSON?.contains("the @al") == true, "select request should carry the drained correction update")
+        XCTAssertFalse(updateJSON?.contains("teh @al") == true, "select request should not carry stale pre-correction text")
+
+        let update = parseJSONObject(updateJSON)
+        XCTAssertEqual(jsonInt(event["documentVersion"]), jsonInt(update["documentVersion"]))
+    }
+
+    func testMentionSuggestionTapDrainsPendingNativeAutocorrectInsideListItem() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<ul><li><p>teh @al</p></li></ul>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        window.makeKeyAndVisible()
+        viewController.view.addSubview(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(
+            """
+            {"mentions":{"trigger":"@","suggestions":[{"key":"alice","title":"Alice Chen","subtitle":"Design","label":"@alice","attrs":{"id":"user_alice","label":"@alice"}}]}}
+            """
+        )
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 4, head: 7)
+        )
+        view.setMentionSuggestionsForTesting([
+            NativeMentionSuggestion(dictionary: [
+                "key": "alice",
+                "title": "Alice Chen",
+                "subtitle": "Design",
+                "label": "@alice",
+                "attrs": ["id": "user_alice", "label": "@alice"],
+            ])!,
+        ])
+        view.layoutIfNeeded()
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("<ul><li><p>the "), "mention insert should preserve list correction, got: \(html)")
+        XCTAssertFalse(html.contains("teh"), "mention insert should not restore stale list text, got: \(html)")
+        XCTAssertFalse(html.contains("@al</p>"), "mention insert should replace the list query range, got: \(html)")
+        XCTAssertTrue(
+            html.contains("data-native-editor-mention=\"true\""),
+            "mention insert should still insert the mention node in the list item, got: \(html)"
+        )
+        XCTAssertEqual(view.richTextView.textView.reconciliationCount, 0)
+    }
+
+    func testMentionSuggestionTapRecomputesRangeAfterLengthChangingAutocorrect() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>a @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        window.makeKeyAndVisible()
+        viewController.view.addSubview(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(
+            """
+            {"mentions":{"trigger":"@","suggestions":[{"key":"alice","title":"Alice Chen","subtitle":"Design","label":"@alice","attrs":{"id":"user_alice","label":"@alice"}}]}}
+            """
+        )
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 2, head: 5)
+        )
+        view.setMentionSuggestionsForTesting([
+            NativeMentionSuggestion(dictionary: [
+                "key": "alice",
+                "title": "Alice Chen",
+                "subtitle": "Design",
+                "label": "@alice",
+                "attrs": ["id": "user_alice", "label": "@alice"],
+            ])!,
+        ])
+        view.layoutIfNeeded()
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 1),
+            with: "an"
+        )
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("an "), "mention insert should preserve length-changing correction, got: \(html)")
+        XCTAssertFalse(html.contains("@al</p>"), "mention insert should replace the recomputed query range, got: \(html)")
+        XCTAssertTrue(
+            html.contains("data-native-editor-mention=\"true\""),
+            "mention insert should insert the mention node after recomputing the range, got: \(html)"
+        )
+        XCTAssertEqual(view.richTextView.textView.reconciliationCount, 0)
+    }
+
+    func testMentionSuggestionTapRetriesAfterBlockedMarkedTextPreflight() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 6, head: 9)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        XCTAssertFalse(editorGetHtml(id: editorId).contains("data-native-editor-mention=\"true\""))
+
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(
+            html.contains("data-native-editor-mention=\"true\""),
+            "mention tap should retry after composition preflight clears, got: \(html)"
+        )
+        XCTAssertFalse(html.contains("@al</p>"), "retried mention tap should replace query, got: \(html)")
+    }
+
+    func testMentionSuggestionTapRetrySurvivesPreflightDrainedAutocorrect() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>teh @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 4, head: 7)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+        XCTAssertFalse(editorGetHtml(id: editorId).contains("data-native-editor-mention=\"true\""))
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+
+        flushMainQueue()
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("the "), "retried mention tap should preserve preflight correction, got: \(html)")
+        XCTAssertFalse(html.contains("teh"), "retried mention tap should not restore stale text, got: \(html)")
+        XCTAssertFalse(html.contains("@al</p>"), "retried mention tap should replace the query, got: \(html)")
+        XCTAssertTrue(
+            html.contains("data-native-editor-mention=\"true\""),
+            "mention tap should retry after draining autocorrect during preflight, got: \(html)"
+        )
+    }
+
+    func testMentionSuggestionTapRetrySurvivesLengthChangingPreflightDrainedAutocorrect() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>a @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 2, head: 5)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+        XCTAssertFalse(editorGetHtml(id: editorId).contains("data-native-editor-mention=\"true\""))
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 1),
+            with: "an"
+        )
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+
+        flushMainQueue()
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(html.contains("an "), "retried mention tap should preserve length-changing correction, got: \(html)")
+        XCTAssertFalse(html.contains("<p>a "), "retried mention tap should not restore stale text, got: \(html)")
+        XCTAssertFalse(html.contains("@al</p>"), "retried mention tap should replace the shifted query, got: \(html)")
+        XCTAssertTrue(
+            html.contains("data-native-editor-mention=\"true\""),
+            "mention tap should retry after draining shifted autocorrect during preflight, got: \(html)"
+        )
+    }
+
+    func testMentionSuggestionTapRetryIsDroppedWhenPreflightShiftTargetsDifferentSameQuery() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>a @al b @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 2, head: 5)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: 5)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+        XCTAssertFalse(editorGetHtml(id: editorId).contains("data-native-editor-mention=\"true\""))
+
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 1),
+            with: "an"
+        )
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+
+        flushMainQueue()
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertEqual(html, "<p>an @al b @al</p>")
+        XCTAssertFalse(
+            html.contains("data-native-editor-mention=\"true\""),
+            "retry should not jump to a different identical query after preflight drains a correction, got: \(html)"
+        )
+    }
+
+    func testMentionSuggestionTapRetryUsesRefreshedSuggestionForSameKey() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 6, head: 9)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let refreshedSuggestion = NativeMentionSuggestion(dictionary: [
+            "key": "alice",
+            "title": "Ally Chen",
+            "subtitle": "Design",
+            "label": "@ally",
+            "attrs": ["id": "user_ally", "label": "@ally"],
+        ])!
+        view.setAddonsJson(
+            """
+            {"mentions":{"trigger":"@","suggestions":[{"key":"alice","title":"Ally Chen","subtitle":"Design","label":"@ally","attrs":{"id":"user_ally","label":"@ally"}}]}}
+            """
+        )
+        view.setMentionSuggestionsForTesting([refreshedSuggestion])
+
+        flushMainQueue()
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertTrue(
+            html.contains("@ally"),
+            "retried mention tap should use the refreshed same-key label, got: \(html)"
+        )
+        XCTAssertFalse(
+            html.contains("@alice"),
+            "retried mention tap should not use the stale captured label, got: \(html)"
+        )
+
+        let event = parseJSONObject(view.lastAddonEventJSONForTesting())
+        let attrs = event["attrs"] as? [String: Any]
+        XCTAssertEqual(event["type"] as? String, "mentionsSelect")
+        XCTAssertEqual(event["suggestionKey"] as? String, "alice")
+        XCTAssertEqual(attrs?["id"] as? String, "user_ally")
+        XCTAssertEqual(attrs?["label"] as? String, "@ally")
+    }
+
+    func testMentionSuggestionTapRetryIsDroppedAfterQueryChanges() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 6, head: 9)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let changedUpdateJSON = editorReplaceHtml(id: editorId, html: "<p>Hello @bo</p>")
+        view.richTextView.textView.applyUpdateJSON(changedUpdateJSON, notifyDelegate: false)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "bo", trigger: "@", anchor: 6, head: 9)
+        )
+
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertEqual(html, "<p>Hello @bo</p>")
+        XCTAssertFalse(
+            html.contains("data-native-editor-mention=\"true\""),
+            "stale mention retry should not insert into a changed query, got: \(html)"
+        )
+    }
+
+    func testMentionSuggestionTapRetryIsDroppedAfterSameQueryRangeChanges() {
+        let editorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer { editorDestroy(id: editorId) }
+
+        _ = editorSetHtml(id: editorId, html: "<p>Hello @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(editorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 6, head: 9)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+
+        let changedUpdateJSON = editorReplaceHtml(id: editorId, html: "<p>@al Hello @al</p>")
+        view.richTextView.textView.applyUpdateJSON(changedUpdateJSON, notifyDelegate: false)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 10, head: 13)
+        )
+
+        flushMainQueue()
+        flushMainQueue()
+
+        let html = editorGetHtml(id: editorId)
+        XCTAssertEqual(html, "<p>@al Hello @al</p>")
+        XCTAssertFalse(
+            html.contains("data-native-editor-mention=\"true\""),
+            "same-query retry should still be dropped when its range moved, got: \(html)"
+        )
+    }
+
+    func testMentionSuggestionTapRetryIsDroppedAfterEditorRebind() {
+        let firstEditorId = editorCreate(configJson: mentionEditorConfigJson())
+        let secondEditorId = editorCreate(configJson: mentionEditorConfigJson())
+        defer {
+            editorDestroy(id: firstEditorId)
+            editorDestroy(id: secondEditorId)
+        }
+        _ = editorSetHtml(id: firstEditorId, html: "<p>Hello @al</p>")
+        _ = editorSetHtml(id: secondEditorId, html: "<p>Second @al</p>")
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        view.setEditorId(firstEditorId)
+        view.setAddonsJson(aliceMentionAddonsJson())
+        view.setMentionQueryStateForTesting(
+            MentionQueryState(query: "al", trigger: "@", anchor: 6, head: 9)
+        )
+        view.setMentionSuggestionsForTesting([aliceMentionSuggestion()])
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: view.richTextView.textView.textStorage.length)
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder())
+        view.richTextView.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+
+        view.triggerMentionSuggestionTapForTesting(at: 0)
+        view.setEditorId(secondEditorId)
+        flushMainQueue()
+        flushMainQueue()
+
+        XCTAssertFalse(editorGetHtml(id: firstEditorId).contains("data-native-editor-mention=\"true\""))
+        XCTAssertFalse(editorGetHtml(id: secondEditorId).contains("data-native-editor-mention=\"true\""))
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, "Second @al")
+    }
+
     func testMentionSuggestionTapStillWorksAfterRebindingToMentionSchemaEditor() {
         let initialEditorId = editorCreate(configJson: "{}")
         let mentionEditorId = editorCreate(configJson: mentionEditorConfigJson())
@@ -3429,7 +5554,126 @@ final class RichTextEditorViewTests: XCTestCase {
         return rect
     }
 
+    private func assertPendingNativeAutocorrectSurvivesInputTraitChange(
+        _ applyTraitChange: (EditorTextView) -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder(), file: file, line: line)
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        applyTraitChange(view.textView)
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>", file: file, line: line)
+        XCTAssertEqual(view.textView.textStorage.string, "the ", file: file, line: line)
+        XCTAssertEqual(view.textView.reconciliationCount, 0, file: file, line: line)
+    }
+
+    private func beginEmptyMarkedComposition(
+        in view: RichTextEditorView,
+        utf16Offset: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        setCollapsedSelection(in: view.textView, utf16Offset: utf16Offset)
+        flushMainQueue()
+        XCTAssertTrue(view.textView.becomeFirstResponder(), file: file, line: line)
+        view.textView.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+    }
+
+    private func assertPendingNativeAutocorrectSurvivesAccessoryChange(
+        initialHTML: String = "<p>teh </p>",
+        selectionOffset: Int = 4,
+        configure: ((NativeEditorExpoView, UInt64) -> Void)? = nil,
+        _ applyAccessoryChange: (NativeEditorExpoView) -> Void,
+        verify: ((NativeEditorExpoView, UInt64, StaticString, UInt) -> Void)? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+        _ = editorSetHtml(id: editorId, html: initialHTML)
+
+        let view = NativeEditorExpoView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 160)
+        let window = hostNativeEditorExpoView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.setEditorId(editorId)
+        configure?(view, editorId)
+        setCollapsedSelection(in: view.richTextView.textView, utf16Offset: selectionOffset)
+        flushMainQueue()
+
+        XCTAssertTrue(view.richTextView.textView.becomeFirstResponder(), file: file, line: line)
+        let expectedText = view.richTextView.textView.textStorage.string.replacingOccurrences(
+            of: "teh",
+            with: "the"
+        )
+        view.richTextView.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+
+        applyAccessoryChange(view)
+        flushMainQueue()
+
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            initialHTML.replacingOccurrences(of: "teh", with: "the"),
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(view.richTextView.textView.textStorage.string, expectedText, file: file, line: line)
+        XCTAssertEqual(view.richTextView.textView.reconciliationCount, 0, file: file, line: line)
+        verify?(view, editorId, file, line)
+    }
+
+    private func aliceMentionAddonsJson() -> String {
+        """
+        {"mentions":{"trigger":"@","suggestions":[{"key":"alice","title":"Alice Chen","subtitle":"Design","label":"@alice","attrs":{"id":"user_alice","label":"@alice"}}]}}
+        """
+    }
+
+    private func aliceMentionSuggestion() -> NativeMentionSuggestion {
+        NativeMentionSuggestion(dictionary: [
+            "key": "alice",
+            "title": "Alice Chen",
+            "subtitle": "Design",
+            "label": "@alice",
+            "attrs": ["id": "user_alice", "label": "@alice"],
+        ])!
+    }
+
     private func hostEditorView(_ view: RichTextEditorView) -> UIWindow {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        window.makeKeyAndVisible()
+        viewController.view.addSubview(view)
+        view.layoutIfNeeded()
+        return window
+    }
+
+    private func hostNativeEditorExpoView(_ view: NativeEditorExpoView) -> UIWindow {
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
         let viewController = UIViewController()
         window.rootViewController = viewController
@@ -3453,6 +5697,28 @@ final class RichTextEditorViewTests: XCTestCase {
         let json = try? JSONSerialization.jsonObject(with: data ?? Data()) as? [String: Any]
         XCTAssertNotNil(json)
         return json ?? [:]
+    }
+
+    private func parseJSONObject(_ json: String?) -> [String: Any] {
+        guard let json else {
+            XCTFail("expected JSON string")
+            return [:]
+        }
+        let data = json.data(using: .utf8)
+        XCTAssertNotNil(data)
+        let object = try? JSONSerialization.jsonObject(with: data ?? Data()) as? [String: Any]
+        XCTAssertNotNil(object)
+        return object ?? [:]
+    }
+
+    private func jsonInt(_ value: Any?) -> Int? {
+        if let value = value as? Int {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.intValue
+        }
+        return nil
     }
 
     private func activeState(in editorId: UInt64) -> (insertableNodes: [String], allowedMarks: [String]) {

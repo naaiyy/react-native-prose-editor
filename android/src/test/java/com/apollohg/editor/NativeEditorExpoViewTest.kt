@@ -1,19 +1,36 @@
 package com.apollohg.editor
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.Rect
+import android.os.Looper
+import android.view.MotionEvent
+import android.view.inputmethod.EditorInfo
+import android.widget.FrameLayout
 import expo.modules.core.ModuleRegistry
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.ModulesProvider
 import expo.modules.kotlin.modules.Module
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.lang.ref.WeakReference
+import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -63,6 +80,1990 @@ class NativeEditorExpoViewTest {
         view.blur()
         assertFalse(view.shouldPreserveFocusAfterToolbarTouchForTesting())
     }
+
+    @Test
+    fun `detached registered view blocks command preflight until it reattaches`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 12345L
+
+        NativeEditorViewRegistry.register(editorId, view)
+        assertTrue(
+            JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+                .getBoolean("ready")
+        )
+
+        NativeEditorViewRegistry.unregister(editorId, view, blockCommandsUntilRegistered = true)
+
+        assertFalse(
+            JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+                .getBoolean("ready")
+        )
+
+        NativeEditorViewRegistry.register(editorId, view)
+
+        assertTrue(
+            JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+                .getBoolean("ready")
+        )
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `non owner unregister does not clear detached command block`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val ownerView = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val otherView = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 22334L
+
+        NativeEditorViewRegistry.register(editorId, ownerView)
+        NativeEditorViewRegistry.unregister(
+            editorId,
+            ownerView,
+            blockCommandsUntilRegistered = true
+        )
+        NativeEditorViewRegistry.unregister(editorId, otherView)
+
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("detached", preparation.getString("blockedReason"))
+
+        NativeEditorViewRegistry.register(editorId, ownerView)
+        NativeEditorViewRegistry.unregister(editorId, ownerView)
+    }
+
+    @Test
+    fun `editor id set while detached blocks command preflight without binding editor`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 23456L
+
+        view.setEditorId(editorId)
+
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("detached", preparation.getString("blockedReason"))
+        assertEquals(editorId, view.richTextView.editorId)
+        assertEquals(0L, view.richTextView.editorEditText.editorId)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `timed out off main command preflight does not flush composition later`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 24567L
+        val editText = view.richTextView.editorEditText
+        var insertedText: String? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        editText.onInsertTextInRustForTesting = { text, _ ->
+            insertedText = text
+        }
+        NativeEditorViewRegistry.register(editorId, view)
+
+        val inputConnection = editText.onCreateInputConnection(android.view.inputmethod.EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("abc", 1))
+
+        val result = AtomicReference<String?>(null)
+        val thread = Thread {
+            result.set(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        }
+        thread.start()
+        thread.join(1000)
+
+        val preparation = JSONObject(result.get()!!)
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("unknown", preparation.getString("blockedReason"))
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertNull(insertedText)
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `off main command preflight waits for started side effecting preparation`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 24568L
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        view.richTextView.editorEditText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        view.richTextView.editorEditText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        NativeEditorViewRegistry.register(editorId, view)
+        val preparationStarted = AtomicBoolean(false)
+        view.onBeforePrepareForEditorCommandForTesting = {
+            preparationStarted.set(true)
+            Thread.sleep(300)
+        }
+
+        val result = AtomicReference<String?>(null)
+        val thread = Thread {
+            result.set(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        }
+        thread.start()
+        while (!preparationStarted.get() && result.get() == null) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        thread.join(1000)
+
+        assertFalse(thread.isAlive)
+        val preparation = JSONObject(result.get()!!)
+        assertTrue(preparation.getBoolean("ready"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `detach preserves pending controlled editor update json`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val updateJson = """{"renderElements":[],"selection":{"type":"text","anchor":0,"head":0}}"""
+
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateRevision(1)
+
+        view.handleDetachedFromWindowForTesting()
+
+        assertEquals(updateJson, view.pendingEditorUpdateJsonForTesting())
+    }
+
+    @Test
+    fun `editor id change preserves pending controlled update until matching update editor id arrives`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val updateJson = """{"renderElements":[],"selection":{"type":"text","anchor":0,"head":0}}"""
+
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateRevision(7)
+        view.setEditorId(33445L)
+
+        assertEquals(updateJson, view.pendingEditorUpdateJsonForTesting())
+        assertEquals(7, view.pendingEditorUpdateRevisionForTesting())
+        assertNull(view.pendingEditorUpdateEditorIdForTesting())
+
+        view.setPendingEditorUpdateEditorId(33445L)
+
+        assertEquals(33445L, view.pendingEditorUpdateEditorIdForTesting())
+        assertEquals(updateJson, view.pendingEditorUpdateJsonForTesting())
+
+        NativeEditorViewRegistry.unregister(33445L, view)
+    }
+
+    @Test
+    fun `editor id change drops pending update scoped to a different editor`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val updateJson = """{"renderElements":[],"selection":{"type":"text","anchor":0,"head":0}}"""
+
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(111L)
+        view.setPendingEditorUpdateRevision(3)
+
+        view.setEditorId(222L)
+
+        assertNull(view.pendingEditorUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateRevisionForTesting())
+
+        NativeEditorViewRegistry.unregister(222L, view)
+    }
+
+    @Test
+    fun `null controlled update clears queued update for matching editor`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val updateJson = """{"renderElements":[],"selection":{"type":"text","anchor":0,"head":0}}"""
+
+        view.richTextView.setEditorIdWhileDetached(55667L)
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(55667L)
+        view.setPendingEditorUpdateRevision(1)
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(55667L)
+        view.setPendingEditorUpdateRevision(2)
+        view.applyPendingEditorUpdateIfNeeded()
+
+        assertNull(view.pendingEditorUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateRevisionForTesting())
+    }
+
+    @Test
+    fun `replayed applied controlled update revision clears stale pending state`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 55668L
+        val replayedUpdateJson = renderUpdateJson("replayed")
+        val editText = view.richTextView.editorEditText
+        val readyPayloads = mutableListOf<Map<String, Any>>()
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("first"), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onEditorReadyForTesting = { payload ->
+            readyPayloads.add(payload)
+        }
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = { null }
+        view.onAddonEventForTesting = {}
+        view.setAppliedEditorUpdateRevisionForTesting(1)
+
+        view.setPendingEditorUpdateJson(replayedUpdateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.applyPendingEditorUpdateIfNeeded()
+
+        assertNull(view.pendingEditorUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateRevisionForTesting())
+        assertEquals("first", editText.text?.toString())
+        assertEquals(1, readyPayloads.size)
+        assertEquals(1, readyPayloads.single()["editorUpdateRevision"])
+    }
+
+    @Test
+    fun `editor id change resets last document version`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+
+        view.setLastDocumentVersionForTesting(20)
+
+        assertEquals(20, view.lastDocumentVersionForTesting())
+
+        view.setEditorId(66778L)
+
+        assertNull(view.lastDocumentVersionForTesting())
+
+        NativeEditorViewRegistry.unregister(66778L, view)
+    }
+
+    @Test
+    fun `selection toolbar refresh seeds document version for no update toolbar action`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 667781L
+        val editText = view.richTextView.editorEditText
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onAddonEventForTesting = {}
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = {
+            JSONObject(renderUpdateJson(""))
+                .put("documentVersion", 7)
+                .toString()
+        }
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        view.refreshToolbarStateFromEditorSelectionForTesting()
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertEquals(7, view.lastDocumentVersionForTesting())
+        assertEquals(7, toolbarActionPayload?.get("documentVersion"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `autofocus requested before attach applies when editor becomes focusable`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val parent = FrameLayout(activity)
+        activity.setContentView(parent)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 66779L
+        val editText = view.richTextView.editorEditText
+
+        view.onAddonEventForTesting = {}
+        view.onFocusChangeForTesting = {}
+        view.setAutoFocus(true)
+        parent.addView(view)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.editorId = editorId
+
+        assertFalse(editText.hasFocus())
+
+        view.applyAutoFocusForTesting()
+
+        assertTrue(editText.hasFocus())
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `destroyed editor id invalidates registry and matching view`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77881L
+
+        NativeEditorViewRegistry.markEditorCreated(editorId)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        NativeEditorViewRegistry.register(editorId, view)
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("destroyed", preparation.getString("blockedReason"))
+        assertEquals(0L, view.richTextView.editorId)
+    }
+
+    @Test
+    fun `destroyed editor id cannot register a new view`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778811L
+
+        NativeEditorViewRegistry.markEditorCreated(editorId)
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+
+        assertFalse(NativeEditorViewRegistry.register(editorId, view))
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("destroyed", preparation.getString("blockedReason"))
+    }
+
+    @Test
+    fun `destroyed editor invalidation from background waits for view cleanup`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77882L
+        val completed = AtomicBoolean(false)
+
+        NativeEditorViewRegistry.markEditorCreated(editorId)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        NativeEditorViewRegistry.register(editorId, view)
+
+        val thread = Thread {
+            NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+            completed.set(true)
+        }
+        thread.start()
+        shadowOf(Looper.getMainLooper()).idle()
+        thread.join(1000)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse(thread.isAlive)
+        assertTrue(completed.get())
+        assertEquals(0L, view.richTextView.editorId)
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("destroyed", preparation.getString("blockedReason"))
+    }
+
+    @Test
+    fun `destroyed editor invalidation from background times out until main cleanup runs`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77884L
+        val completed = AtomicBoolean(false)
+
+        NativeEditorViewRegistry.markEditorCreated(editorId)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        val editText = view.richTextView.editorEditText
+        editText.applyUpdateJSON(renderUpdateJson("ready"), notifyListener = false)
+        editText.setSelection(5)
+        editText.editorId = editorId
+        var insertedText: String? = null
+        var syncedSelection: Pair<Int, Int>? = null
+        editText.onInsertTextInRustForTesting = { text, _ -> insertedText = text }
+        editText.onSetSelectionScalarInRustForTesting = { anchor, head ->
+            syncedSelection = anchor to head
+        }
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        NativeEditorViewRegistry.register(editorId, view)
+
+        val thread = Thread {
+            NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+            completed.set(true)
+        }
+        thread.start()
+        thread.join(1000)
+
+        assertFalse(thread.isAlive)
+        assertTrue(completed.get())
+        assertEquals(editorId, view.richTextView.editorId)
+        assertFalse(NativeEditorViewRegistry.register(editorId, view))
+        assertTrue(inputConnection!!.commitText("x", 1))
+        editText.setSelection(0)
+        assertNull(insertedText)
+        assertNull(syncedSelection)
+
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(0L, view.richTextView.editorId)
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("destroyed", preparation.getString("blockedReason"))
+    }
+
+    @Test
+    fun `cleared detached weak owner does not block command preflight forever`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77883L
+
+        NativeEditorViewRegistry.register(editorId, view)
+        NativeEditorViewRegistry.unregister(
+            editorId,
+            view,
+            blockCommandsUntilRegistered = true
+        )
+        NativeEditorViewRegistry.forceDetachedOwnerClearedForTesting(editorId)
+
+        val preparation = JSONObject(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        assertTrue(preparation.getBoolean("ready"))
+    }
+
+    @Test
+    fun `pending controlled update blocks command preflight`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77884L
+        val updateJson = renderUpdateJson("")
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        view.richTextView.editorEditText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+
+        val preparation = JSONObject(view.prepareForEditorCommandJSON())
+
+        assertFalse(preparation.getBoolean("ready"))
+        assertEquals("pendingUpdate", preparation.getString("blockedReason"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending controlled update keeps retrying after fast retry budget`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778842L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("recovered")
+        val readyPayloads = mutableListOf<Map<String, Any>>()
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.blockEditorUpdatePreflightForTesting = true
+        view.onEditorReadyForTesting = { payload ->
+            readyPayloads.add(payload)
+        }
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = { null }
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(9)
+
+        view.applyPendingEditorUpdateIfNeeded()
+        repeat(6) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+        }
+
+        assertEquals(updateJson, view.pendingEditorUpdateJsonForTesting())
+
+        view.blockEditorUpdatePreflightForTesting = false
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1000))
+
+        assertNull(view.pendingEditorUpdateJsonForTesting())
+        assertEquals(9, readyPayloads.last()["editorUpdateRevision"])
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `editor ready payload includes acknowledged update revision`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778841L
+        val readyPayloads = mutableListOf<Map<String, Any>>()
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        view.richTextView.editorEditText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onEditorReadyForTesting = { payload ->
+            readyPayloads.add(payload)
+        }
+
+        assertTrue(view.emitEditorReadyForTesting(editorUpdateRevision = 4))
+
+        assertEquals(1, readyPayloads.size)
+        assertEquals(editorId, readyPayloads.single()["editorId"])
+        assertEquals(4, readyPayloads.single()["editorUpdateRevision"])
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending controlled update parks native toolbar action until cleared`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77885L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        val action = NativeToolbarItem(
+            type = ToolbarItemKind.action,
+            key = "custom",
+            label = "Custom"
+        )
+
+        view.handleToolbarItemPressForTesting(action)
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+        assertNull(toolbarActionPayload)
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertEquals("custom", toolbarActionPayload?.get("key"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `parked native toolbar action survives controlled update document version acknowledgement`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779855L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        val acknowledgedUpdateJson = JSONObject(updateJson)
+            .put("documentVersion", 2)
+            .toString()
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setLastDocumentVersionForTesting(1)
+        view.onAddonEventForTesting = {}
+        view.setPendingEditorUpdateJson(acknowledgedUpdateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.isApplyingJSUpdate = true
+        view.onEditorUpdate(acknowledgedUpdateJson)
+        view.isApplyingJSUpdate = false
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertEquals("custom", toolbarActionPayload?.get("key"))
+        assertEquals(2, toolbarActionPayload?.get("documentVersion"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `parked native toolbar action is dropped when unrelated document version changes`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779857L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        val acknowledgedUpdateJson = JSONObject(updateJson)
+            .put("documentVersion", 2)
+            .toString()
+        val unrelatedUpdateJson = JSONObject(updateJson)
+            .put("documentVersion", 3)
+            .toString()
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setLastDocumentVersionForTesting(1)
+        view.setPendingEditorUpdateJson(acknowledgedUpdateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.onAddonEventForTesting = {}
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.isApplyingJSUpdate = true
+        view.onEditorUpdate(unrelatedUpdateJson)
+        view.isApplyingJSUpdate = false
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertNull(toolbarActionPayload)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `parked native mention selection survives controlled update document version acknowledgement`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779856L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("Hi @ali")
+        val acknowledgedUpdateJson = JSONObject(updateJson)
+            .put("documentVersion", 2)
+            .toString()
+        val suggestion = NativeMentionSuggestion(
+            key = "u1",
+            title = "Alice",
+            subtitle = null,
+            label = "@Alice",
+            attrs = JSONObject().put("id", "u1")
+        )
+        var addonPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setLastDocumentVersionForTesting(1)
+        view.onAddonEventForTesting = { payload ->
+            addonPayload = payload
+        }
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put(
+                            "suggestions",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("key", "u1")
+                                    .put("title", "Alice")
+                                    .put("label", "@Alice")
+                                    .put("attrs", JSONObject().put("id", "u1"))
+                            )
+                        )
+                )
+                .toString()
+        )
+        addonPayload = null
+        view.setPendingEditorUpdateJson(acknowledgedUpdateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+
+        view.insertMentionSuggestionForTesting(suggestion)
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+        assertNull(addonPayload)
+
+        view.isApplyingJSUpdate = true
+        view.onEditorUpdate(acknowledgedUpdateJson)
+        view.isApplyingJSUpdate = false
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        addonPayload = null
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        val eventJson = JSONObject(addonPayload?.get("eventJson") as String)
+        assertEquals("mentionsSelectRequest", eventJson.getString("type"))
+        assertEquals("u1", eventJson.getString("suggestionKey"))
+        assertEquals(2, eventJson.getInt("documentVersion"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `destroyed editor clears parked native toolbar action without emitting callback`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779853L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(toolbarActionPayload)
+    }
+
+    @Test
+    fun `toolbar visibility placement and editability changes clear parked native toolbar action`() {
+        val cases = listOf<(NativeEditorExpoView) -> Unit>(
+            { view -> view.setShowToolbar(false) },
+            { view -> view.setToolbarPlacement("inline") },
+            { view -> view.setEditable(false) }
+        )
+
+        cases.forEachIndexed { index, clearAction ->
+            val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+            val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+            val editorId = 778852L + index
+            val editText = view.richTextView.editorEditText
+            val updateJson = renderUpdateJson("")
+            var toolbarActionPayload: Map<String, Any>? = null
+
+            view.richTextView.setEditorIdWhileDetached(editorId)
+            editText.applyUpdateJSON(updateJson, notifyListener = false)
+            editText.setSelection(0)
+            editText.editorId = editorId
+            view.setAttachedToNativeWindowForTesting(true)
+            view.setPendingEditorUpdateJson(updateJson)
+            view.setPendingEditorUpdateEditorId(editorId)
+            view.setPendingEditorUpdateRevision(1)
+            view.onToolbarActionForTesting = { payload ->
+                toolbarActionPayload = payload
+            }
+
+            view.handleToolbarItemPressForTesting(
+                NativeToolbarItem(
+                    type = ToolbarItemKind.action,
+                    key = "custom",
+                    label = "Custom"
+                )
+            )
+
+            assertTrue(view.hasPendingNativeActionForTesting())
+
+            clearAction(view)
+            view.setPendingEditorUpdateJson(null)
+            view.setPendingEditorUpdateEditorId(editorId)
+            view.setPendingEditorUpdateRevision(2)
+            view.wakePendingPreflightWorkForTesting()
+
+            assertFalse(view.hasPendingNativeActionForTesting())
+            assertNull(toolbarActionPayload)
+
+            NativeEditorViewRegistry.unregister(editorId, view)
+        }
+    }
+
+    @Test
+    fun `real blur clears parked native toolbar action`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = FrameLayout(activity)
+        activity.setContentView(host)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778856L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        host.addView(view)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setCurrentImeBottomForTesting(120)
+        view.onAddonEventForTesting = {}
+        view.onFocusChangeForTesting = {}
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+        assertTrue(editText.requestFocus())
+        shadowOf(Looper.getMainLooper()).idle()
+
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        editText.clearFocus()
+        shadowOf(Looper.getMainLooper()).idle()
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(toolbarActionPayload)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `toolbar preserved blur keeps parked native toolbar action current while refocus is pending`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778857L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setCurrentImeBottomForTesting(120)
+        view.onFocusChangeForTesting = {}
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+        view.scheduleToolbarRefocusForTesting()
+        assertTrue(view.hasPendingToolbarRefocusForTesting())
+
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertEquals("custom", toolbarActionPayload?.get("key"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `keyboard toolbar becoming invisible clears parked native toolbar action`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778858L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.setCurrentImeBottomForTesting(0)
+        view.updateAttachedKeyboardToolbarForInsetsForTesting()
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(toolbarActionPayload)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `read only native toolbar and mention callbacks are consumed without mutation`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778859L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("Hi @ali")
+        val suggestion = NativeMentionSuggestion(
+            key = "u1",
+            title = "Alice",
+            subtitle = null,
+            label = "@Alice",
+            attrs = JSONObject().put("id", "u1")
+        )
+        var toolbarActionPayload: Map<String, Any>? = null
+        var addonPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onAddonEventForTesting = { payload ->
+            addonPayload = payload
+        }
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put(
+                            "suggestions",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("key", "u1")
+                                    .put("title", "Alice")
+                                    .put("label", "@Alice")
+                                    .put("attrs", JSONObject().put("id", "u1"))
+                            )
+                        )
+                )
+                .toString()
+        )
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+        addonPayload = null
+
+        view.setEditable(false)
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+        view.insertMentionSuggestionForTesting(suggestion)
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(toolbarActionPayload)
+        assertNull(addonPayload)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `toolbar config change clears parked native toolbar action`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778851L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("")
+        var toolbarActionPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        view.handleToolbarItemPressForTesting(
+            NativeToolbarItem(
+                type = ToolbarItemKind.action,
+                key = "custom",
+                label = "Custom"
+            )
+        )
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.setToolbarItemsJson(
+            JSONArray()
+                .put(
+                    JSONObject()
+                        .put("type", "action")
+                        .put("key", "other")
+                        .put("label", "Other")
+                )
+                .toString()
+        )
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(toolbarActionPayload)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending controlled update parks native mention selection until cleared`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 77886L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("Hi @ali")
+        val suggestion = NativeMentionSuggestion(
+            key = "u1",
+            title = "Alice",
+            subtitle = null,
+            label = "@Alice",
+            attrs = JSONObject().put("id", "u1")
+        )
+        var addonPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onAddonEventForTesting = { payload ->
+            addonPayload = payload
+        }
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put(
+                            "suggestions",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("key", "u1")
+                                    .put("title", "Alice")
+                                    .put("label", "@Alice")
+                                    .put("attrs", JSONObject().put("id", "u1"))
+                            )
+                        )
+                )
+                .toString()
+        )
+        addonPayload = null
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+
+        view.insertMentionSuggestionForTesting(suggestion)
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+        assertNull(addonPayload)
+
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        val eventJson = JSONObject(addonPayload?.get("eventJson") as String)
+        assertEquals("mentionsSelectRequest", eventJson.getString("type"))
+        assertEquals("u1", eventJson.getString("suggestionKey"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending native mention action is parked after retry budget and wakes later`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779865L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("Hi @ali")
+        val suggestion = NativeMentionSuggestion(
+            key = "u1",
+            title = "Alice",
+            subtitle = null,
+            label = "@Alice",
+            attrs = JSONObject().put("id", "u1")
+        )
+        var addonPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = editorId
+        editText.blockExternalEditorCommandPreparationForTesting = true
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onAddonEventForTesting = { payload ->
+            addonPayload = payload
+        }
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put(
+                            "suggestions",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("key", "u1")
+                                    .put("title", "Alice")
+                                    .put("label", "@Alice")
+                                    .put("attrs", JSONObject().put("id", "u1"))
+                            )
+                        )
+                )
+                .toString()
+        )
+        addonPayload = null
+
+        view.insertMentionSuggestionForTesting(suggestion)
+        repeat(4) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(16))
+        }
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+        assertTrue(view.pendingNativeActionRetryAttemptsForTesting() >= 3)
+
+        editText.blockExternalEditorCommandPreparationForTesting = false
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        val eventJson = JSONObject(addonPayload?.get("eventJson") as String)
+        assertEquals("mentionsSelectRequest", eventJson.getString("type"))
+        assertEquals("u1", eventJson.getString("suggestionKey"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `destroyed editor clears parked native mention selection without emitting callback`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779862L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("Hi @ali")
+        val suggestion = NativeMentionSuggestion(
+            key = "u1",
+            title = "Alice",
+            subtitle = null,
+            label = "@Alice",
+            attrs = JSONObject().put("id", "u1")
+        )
+        var addonPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onAddonEventForTesting = { payload ->
+            addonPayload = payload
+        }
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put(
+                            "suggestions",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("key", "u1")
+                                    .put("title", "Alice")
+                                    .put("label", "@Alice")
+                                    .put("attrs", JSONObject().put("id", "u1"))
+                            )
+                        )
+                )
+                .toString()
+        )
+        addonPayload = null
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+
+        view.insertMentionSuggestionForTesting(suggestion)
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(addonPayload)
+    }
+
+    @Test
+    fun `addons config change clears parked native mention selection`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778861L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("Hi @ali")
+        val suggestion = NativeMentionSuggestion(
+            key = "u1",
+            title = "Alice",
+            subtitle = null,
+            label = "@Alice",
+            attrs = JSONObject().put("id", "u1")
+        )
+        var addonPayload: Map<String, Any>? = null
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(updateJson, notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onAddonEventForTesting = { payload ->
+            addonPayload = payload
+        }
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put(
+                            "suggestions",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("key", "u1")
+                                    .put("title", "Alice")
+                                    .put("label", "@Alice")
+                                    .put("attrs", JSONObject().put("id", "u1"))
+                            )
+                        )
+                )
+                .toString()
+        )
+        addonPayload = null
+        view.setPendingEditorUpdateJson(updateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(1)
+
+        view.insertMentionSuggestionForTesting(suggestion)
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+
+        view.setAddonsJson(
+            JSONObject()
+                .put(
+                    "mentions",
+                    JSONObject()
+                        .put("resolveSelectionAttrs", true)
+                        .put("suggestions", JSONArray())
+                )
+                .toString()
+        )
+        addonPayload = null
+        view.setPendingEditorUpdateJson(null)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(2)
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertNull(addonPayload)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `view command update retry attempts advance instead of resetting for same payload`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val updateJson = """{"renderElements":[],"selection":{"type":"text","anchor":0,"head":0}}"""
+
+        view.richTextView.setEditorIdWhileDetached(44556L)
+        view.scheduleViewCommandUpdateRetryForTesting(updateJson)
+
+        assertEquals(updateJson, view.pendingViewCommandUpdateJsonForTesting())
+        assertEquals(1, view.pendingViewCommandUpdateRetryAttemptsForTesting())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20))
+
+        assertEquals(updateJson, view.pendingViewCommandUpdateJsonForTesting())
+        assertEquals(2, view.pendingViewCommandUpdateRetryAttemptsForTesting())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(32))
+
+        assertEquals(updateJson, view.pendingViewCommandUpdateJsonForTesting())
+        assertEquals(3, view.pendingViewCommandUpdateRetryAttemptsForTesting())
+    }
+
+    @Test
+    fun `theme update applies when preflight is ready`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val themeJson = """{"backgroundColor":"#ff0000"}"""
+
+        view.setThemeJson(themeJson)
+
+        assertNull(view.pendingThemeJsonForTesting())
+        assertEquals(themeJson, view.lastThemeJsonForTesting())
+    }
+
+    @Test
+    fun `theme update queues latest value while preflight is blocked`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val firstThemeJson = """{"backgroundColor":"#00ff00"}"""
+        val latestThemeJson = """{"backgroundColor":"#0000ff"}"""
+
+        view.blockThemePreflightForTesting = true
+        view.setThemeJson(firstThemeJson)
+        view.setThemeJson(latestThemeJson)
+
+        assertEquals(latestThemeJson, view.pendingThemeJsonForTesting())
+        assertNull(view.lastThemeJsonForTesting())
+
+        view.blockThemePreflightForTesting = false
+        view.applyPendingThemeForTesting()
+
+        assertNull(view.pendingThemeJsonForTesting())
+        assertEquals(latestThemeJson, view.lastThemeJsonForTesting())
+    }
+
+    @Test
+    fun `scheduled theme retry applies pending theme after preflight unblocks`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val themeJson = """{"backgroundColor":"#112233"}"""
+
+        view.blockThemePreflightForTesting = true
+        view.setThemeJson(themeJson)
+        assertEquals(themeJson, view.pendingThemeJsonForTesting())
+
+        view.blockThemePreflightForTesting = false
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(16))
+
+        assertNull(view.pendingThemeJsonForTesting())
+        assertEquals(themeJson, view.lastThemeJsonForTesting())
+    }
+
+    @Test
+    fun `theme retry is bounded while preflight remains blocked`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val themeJson = """{"backgroundColor":"#112233"}"""
+
+        view.blockThemePreflightForTesting = true
+        view.setThemeJson(themeJson)
+
+        repeat(10) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+        }
+
+        assertEquals(themeJson, view.pendingThemeJsonForTesting())
+        assertTrue(view.pendingThemeRetryAttemptsForTesting() <= 5)
+        assertNull(view.lastThemeJsonForTesting())
+    }
+
+    @Test
+    fun `theme update wakes after retry budget is exhausted`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val themeJson = """{"backgroundColor":"#445566"}"""
+
+        view.blockThemePreflightForTesting = true
+        view.setThemeJson(themeJson)
+
+        repeat(10) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+        }
+
+        assertEquals(themeJson, view.pendingThemeJsonForTesting())
+        assertTrue(view.pendingThemeRetryAttemptsForTesting() <= 5)
+        assertNull(view.lastThemeJsonForTesting())
+
+        view.blockThemePreflightForTesting = false
+        view.wakePendingPreflightWorkForTesting()
+
+        assertNull(view.pendingThemeJsonForTesting())
+        assertEquals(themeJson, view.lastThemeJsonForTesting())
+    }
+
+    @Test
+    fun `theme update can clear an applied theme with null json`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val themeJson = """{"backgroundColor":"#ff0000"}"""
+
+        view.setThemeJson(themeJson)
+        view.setThemeJson(null)
+
+        assertNull(view.pendingThemeJsonForTesting())
+        assertNull(view.lastThemeJsonForTesting())
+    }
+
+    @Test
+    fun `blur retries preflight until it unblocks`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editText = view.richTextView.editorEditText
+
+        editText.blockExternalEditorUpdatePreparationForTesting = true
+
+        view.performBlurForTesting()
+
+        assertEquals(1, view.pendingBlurRetryAttemptsForTesting())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20))
+
+        assertEquals(2, view.pendingBlurRetryAttemptsForTesting())
+
+        editText.blockExternalEditorUpdatePreparationForTesting = false
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(32))
+
+        assertEquals(0, view.pendingBlurRetryAttemptsForTesting())
+    }
+
+    @Test
+    fun `blur retry clears when editor is destroyed before preflight unblocks`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779900L
+        val editText = view.richTextView.editorEditText
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.editorId = editorId
+        editText.blockExternalEditorUpdatePreparationForTesting = true
+
+        view.performBlurForTesting()
+
+        assertEquals(1, view.pendingBlurRetryAttemptsForTesting())
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20))
+
+        assertEquals(0, view.pendingBlurRetryAttemptsForTesting())
+        assertEquals(0L, view.richTextView.editorId)
+        assertEquals(0L, editText.editorId)
+    }
+
+    @Test
+    fun `destroyed editor cancels pending outside tap keyboard dismiss and preflight wake`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779902L
+        val editText = view.richTextView.editorEditText
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        NativeEditorViewRegistry.register(editorId, view)
+
+        view.scheduleOutsideTapBlurFromWindowDispatcher()
+        view.performBlurForTesting(deferKeyboardDismiss = true)
+        view.schedulePendingPreflightWakeForTesting()
+
+        assertTrue(view.hasPendingOutsideTapBlurForTesting())
+        assertTrue(view.hasPendingKeyboardDismissForTesting())
+        assertTrue(view.hasPendingPreflightWakeForTesting())
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+
+        assertFalse(view.hasPendingOutsideTapBlurForTesting())
+        assertFalse(view.hasPendingKeyboardDismissForTesting())
+        assertFalse(view.hasPendingPreflightWakeForTesting())
+        assertFalse(view.isKeyboardToolbarAttachedForTesting())
+        assertEquals(0L, view.richTextView.editorId)
+        assertEquals(0L, editText.editorId)
+    }
+
+    @Test
+    fun `destroyed editor cancels pending toolbar refocus`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779903L
+        val editText = view.richTextView.editorEditText
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        NativeEditorViewRegistry.register(editorId, view)
+
+        view.scheduleToolbarRefocusForTesting()
+
+        assertTrue(view.hasPendingToolbarRefocusForTesting())
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse(view.hasPendingToolbarRefocusForTesting())
+        assertFalse(editText.hasFocus())
+        assertEquals(0L, view.richTextView.editorId)
+        assertEquals(0L, editText.editorId)
+    }
+
+    @Test
+    fun `outside tap dispatcher is shared per window and restores original callback after last view`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val firstExpoContext = testExpoContext(activity)
+        val secondExpoContext = testExpoContext(activity)
+        val firstView = NativeEditorExpoView(firstExpoContext.context, firstExpoContext.appContext)
+        val secondView = NativeEditorExpoView(secondExpoContext.context, secondExpoContext.appContext)
+        val window = activity.window
+        val originalCallback = window.callback
+
+        firstView.installOutsideTapBlurHandlerForTesting()
+        val dispatcherCallback = window.callback
+        secondView.installOutsideTapBlurHandlerForTesting()
+
+        assertSame(dispatcherCallback, window.callback)
+
+        firstView.uninstallOutsideTapBlurHandlerForTesting()
+
+        assertSame(dispatcherCallback, window.callback)
+
+        secondView.uninstallOutsideTapBlurHandlerForTesting()
+
+        assertSame(originalCallback, window.callback)
+    }
+
+    @Test
+    fun `outside tap dispatcher wraps newer window callback instead of reinstalling stale dispatcher`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = activity.findViewById<FrameLayout>(android.R.id.content)
+        val firstExpoContext = testExpoContext(activity)
+        val secondExpoContext = testExpoContext(activity)
+        val firstView = NativeEditorExpoView(firstExpoContext.context, firstExpoContext.appContext)
+        val secondView = NativeEditorExpoView(secondExpoContext.context, secondExpoContext.appContext)
+        val window = activity.window
+        host.addView(firstView)
+        host.addView(secondView)
+        firstView.setAttachedToNativeWindowForTesting(true)
+        firstView.onAddonEventForTesting = {}
+        firstView.onFocusChangeForTesting = {}
+
+        firstView.installOutsideTapBlurHandlerForTesting()
+        val firstDispatcher = window.callback
+        val newerCallback = object : android.view.Window.Callback by firstDispatcher {}
+        window.callback = newerCallback
+
+        secondView.installOutsideTapBlurHandlerForTesting()
+
+        assertTrue(window.callback !== firstDispatcher)
+
+        assertTrue(firstView.richTextView.editorEditText.requestFocus())
+        firstView.uninstallOutsideTapBlurHandlerForTesting()
+        val event = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 9999f, 9999f, 0)
+        window.callback.dispatchTouchEvent(event)
+        event.recycle()
+
+        assertFalse(firstView.hasPendingOutsideTapBlurForTesting())
+
+        secondView.uninstallOutsideTapBlurHandlerForTesting()
+
+        assertSame(newerCallback, window.callback)
+    }
+
+    @Test
+    fun `detach clears keyboard toolbar viewport inset`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+
+        view.richTextView.setViewportBottomInsetPx(42)
+        view.setCurrentImeBottomForTesting(120)
+
+        assertEquals(42, view.richTextView.viewportBottomInsetPxForTesting())
+        assertEquals(120, view.currentImeBottomForTesting())
+
+        view.handleDetachedFromWindowForTesting()
+
+        assertEquals(0, view.richTextView.viewportBottomInsetPxForTesting())
+        assertEquals(0, view.currentImeBottomForTesting())
+    }
+
+    @Test
+    fun `toolbar theme refreshes fixed viewport inset`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = FrameLayout(activity)
+        activity.setContentView(host)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778895L
+        val editText = view.richTextView.editorEditText
+
+        host.addView(view, FrameLayout.LayoutParams(360, 480))
+        view.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(360, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(480, android.view.View.MeasureSpec.EXACTLY)
+        )
+        view.layout(0, 0, 360, 480)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setCurrentImeBottomForTesting(160)
+        view.onAddonEventForTesting = {}
+        view.onFocusChangeForTesting = {}
+        assertTrue(editText.requestFocus())
+        shadowOf(Looper.getMainLooper()).idle()
+        editText.editorId = 0L
+        view.richTextView.setViewportBottomInsetPx(1)
+
+        view.setThemeJson("""{"toolbar":{"appearance":"native"}}""")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(view.richTextView.viewportBottomInsetPxForTesting() > 1)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `detach preflight flushes pending composition before unregistering`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editText = view.richTextView.editorEditText
+
+        view.richTextView.setEditorIdWhileDetached(77889L)
+        editText.setSelection(0)
+        editText.editorId = 77889L
+
+        var insertedText: String? = null
+        editText.onInsertTextInRustForTesting = { text, _ ->
+            insertedText = text
+            editText.applyUpdateJSON(renderUpdateJson(text), notifyListener = false)
+        }
+
+        val inputConnection = editText.onCreateInputConnection(android.view.inputmethod.EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("abc", 1))
+
+        view.handleDetachedFromWindowForTesting()
+
+        assertEquals("abc", insertedText)
+
+        NativeEditorViewRegistry.unregister(77889L, view)
+    }
+
+    @Test
+    fun `detach retry clears when editor is destroyed before preflight unblocks`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779901L
+        val editText = view.richTextView.editorEditText
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.editorId = editorId
+        editText.blockExternalEditorUpdatePreparationForTesting = true
+
+        view.handleDetachedFromWindowForTesting()
+
+        assertEquals(1, view.pendingDetachPreflightRetryAttemptsForTesting())
+
+        NativeEditorViewRegistry.invalidateDestroyedEditor(editorId)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20))
+
+        assertEquals(0, view.pendingDetachPreflightRetryAttemptsForTesting())
+        assertEquals(0L, view.richTextView.editorId)
+        assertEquals(0L, editText.editorId)
+    }
+
+    @Test
+    fun `child detach preflight flushes pending composition before editor unbind`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val parent = FrameLayout(activity)
+        activity.setContentView(parent)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editText = view.richTextView.editorEditText
+        val editorId = 778891L
+
+        parent.addView(view)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+
+        var insertedText: String? = null
+        editText.onInsertTextInRustForTesting = { text, _ ->
+            insertedText = text
+            editText.applyUpdateJSON(renderUpdateJson(text), notifyListener = false)
+        }
+
+        val inputConnection = editText.onCreateInputConnection(android.view.inputmethod.EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("abc", 1))
+
+        parent.removeView(view)
+
+        assertEquals("abc", insertedText)
+        assertEquals(0L, editText.editorId)
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending native toolbar action is parked after retry budget and wakes later`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editText = view.richTextView.editorEditText
+
+        view.richTextView.setEditorIdWhileDetached(88990L)
+        editText.setSelection(0)
+        editText.editorId = 88990L
+        editText.blockExternalEditorCommandPreparationForTesting = true
+        var toolbarActionPayload: Map<String, Any>? = null
+        view.onToolbarActionForTesting = { payload ->
+            toolbarActionPayload = payload
+        }
+
+        val action = NativeToolbarItem(
+            type = ToolbarItemKind.action,
+            key = "custom",
+            label = "Custom"
+        )
+
+        view.handleToolbarItemPressForTesting(action)
+        repeat(4) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(16))
+        }
+
+        assertTrue(view.hasPendingNativeActionForTesting())
+        assertTrue(view.pendingNativeActionRetryAttemptsForTesting() >= 3)
+
+        editText.blockExternalEditorCommandPreparationForTesting = false
+        view.wakePendingPreflightWorkForTesting()
+
+        assertFalse(view.hasPendingNativeActionForTesting())
+        assertEquals("custom", toolbarActionPayload?.get("key"))
+        assertEquals(88990L, toolbarActionPayload?.get("editorId"))
+
+        NativeEditorViewRegistry.unregister(88990L, view)
+    }
+
+    @Test
+    fun `view command update wakes after retry budget is exhausted`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 88991L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("next")
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("before"), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.blockEditorUpdatePreflightForTesting = true
+
+        assertFalse(view.applyEditorUpdate(updateJson))
+
+        repeat(10) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+        }
+
+        assertEquals(updateJson, view.pendingViewCommandUpdateJsonForTesting())
+        assertTrue(view.pendingViewCommandUpdateRetryAttemptsForTesting() <= 5)
+        assertEquals("before", editText.text?.toString())
+
+        view.blockEditorUpdatePreflightForTesting = false
+        view.wakePendingPreflightWorkForTesting()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(16))
+
+        assertNull(view.pendingViewCommandUpdateJsonForTesting())
+        assertEquals("next", editText.text?.toString())
+    }
+
+    @Test
+    fun `off main view command update is ignored after editor rebind`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val firstEditorId = 99101L
+        val secondEditorId = 99102L
+        val editText = view.richTextView.editorEditText
+        val updateJson = renderUpdateJson("stale")
+
+        view.richTextView.setEditorIdWhileDetached(firstEditorId)
+        editText.applyUpdateJSON(renderUpdateJson("first"), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = firstEditorId
+        view.setAttachedToNativeWindowForTesting(true)
+
+        val posted = CountDownLatch(1)
+        Thread {
+            view.applyEditorUpdate(updateJson)
+            posted.countDown()
+        }.start()
+        assertTrue(posted.await(2, java.util.concurrent.TimeUnit.SECONDS))
+
+        view.richTextView.setEditorIdWhileDetached(secondEditorId)
+        editText.applyUpdateJSON(renderUpdateJson("second"), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = secondEditorId
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("second", editText.text?.toString())
+        assertNull(view.pendingViewCommandUpdateJsonForTesting())
+    }
+
+    @Test
+    fun `interrupted running off main preflight returns completed result`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 99103L
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val result = AtomicReference<String>()
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        view.richTextView.editorEditText.applyUpdateJSON(renderUpdateJson("ready"), notifyListener = false)
+        view.richTextView.editorEditText.setSelection(0)
+        view.richTextView.editorEditText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.onBeforePrepareForEditorCommandForTesting = {
+            started.countDown()
+            assertTrue(release.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        }
+        NativeEditorViewRegistry.register(editorId, view)
+
+        val worker = Thread {
+            result.set(NativeEditorViewRegistry.prepareForCommandJSON(editorId))
+        }
+        val interrupter = Thread {
+            assertTrue(started.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            worker.interrupt()
+            release.countDown()
+        }
+
+        worker.start()
+        interrupter.start()
+        shadowOf(Looper.getMainLooper()).idle()
+        worker.join(2000)
+        interrupter.join(2000)
+
+        val preparation = JSONObject(result.get())
+        assertTrue(preparation.getBoolean("ready"))
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    private fun renderUpdateJson(text: String): String =
+        JSONObject()
+            .put(
+                "renderBlocks",
+                JSONArray().put(
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("type", "blockStart")
+                                .put("nodeType", "paragraph")
+                                .put("depth", 0)
+                        )
+                        .put(
+                            JSONObject()
+                                .put("type", "textRun")
+                                .put("text", text)
+                                .put("marks", JSONArray())
+                        )
+                        .put(JSONObject().put("type", "blockEnd"))
+                )
+            )
+            .toString()
 
     private data class TestExpoContext(
         val context: Context,

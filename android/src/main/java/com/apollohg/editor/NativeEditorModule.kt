@@ -4,151 +4,223 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import uniffi.editor_core.*
 
+internal fun nativeULong(value: Int): ULong? =
+    if (value >= 0) value.toULong() else null
+
+internal fun nativeUInt(value: Int): UInt? =
+    if (value >= 0) value.toUInt() else null
+
+internal fun nativeArgumentError(field: String): String =
+    "{\"error\":\"invalid $field\"}"
+
 class NativeEditorModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("NativeEditor")
 
         Function("editorCreate") { configJson: String ->
-            editorCreate(configJson).toLong()
+            editorCreate(configJson).toLong().also { id ->
+                NativeEditorViewRegistry.markEditorCreated(id)
+            }
         }
         Function("editorDestroy") { id: Int ->
-            editorDestroy(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function
+            NativeEditorViewRegistry.invalidateDestroyedEditor(id.toLong())
+            editorDestroy(editorId)
+        }
+        Function("editorPrepareForCommand") { id: Int ->
+            nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            NativeEditorViewRegistry.prepareForCommandJSON(id.toLong())
         }
         Function("collaborationSessionCreate") { configJson: String ->
             collaborationSessionCreate(configJson).toLong()
         }
         Function("collaborationSessionDestroy") { id: Int ->
-            collaborationSessionDestroy(id.toULong())
+            val sessionId = nativeULong(id) ?: return@Function
+            collaborationSessionDestroy(sessionId)
         }
         Function("collaborationSessionGetDocumentJson") { id: Int ->
-            collaborationSessionGetDocumentJson(id.toULong())
+            val sessionId = nativeULong(id) ?: return@Function "{}"
+            collaborationSessionGetDocumentJson(sessionId)
         }
         Function("collaborationSessionGetEncodedState") { id: Int ->
-            collaborationSessionGetEncodedState(id.toULong())
+            val sessionId = nativeULong(id) ?: return@Function "[]"
+            collaborationSessionGetEncodedState(sessionId)
         }
         Function("collaborationSessionGetPeersJson") { id: Int ->
-            collaborationSessionGetPeersJson(id.toULong())
+            val sessionId = nativeULong(id) ?: return@Function "[]"
+            collaborationSessionGetPeersJson(sessionId)
         }
         Function("collaborationSessionStart") { id: Int ->
-            collaborationSessionStart(id.toULong())
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionStart(sessionId)
         }
         Function("collaborationSessionApplyLocalDocumentJson") { id: Int, json: String ->
-            collaborationSessionApplyLocalDocumentJson(id.toULong(), json)
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionApplyLocalDocumentJson(sessionId, json)
         }
         Function("collaborationSessionApplyEncodedState") { id: Int, encodedStateJson: String ->
-            collaborationSessionApplyEncodedState(id.toULong(), encodedStateJson)
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionApplyEncodedState(sessionId, encodedStateJson)
         }
         Function("collaborationSessionReplaceEncodedState") { id: Int, encodedStateJson: String ->
-            collaborationSessionReplaceEncodedState(id.toULong(), encodedStateJson)
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionReplaceEncodedState(sessionId, encodedStateJson)
         }
         Function("collaborationSessionHandleMessage") { id: Int, messageJson: String ->
-            collaborationSessionHandleMessage(id.toULong(), messageJson)
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionHandleMessage(sessionId, messageJson)
         }
         Function("collaborationSessionSetLocalAwareness") { id: Int, awarenessJson: String ->
-            collaborationSessionSetLocalAwareness(id.toULong(), awarenessJson)
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionSetLocalAwareness(sessionId, awarenessJson)
         }
         Function("collaborationSessionClearLocalAwareness") { id: Int ->
-            collaborationSessionClearLocalAwareness(id.toULong())
+            val sessionId = nativeULong(id) ?: return@Function nativeArgumentError("session id")
+            collaborationSessionClearLocalAwareness(sessionId)
         }
 
         Function("editorSetHtml") { id: Int, html: String ->
-            editorSetHtml(id.toULong(), html)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorSetHtml(editorId, html)
         }
         Function("editorGetHtml") { id: Int ->
-            editorGetHtml(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function ""
+            editorGetHtml(editorId)
         }
         Function("editorSetJson") { id: Int, json: String ->
-            editorSetJson(id.toULong(), json)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorSetJson(editorId, json)
         }
         Function("editorGetJson") { id: Int ->
-            editorGetJson(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function "{}"
+            editorGetJson(editorId)
         }
         Function("editorGetContentSnapshot") { id: Int ->
-            editorGetContentSnapshot(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function "{\"html\":\"\",\"json\":{}}"
+            editorGetContentSnapshot(editorId)
         }
 
         Function("editorInsertText") { id: Int, pos: Int, text: String ->
-            editorInsertText(id.toULong(), pos.toUInt(), text)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val position = nativeUInt(pos) ?: return@Function nativeArgumentError("position")
+            editorInsertText(editorId, position, text)
         }
         Function("editorReplaceSelectionText") { id: Int, text: String ->
-            editorReplaceSelectionText(id.toULong(), text)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorReplaceSelectionText(editorId, text)
         }
         Function("editorDeleteRange") { id: Int, from: Int, to: Int ->
-            editorDeleteRange(id.toULong(), from.toUInt(), to.toUInt())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val fromPosition = nativeUInt(from) ?: return@Function nativeArgumentError("position")
+            val toPosition = nativeUInt(to) ?: return@Function nativeArgumentError("position")
+            editorDeleteRange(editorId, fromPosition, toPosition)
         }
         Function("editorSplitBlock") { id: Int, pos: Int ->
-            editorSplitBlock(id.toULong(), pos.toUInt())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val position = nativeUInt(pos) ?: return@Function nativeArgumentError("position")
+            editorSplitBlock(editorId, position)
         }
         Function("editorInsertContentHtml") { id: Int, html: String ->
-            editorInsertContentHtml(id.toULong(), html)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorInsertContentHtml(editorId, html)
         }
         Function("editorReplaceHtml") { id: Int, html: String ->
-            editorReplaceHtml(id.toULong(), html)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorReplaceHtml(editorId, html)
         }
         Function("editorReplaceJson") { id: Int, json: String ->
-            editorReplaceJson(id.toULong(), json)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorReplaceJson(editorId, json)
         }
         Function("editorInsertContentJson") { id: Int, json: String ->
-            editorInsertContentJson(id.toULong(), json)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorInsertContentJson(editorId, json)
         }
         Function(
             "editorInsertContentJsonAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, json: String ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorInsertContentJsonAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 json
             )
         }
         Function("editorWrapInList") { id: Int, listType: String ->
-            editorWrapInList(id.toULong(), listType)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorWrapInList(editorId, listType)
         }
         Function("editorUnwrapFromList") { id: Int ->
-            editorUnwrapFromList(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorUnwrapFromList(editorId)
         }
         Function("editorIndentListItem") { id: Int ->
-            editorIndentListItem(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorIndentListItem(editorId)
         }
         Function("editorOutdentListItem") { id: Int ->
-            editorOutdentListItem(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorOutdentListItem(editorId)
         }
         Function("editorInsertNode") { id: Int, nodeType: String ->
-            editorInsertNode(id.toULong(), nodeType)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorInsertNode(editorId, nodeType)
         }
 
         Function("editorInsertTextScalar") { id: Int, scalarPos: Int, text: String ->
-            editorInsertTextScalar(id.toULong(), scalarPos.toUInt(), text)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val position = nativeUInt(scalarPos) ?: return@Function nativeArgumentError("position")
+            editorInsertTextScalar(editorId, position, text)
         }
         Function("editorDeleteScalarRange") { id: Int, scalarFrom: Int, scalarTo: Int ->
-            editorDeleteScalarRange(id.toULong(), scalarFrom.toUInt(), scalarTo.toUInt())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val fromPosition = nativeUInt(scalarFrom) ?: return@Function nativeArgumentError("position")
+            val toPosition = nativeUInt(scalarTo) ?: return@Function nativeArgumentError("position")
+            editorDeleteScalarRange(editorId, fromPosition, toPosition)
         }
         Function("editorReplaceTextScalar") { id: Int, scalarFrom: Int, scalarTo: Int, text: String ->
-            editorReplaceTextScalar(id.toULong(), scalarFrom.toUInt(), scalarTo.toUInt(), text)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val fromPosition = nativeUInt(scalarFrom) ?: return@Function nativeArgumentError("position")
+            val toPosition = nativeUInt(scalarTo) ?: return@Function nativeArgumentError("position")
+            editorReplaceTextScalar(editorId, fromPosition, toPosition, text)
         }
         Function("editorSplitBlockScalar") { id: Int, scalarPos: Int ->
-            editorSplitBlockScalar(id.toULong(), scalarPos.toUInt())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val position = nativeUInt(scalarPos) ?: return@Function nativeArgumentError("position")
+            editorSplitBlockScalar(editorId, position)
         }
         Function("editorDeleteAndSplitScalar") { id: Int, scalarFrom: Int, scalarTo: Int ->
-            editorDeleteAndSplitScalar(id.toULong(), scalarFrom.toUInt(), scalarTo.toUInt())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val fromPosition = nativeUInt(scalarFrom) ?: return@Function nativeArgumentError("position")
+            val toPosition = nativeUInt(scalarTo) ?: return@Function nativeArgumentError("position")
+            editorDeleteAndSplitScalar(editorId, fromPosition, toPosition)
         }
         Function(
             "editorToggleMarkAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, markName: String ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorToggleMarkAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 markName
             )
         }
         Function(
             "editorSetMarkAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, markName: String, attrsJson: String ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorSetMarkAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 markName,
                 attrsJson
             )
@@ -156,136 +228,182 @@ class NativeEditorModule : Module() {
         Function(
             "editorUnsetMarkAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, markName: String ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorUnsetMarkAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 markName
             )
         }
         Function(
             "editorToggleBlockquoteAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorToggleBlockquoteAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt()
+                editorId,
+                anchor,
+                head
             )
         }
         Function(
             "editorToggleHeadingAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, level: Int ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             if (level !in 1..6) {
                 return@Function "{\"error\":\"invalid heading level\"}"
             }
             editorToggleHeadingAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 level.toUByte()
             )
         }
         Function(
             "editorWrapInListAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, listType: String ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorWrapInListAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 listType
             )
         }
         Function(
             "editorUnwrapFromListAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorUnwrapFromListAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt()
+                editorId,
+                anchor,
+                head
             )
         }
         Function(
             "editorIndentListItemAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorIndentListItemAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt()
+                editorId,
+                anchor,
+                head
             )
         }
         Function(
             "editorOutdentListItemAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorOutdentListItemAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt()
+                editorId,
+                anchor,
+                head
             )
         }
         Function(
             "editorInsertNodeAtSelectionScalar"
         ) { id: Int, scalarAnchor: Int, scalarHead: Int, nodeType: String ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function nativeArgumentError("position")
+            val head = nativeUInt(scalarHead) ?: return@Function nativeArgumentError("position")
             editorInsertNodeAtSelectionScalar(
-                id.toULong(),
-                scalarAnchor.toUInt(),
-                scalarHead.toUInt(),
+                editorId,
+                anchor,
+                head,
                 nodeType
             )
         }
 
         Function("editorToggleMark") { id: Int, markName: String ->
-            editorToggleMark(id.toULong(), markName)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorToggleMark(editorId, markName)
         }
         Function("editorSetMark") { id: Int, markName: String, attrsJson: String ->
-            editorSetMark(id.toULong(), markName, attrsJson)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorSetMark(editorId, markName, attrsJson)
         }
         Function("editorUnsetMark") { id: Int, markName: String ->
-            editorUnsetMark(id.toULong(), markName)
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorUnsetMark(editorId, markName)
         }
         Function("editorToggleBlockquote") { id: Int ->
-            editorToggleBlockquote(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorToggleBlockquote(editorId)
         }
         Function("editorToggleHeading") { id: Int, level: Int ->
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
             if (level !in 1..6) {
                 return@Function "{\"error\":\"invalid heading level\"}"
             }
-            editorToggleHeading(id.toULong(), level.toUByte())
+            editorToggleHeading(editorId, level.toUByte())
         }
 
         Function("editorSetSelection") { id: Int, anchor: Int, head: Int ->
-            editorSetSelection(id.toULong(), anchor.toUInt(), head.toUInt())
+            val editorId = nativeULong(id) ?: return@Function
+            val anchorPosition = nativeUInt(anchor) ?: return@Function
+            val headPosition = nativeUInt(head) ?: return@Function
+            editorSetSelection(editorId, anchorPosition, headPosition)
         }
         Function("editorSetSelectionScalar") { id: Int, scalarAnchor: Int, scalarHead: Int ->
-            editorSetSelectionScalar(id.toULong(), scalarAnchor.toUInt(), scalarHead.toUInt())
+            val editorId = nativeULong(id) ?: return@Function
+            val anchor = nativeUInt(scalarAnchor) ?: return@Function
+            val head = nativeUInt(scalarHead) ?: return@Function
+            editorSetSelectionScalar(editorId, anchor, head)
         }
         Function("editorGetSelection") { id: Int ->
-            editorGetSelection(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function "{\"type\":\"text\",\"anchor\":0,\"head\":0}"
+            editorGetSelection(editorId)
         }
         Function("editorGetSelectionState") { id: Int ->
-            editorGetSelectionState(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorGetSelectionState(editorId)
         }
         Function("editorDocToScalar") { id: Int, docPos: Int ->
-            editorDocToScalar(id.toULong(), docPos.toUInt()).toInt()
+            val editorId = nativeULong(id) ?: return@Function 0
+            val position = nativeUInt(docPos) ?: return@Function 0
+            editorDocToScalar(editorId, position).toInt()
         }
         Function("editorScalarToDoc") { id: Int, scalar: Int ->
-            editorScalarToDoc(id.toULong(), scalar.toUInt()).toInt()
+            val editorId = nativeULong(id) ?: return@Function 0
+            val position = nativeUInt(scalar) ?: return@Function 0
+            editorScalarToDoc(editorId, position).toInt()
         }
 
         Function("editorGetCurrentState") { id: Int ->
-            editorGetCurrentState(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorGetCurrentState(editorId)
         }
 
         Function("editorUndo") { id: Int ->
-            editorUndo(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorUndo(editorId)
         }
         Function("editorRedo") { id: Int ->
-            editorRedo(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function nativeArgumentError("editor id")
+            editorRedo(editorId)
         }
         Function("editorCanUndo") { id: Int ->
-            editorCanUndo(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function false
+            editorCanUndo(editorId)
         }
         Function("editorCanRedo") { id: Int ->
-            editorCanRedo(id.toULong())
+            val editorId = nativeULong(id) ?: return@Function false
+            editorCanRedo(editorId)
         }
         Function("renderDocumentJson") { configJson: String, json: String ->
             val editorId = editorCreate(configJson)
@@ -320,15 +438,16 @@ class NativeEditorModule : Module() {
                 "onSelectionChange",
                 "onFocusChange",
                 "onContentHeightChange",
+                "onEditorReady",
                 "onToolbarAction",
                 "onAddonEvent"
             )
 
             Prop("editorId") { view: NativeEditorExpoView, id: Int ->
-                view.setEditorId(id.toLong())
+                view.setEditorId(nativeULong(id)?.toLong() ?: 0L)
             }
             Prop("editable") { view: NativeEditorExpoView, editable: Boolean ->
-                view.richTextView.editorEditText.isEditable = editable
+                view.setEditable(editable)
             }
             Prop("placeholder") { view: NativeEditorExpoView, placeholder: String ->
                 view.richTextView.editorEditText.placeholderText = placeholder
@@ -374,6 +493,9 @@ class NativeEditorModule : Module() {
             }
             Prop("editorUpdateJson") { view: NativeEditorExpoView, editorUpdateJson: String? ->
                 view.setPendingEditorUpdateJson(editorUpdateJson)
+            }
+            Prop("editorUpdateEditorId") { view: NativeEditorExpoView, editorUpdateEditorId: Int? ->
+                view.setPendingEditorUpdateEditorId(editorUpdateEditorId?.let { nativeULong(it)?.toLong() })
             }
             Prop("editorUpdateRevision") { view: NativeEditorExpoView, editorUpdateRevision: Int ->
                 view.setPendingEditorUpdateRevision(editorUpdateRevision)

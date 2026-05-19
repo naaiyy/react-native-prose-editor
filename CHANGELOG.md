@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.17] - 2026-05-19
+
+### Added
+
+- Added Android device IME regression coverage and an `android:test:ime:device` script for native keyboard suggestion and autocorrect flows.
+
+### Changed
+
+- Hardened JS/native command coordination so toolbar actions, mention insertion, content updates, and cached reads prepare or flush native editor state before mutating Rust content.
+- Added editor identity and document-version scoping across native events, mention queries, editor-ready retries, pending native actions, and command retries to ignore stale native work.
+- Refreshed native iOS core framework metadata from the rebuilt editor core artifacts.
+
+### Fixed
+
+- iOS autocorrect, autocomplete, marked text, paste, blur, input trait updates, toolbar actions, and mention selection now preserve authorized native text changes through reconciliation.
+- Android IME composition, autocorrect, autocomplete, hardware keys, selection/range mapping, destroyed-editor handling, and pending native actions are guarded against stale or conflicting updates.
+- Native UTF-16/scalar position bridging now handles Unicode and list-marker offsets more consistently across Android and iOS.
+
+### Tests
+
+- Expanded Android, iOS, and JS regression coverage for autocorrect/autocomplete, command preflight and retry, mention query and selection scoping, controlled content sync, editor lifecycle guards, and Unicode position mapping.
+
 ## [0.5.16] - 2026-05-14
 
 ### Fixed
@@ -258,6 +280,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.17]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.16...0.5.17
 [0.5.16]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.15...0.5.16
 [0.5.15]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.14...0.5.15
 [0.5.14]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.13...0.5.14

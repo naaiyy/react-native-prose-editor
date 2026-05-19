@@ -56,16 +56,15 @@ class RichTextEditorView @JvmOverloads constructor(
     internal var appliedCornerRadiusPx: Float = 0f
     internal var appliedBackgroundColorForTesting: Int = Color.WHITE
 
+    private var currentEditorId: Long = 0
+    private var deferEditorUnbindOnDetach = false
+    internal var onBeforeDetachedFromWindow: (() -> Unit)? = null
+
     /** Binds or unbinds the Rust editor instance. */
-    var editorId: Long = 0
+    var editorId: Long
+        get() = currentEditorId
         set(value) {
-            field = value
-            if (value != 0L) {
-                editorEditText.bindEditor(value)
-            } else {
-                editorEditText.unbindEditor()
-            }
-            refreshOverlays()
+            setEditorId(value, bindEditor = true)
         }
 
     init {
@@ -178,6 +177,8 @@ class RichTextEditorView @JvmOverloads constructor(
         requestLayout()
     }
 
+    internal fun viewportBottomInsetPxForTesting(): Int = viewportBottomInsetPx
+
     fun setRemoteSelections(selections: List<RemoteSelectionDecoration>) {
         remoteSelectionOverlayView.setRemoteSelections(selections)
     }
@@ -217,9 +218,57 @@ class RichTextEditorView @JvmOverloads constructor(
         editorEditText.applyUpdateJSON(editorGetCurrentState(editorId.toULong()), notifyListener = false)
     }
 
-    override fun onDetachedFromWindow() {
-        super.onDetachedFromWindow()
+    internal fun rebindEditorIfNeeded(notifyListener: Boolean = true) {
+        if (editorId != 0L && editorEditText.editorId != editorId) {
+            setEditorId(editorId, bindEditor = true, notifyListener = notifyListener)
+        }
+    }
+
+    internal fun setEditorIdWhileDetached(value: Long) {
+        setEditorId(value, bindEditor = false)
+    }
+
+    internal fun deferEditorUnbindOnNextDetach() {
+        deferEditorUnbindOnDetach = true
+    }
+
+    internal fun clearDeferredEditorUnbind() {
+        deferEditorUnbindOnDetach = false
+    }
+
+    internal fun unbindEditorForDetachedViewIfNeeded() {
+        if (isAttachedToWindow) return
+        deferEditorUnbindOnDetach = false
         if (editorId != 0L) {
+            editorEditText.unbindEditor()
+        }
+    }
+
+    private fun setEditorId(value: Long, bindEditor: Boolean, notifyListener: Boolean = true) {
+        val targetBoundEditorId = if (bindEditor) value else 0L
+        if (currentEditorId == value && editorEditText.editorId == targetBoundEditorId) return
+        if (currentEditorId != value || editorEditText.editorId != targetBoundEditorId) {
+            editorEditText.discardTransientNativeInputForEditorRebind()
+        }
+        currentEditorId = value
+        if (bindEditor && value != 0L) {
+            editorEditText.bindEditor(value, notifyListener = notifyListener)
+        } else {
+            editorEditText.unbindEditor()
+        }
+        refreshOverlays()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        clearDeferredEditorUnbind()
+        rebindEditorIfNeeded()
+    }
+
+    override fun onDetachedFromWindow() {
+        onBeforeDetachedFromWindow?.invoke()
+        super.onDetachedFromWindow()
+        if (editorId != 0L && !deferEditorUnbindOnDetach) {
             editorEditText.unbindEditor()
         }
     }

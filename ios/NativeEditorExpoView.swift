@@ -1,6 +1,113 @@
 import ExpoModulesCore
 import UIKit
 
+private final class WeakNativeEditorExpoView {
+    weak var view: NativeEditorExpoView?
+
+    init(_ view: NativeEditorExpoView) {
+        self.view = view
+    }
+}
+
+final class NativeEditorViewRegistry {
+    static let shared = NativeEditorViewRegistry()
+
+    private var viewsByEditorId: [UInt64: WeakNativeEditorExpoView] = [:]
+    private var destroyedEditorIds: Set<UInt64> = []
+
+    private init() {}
+
+    func markEditorCreated(editorId: UInt64) {
+        guard editorId != 0 else { return }
+        performOnMain {
+            destroyedEditorIds.remove(editorId)
+        }
+    }
+
+    func isDestroyed(editorId: UInt64) -> Bool {
+        guard editorId != 0 else { return false }
+        return performOnMain {
+            destroyedEditorIds.contains(editorId)
+        }
+    }
+
+    @discardableResult
+    func register(editorId: UInt64, view: NativeEditorExpoView) -> Bool {
+        guard editorId != 0 else { return false }
+        return performOnMain {
+            guard !destroyedEditorIds.contains(editorId) else { return false }
+            viewsByEditorId[editorId] = WeakNativeEditorExpoView(view)
+            return true
+        }
+    }
+
+    func unregister(editorId: UInt64, view: NativeEditorExpoView) {
+        guard editorId != 0 else { return }
+        performOnMain {
+            guard viewsByEditorId[editorId]?.view === view else { return }
+            viewsByEditorId.removeValue(forKey: editorId)
+        }
+    }
+
+    func invalidateDestroyedEditor(editorId: UInt64) {
+        guard editorId != 0 else { return }
+        performOnMain {
+            destroyedEditorIds.insert(editorId)
+            guard let view = viewsByEditorId.removeValue(forKey: editorId)?.view else {
+                return
+            }
+            view.handleEditorDestroyed(editorId)
+        }
+    }
+
+    func prepareForCommandJSON(editorId: UInt64) -> String {
+        let prepare = { () -> String in
+            if self.destroyedEditorIds.contains(editorId) {
+                return Self.commandPreparationJSON(ready: false, blockedReason: "destroyed")
+            }
+            guard let view = self.viewsByEditorId[editorId]?.view else {
+                self.viewsByEditorId.removeValue(forKey: editorId)
+                return Self.commandPreparationJSON(ready: true)
+            }
+            return view.prepareForEditorCommandJSON()
+        }
+
+        return performOnMain(prepare)
+    }
+
+    static func commandPreparationJSON(
+        ready: Bool,
+        updateJSON: String? = nil,
+        blockedReason: String? = nil
+    ) -> String {
+        var payload: [String: Any] = ["ready": ready]
+        if let updateJSON {
+            payload["updateJSON"] = updateJSON
+        }
+        if let blockedReason {
+            payload["blockedReason"] = blockedReason
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            if let blockedReason {
+                return ready
+                    ? "{\"ready\":true,\"blockedReason\":\"\(blockedReason)\"}"
+                    : "{\"ready\":false,\"blockedReason\":\"\(blockedReason)\"}"
+            }
+            return ready ? "{\"ready\":true}" : "{\"ready\":false}"
+        }
+        return json
+    }
+
+    private func performOnMain<T>(_ work: () -> T) -> T {
+        if Thread.isMainThread {
+            return work()
+        }
+        return DispatchQueue.main.sync(execute: work)
+    }
+}
+
 private struct NativeToolbarState {
     let marks: [String: Bool]
     let nodes: [String: Bool]
@@ -1638,6 +1745,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     private var addons = NativeEditorAddons(mentions: nil)
     private var mentionQueryState: MentionQueryState?
     private var lastMentionEventJSON: String?
+    private var desiredThemeJSON: String?
     private var lastThemeJSON: String?
     private var lastAddonsJSON: String?
     private var lastRemoteSelectionsJSON: String?
@@ -1646,6 +1754,29 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     private var pendingEditorUpdateJSON: String?
     private var pendingEditorUpdateRevision = 0
     private var appliedEditorUpdateRevision = 0
+    private var pendingEditorUpdateRetryScheduled = false
+    private var pendingEditorUpdateRetryEditorId: UInt64?
+    private var pendingEditorUpdateRetryGeneration: UInt64 = 0
+    private var pendingViewCommandUpdateJSON: String?
+    private var pendingViewCommandUpdateEditorId: UInt64?
+    private var pendingViewCommandUpdateRetryScheduled = false
+    private var pendingViewCommandUpdateRetryGeneration: UInt64 = 0
+    private var pendingEditableRetryValue: Bool?
+    private var pendingEditableRetryEditorId: UInt64?
+    private var pendingEditableRetryScheduled = false
+    private var pendingEditableRetryGeneration: UInt64 = 0
+    private var pendingThemeRetryJSON: String?
+    private var pendingThemeRetryEditorId: UInt64?
+    private var pendingThemeRetryScheduled = false
+    private var pendingThemeRetryGeneration: UInt64 = 0
+    private var pendingAccessoryRetryActions: [PendingAccessoryRetryAction] = []
+    private var invalidatedAccessoryRetryActions = Set<PendingAccessoryRetryAction>()
+    private var pendingAccessoryRetryEditorId: UInt64?
+    private var pendingAccessoryRetryScheduled = false
+    private var pendingAccessoryRetryGeneration: UInt64 = 0
+    private var pendingMentionSuggestionRetry: PendingMentionSuggestionRetry?
+    private var pendingMentionSuggestionRetryScheduled = false
+    private var pendingMentionSuggestionRetryGeneration: UInt64 = 0
     private lazy var outsideTapGestureRecognizer: UITapGestureRecognizer = {
         let recognizer = UITapGestureRecognizer(
             target: self,
@@ -1672,6 +1803,31 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     let onAddonEvent = EventDispatcher()
     private var lastEmittedContentHeight: CGFloat = 0
     private var cachedAutoGrowContentHeight: CGFloat = 0
+    private var lastAddonEventJSONForTestingValue: String?
+
+    private enum PendingAccessoryRetryAction: Hashable {
+        case reloadInputViews
+        case refreshMentionQuery
+        case clearMentionQueryState
+        case updateAccessoryToolbarVisibility
+    }
+
+    private struct PendingMentionSuggestionRetry {
+        let suggestionKey: String
+        let editorId: UInt64
+        let trigger: String
+        let query: String
+        let anchor: UInt32
+        let head: UInt32
+        let documentVersion: Int?
+        let textSnapshot: String
+    }
+
+    private struct MentionRetryTextDiff {
+        let start: Int
+        let oldEnd: Int
+        let newEnd: Int
+    }
 
     // MARK: - Initialization
 
@@ -1705,6 +1861,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     deinit {
+        NativeEditorViewRegistry.shared.unregister(editorId: richTextView.editorId, view: self)
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -1743,8 +1900,65 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
 
     // MARK: - Editor Binding
 
+    func handleEditorDestroyed(_ editorId: UInt64) {
+        guard editorId != 0 else { return }
+        guard richTextView.editorId == editorId || richTextView.textView.editorId == editorId else {
+            NativeEditorViewRegistry.shared.unregister(editorId: editorId, view: self)
+            return
+        }
+
+        NativeEditorViewRegistry.shared.unregister(editorId: editorId, view: self)
+        clearPendingEditorUpdateRetries()
+        clearPendingViewCommandUpdateRetry()
+        clearPendingEditableRetry()
+        clearPendingThemeRetry()
+        clearPendingAccessoryRetry()
+        clearPendingMentionSuggestionRetry()
+        lastMentionEventJSON = nil
+        richTextView.textView.resignFirstResponder()
+        richTextView.editorId = 0
+        mentionQueryState = nil
+        _ = accessoryToolbar.setMentionSuggestions([])
+        toolbarState = .empty
+        accessoryToolbar.apply(state: .empty)
+        uninstallOutsideTapRecognizer()
+        refreshSystemAssistantToolbarIfNeeded()
+    }
+
     func setEditorId(_ id: UInt64) {
+        let previousEditorId = richTextView.editorId
+        if id != 0 && NativeEditorViewRegistry.shared.isDestroyed(editorId: id) {
+            if previousEditorId == id {
+                handleEditorDestroyed(id)
+            } else {
+                setEditorId(0)
+            }
+            return
+        }
+        guard previousEditorId != id else {
+            if id != 0 {
+                if !NativeEditorViewRegistry.shared.register(editorId: id, view: self) {
+                    handleEditorDestroyed(id)
+                }
+            }
+            return
+        }
+        if previousEditorId != id {
+            NativeEditorViewRegistry.shared.unregister(editorId: previousEditorId, view: self)
+            clearPendingEditorUpdateRetries()
+            clearPendingViewCommandUpdateRetry()
+            clearPendingEditableRetry()
+            clearPendingThemeRetry()
+            clearPendingAccessoryRetry()
+            clearPendingMentionSuggestionRetry()
+        }
         richTextView.editorId = id
+        if id != 0 {
+            guard NativeEditorViewRegistry.shared.register(editorId: id, view: self) else {
+                handleEditorDestroyed(id)
+                return
+            }
+        }
         if id != 0 {
             let stateJSON = editorGetCurrentState(id: id)
             if let state = NativeToolbarState(updateJSON: stateJSON) {
@@ -1758,23 +1972,223 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
             toolbarState = .empty
             accessoryToolbar.apply(state: .empty)
         }
+        if desiredThemeJSON != lastThemeJSON {
+            setThemeJson(desiredThemeJSON)
+        }
         refreshSystemAssistantToolbarIfNeeded()
         refreshMentionQuery()
     }
 
     func setThemeJson(_ themeJson: String?) {
-        guard lastThemeJSON != themeJson else { return }
-        lastThemeJSON = themeJson
+        desiredThemeJSON = themeJson
+        guard lastThemeJSON != themeJson else {
+            clearPendingThemeRetry()
+            return
+        }
         let theme = EditorTheme.from(json: themeJson)
-        richTextView.applyTheme(theme)
+        guard richTextView.applyTheme(theme) else {
+            scheduleThemeRetry(themeJson)
+            return
+        }
+        lastThemeJSON = themeJson
+        clearPendingThemeRetry()
         accessoryToolbar.apply(theme: theme?.toolbar)
         accessoryToolbar.apply(mentionTheme: theme?.mentions ?? addons.mentions?.theme)
         refreshSystemAssistantToolbarIfNeeded()
         if richTextView.textView.isFirstResponder,
            (richTextView.textView.inputAccessoryView === accessoryToolbar || shouldUseSystemAssistantToolbar)
         {
-            richTextView.textView.reloadInputViews()
+            reloadInputViewsAfterPreparingOrRetry()
         }
+    }
+
+    private func clearPendingEditorUpdateRetries() {
+        pendingEditorUpdateJSON = nil
+        pendingEditorUpdateRevision = 0
+        appliedEditorUpdateRevision = 0
+        pendingEditorUpdateRetryScheduled = false
+        pendingEditorUpdateRetryEditorId = nil
+        pendingEditorUpdateRetryGeneration &+= 1
+    }
+
+    private func clearPendingViewCommandUpdateRetry() {
+        pendingViewCommandUpdateJSON = nil
+        pendingViewCommandUpdateEditorId = nil
+        pendingViewCommandUpdateRetryScheduled = false
+        pendingViewCommandUpdateRetryGeneration &+= 1
+    }
+
+    private func clearPendingEditableRetry() {
+        pendingEditableRetryValue = nil
+        pendingEditableRetryEditorId = nil
+        pendingEditableRetryScheduled = false
+        pendingEditableRetryGeneration &+= 1
+    }
+
+    private func clearPendingThemeRetry() {
+        pendingThemeRetryJSON = nil
+        pendingThemeRetryEditorId = nil
+        pendingThemeRetryScheduled = false
+        pendingThemeRetryGeneration &+= 1
+    }
+
+    private func clearPendingAccessoryRetry() {
+        pendingAccessoryRetryActions = []
+        invalidatedAccessoryRetryActions.removeAll()
+        pendingAccessoryRetryEditorId = nil
+        pendingAccessoryRetryScheduled = false
+        pendingAccessoryRetryGeneration &+= 1
+    }
+
+    private func clearPendingMentionSuggestionRetry() {
+        pendingMentionSuggestionRetry = nil
+        pendingMentionSuggestionRetryScheduled = false
+        pendingMentionSuggestionRetryGeneration &+= 1
+    }
+
+    private func scheduleThemeRetry(_ themeJson: String?) {
+        pendingThemeRetryJSON = themeJson
+        pendingThemeRetryEditorId = richTextView.editorId
+        guard !pendingThemeRetryScheduled else { return }
+        pendingThemeRetryScheduled = true
+        pendingThemeRetryGeneration &+= 1
+        let retryGeneration = pendingThemeRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingThemeRetryGeneration else { return }
+            let retryJSON = self.pendingThemeRetryJSON
+            self.pendingThemeRetryJSON = nil
+            let retryEditorId = self.pendingThemeRetryEditorId
+            self.pendingThemeRetryEditorId = nil
+            self.pendingThemeRetryScheduled = false
+            guard retryEditorId == self.richTextView.editorId else {
+                self.clearPendingThemeRetry()
+                return
+            }
+            guard retryJSON == self.desiredThemeJSON else {
+                self.clearPendingThemeRetry()
+                return
+            }
+            self.setThemeJson(retryJSON)
+        }
+    }
+
+    private func prepareForInputAccessoryMutationOrRetry(_ action: PendingAccessoryRetryAction) -> Bool {
+        guard richTextView.editorId != 0, richTextView.textView.isFirstResponder else {
+            return true
+        }
+        guard richTextView.textView.prepareForExternalEditorUpdate() else {
+            scheduleAccessoryRetry(action)
+            return false
+        }
+        return true
+    }
+
+    private func reloadInputViewsAfterPreparingOrRetry() {
+        guard prepareForInputAccessoryMutationOrRetry(.reloadInputViews) else { return }
+        richTextView.textView.reloadInputViews()
+        markAccessoryMutationSucceeded(.reloadInputViews)
+    }
+
+    private func scheduleAccessoryRetry(_ action: PendingAccessoryRetryAction) {
+        invalidatedAccessoryRetryActions.remove(action)
+        pendingAccessoryRetryActions.removeAll { $0 == action }
+        pendingAccessoryRetryActions.append(action)
+        pendingAccessoryRetryEditorId = richTextView.editorId
+        guard !pendingAccessoryRetryScheduled else { return }
+        pendingAccessoryRetryScheduled = true
+        pendingAccessoryRetryGeneration &+= 1
+        let retryGeneration = pendingAccessoryRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingAccessoryRetryGeneration else { return }
+            guard self.pendingAccessoryRetryEditorId == self.richTextView.editorId else {
+                self.clearPendingAccessoryRetry()
+                return
+            }
+            let actions = self.pendingAccessoryRetryActions
+            self.pendingAccessoryRetryActions = []
+            self.pendingAccessoryRetryEditorId = nil
+            self.pendingAccessoryRetryScheduled = false
+            for index in actions.indices {
+                let action = actions[index]
+                guard retryGeneration == self.pendingAccessoryRetryGeneration else { return }
+                guard !self.invalidatedAccessoryRetryActions.contains(action) else {
+                    self.invalidatedAccessoryRetryActions.remove(action)
+                    continue
+                }
+                let generationBeforeAction = self.pendingAccessoryRetryGeneration
+                self.performAccessoryRetryAction(action)
+                guard self.pendingAccessoryRetryGeneration == generationBeforeAction else {
+                    let remainingIndex = actions.index(after: index)
+                    if remainingIndex < actions.endIndex {
+                        self.requeueUnprocessedAccessoryRetryActions(actions[remainingIndex...])
+                    }
+                    return
+                }
+            }
+            self.invalidatedAccessoryRetryActions.subtract(actions)
+        }
+    }
+
+    private func requeueUnprocessedAccessoryRetryActions(
+        _ actions: ArraySlice<PendingAccessoryRetryAction>
+    ) {
+        for action in actions {
+            guard !invalidatedAccessoryRetryActions.contains(action) else {
+                invalidatedAccessoryRetryActions.remove(action)
+                continue
+            }
+            pendingAccessoryRetryActions.removeAll { $0 == action }
+            pendingAccessoryRetryActions.append(action)
+        }
+        if !pendingAccessoryRetryActions.isEmpty {
+            pendingAccessoryRetryEditorId = richTextView.editorId
+        }
+    }
+
+    private func performAccessoryRetryAction(_ action: PendingAccessoryRetryAction) {
+        switch action {
+        case .reloadInputViews:
+            reloadInputViewsAfterPreparingOrRetry()
+        case .refreshMentionQuery:
+            refreshMentionQuery()
+        case .clearMentionQueryState:
+            clearMentionQueryStateAndHidePopover()
+        case .updateAccessoryToolbarVisibility:
+            updateAccessoryToolbarVisibility()
+        }
+    }
+
+    private func markAccessoryMutationSucceeded(_ action: PendingAccessoryRetryAction) {
+        var invalidated: Set<PendingAccessoryRetryAction> = [action]
+        switch action {
+        case .refreshMentionQuery:
+            invalidated.insert(.clearMentionQueryState)
+        case .clearMentionQueryState:
+            if !hasActiveMentionQueryForCurrentAddons() {
+                invalidated.insert(.refreshMentionQuery)
+            }
+        case .reloadInputViews, .updateAccessoryToolbarVisibility:
+            break
+        }
+        invalidatePendingAccessoryRetries(invalidated)
+    }
+
+    private func invalidatePendingAccessoryRetries(_ actions: Set<PendingAccessoryRetryAction>) {
+        guard !actions.isEmpty else { return }
+        invalidatedAccessoryRetryActions.formUnion(actions)
+        pendingAccessoryRetryActions.removeAll { actions.contains($0) }
+    }
+
+    private func hasActiveMentionQueryForCurrentAddons() -> Bool {
+        guard richTextView.editorId != 0,
+              richTextView.textView.isFirstResponder,
+              let mentions = addons.mentions
+        else {
+            return false
+        }
+        return currentMentionQueryState(trigger: mentions.trigger) != nil
     }
 
     func setAddonsJson(_ addonsJson: String?) {
@@ -1792,8 +2206,44 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     func setEditable(_ editable: Bool) {
+        if !editable,
+           richTextView.textView.isEditable,
+           richTextView.editorId != 0,
+           !richTextView.textView.prepareForExternalEditorUpdate()
+        {
+            scheduleEditableRetry(editable)
+            return
+        }
+        pendingEditableRetryValue = nil
+        pendingEditableRetryEditorId = nil
+        pendingEditableRetryScheduled = false
         richTextView.textView.isEditable = editable
         updateAccessoryToolbarVisibility()
+    }
+
+    private func scheduleEditableRetry(_ editable: Bool) {
+        pendingEditableRetryValue = editable
+        pendingEditableRetryEditorId = richTextView.editorId
+        guard !pendingEditableRetryScheduled else { return }
+        pendingEditableRetryScheduled = true
+        pendingEditableRetryGeneration &+= 1
+        let retryGeneration = pendingEditableRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingEditableRetryGeneration else { return }
+            guard let pendingEditable = self.pendingEditableRetryValue else {
+                self.pendingEditableRetryScheduled = false
+                return
+            }
+            guard self.pendingEditableRetryEditorId == self.richTextView.editorId else {
+                self.clearPendingEditableRetry()
+                return
+            }
+            self.pendingEditableRetryValue = nil
+            self.pendingEditableRetryEditorId = nil
+            self.pendingEditableRetryScheduled = false
+            self.setEditable(pendingEditable)
+        }
     }
 
     func setAutoFocus(_ autoFocus: Bool) {
@@ -1908,18 +2358,96 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         guard pendingEditorUpdateRevision != 0 else { return }
         guard pendingEditorUpdateRevision != appliedEditorUpdateRevision else { return }
         guard let updateJSON = pendingEditorUpdateJSON else { return }
+        guard applyEditorUpdate(updateJSON) else {
+            schedulePendingEditorUpdateRetry()
+            return
+        }
         appliedEditorUpdateRevision = pendingEditorUpdateRevision
-        applyEditorUpdate(updateJSON)
+    }
+
+    private func schedulePendingEditorUpdateRetry() {
+        guard !pendingEditorUpdateRetryScheduled else { return }
+        pendingEditorUpdateRetryEditorId = richTextView.editorId
+        pendingEditorUpdateRetryScheduled = true
+        pendingEditorUpdateRetryGeneration &+= 1
+        let retryGeneration = pendingEditorUpdateRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingEditorUpdateRetryGeneration else {
+                return
+            }
+            guard self.pendingEditorUpdateRetryEditorId == self.richTextView.editorId else {
+                self.pendingEditorUpdateRetryScheduled = false
+                self.clearPendingEditorUpdateRetries()
+                return
+            }
+            self.pendingEditorUpdateRetryScheduled = false
+            self.pendingEditorUpdateRetryEditorId = nil
+            self.applyPendingEditorUpdateIfNeeded()
+        }
     }
 
     // MARK: - View Commands
 
     /// Apply an editor update from JS. Sets the echo-suppression flag so the
     /// resulting delegate callback is NOT re-dispatched back to JS.
-    func applyEditorUpdate(_ updateJson: String) {
+    @discardableResult
+    func applyEditorUpdate(_ updateJson: String) -> Bool {
+        guard richTextView.textView.prepareForExternalEditorUpdate() else {
+            scheduleViewCommandUpdateRetry(updateJson)
+            return false
+        }
         isApplyingJSUpdate = true
+        defer { isApplyingJSUpdate = false }
         richTextView.textView.applyUpdateJSON(updateJson)
-        isApplyingJSUpdate = false
+        return true
+    }
+
+    private func scheduleViewCommandUpdateRetry(_ updateJson: String) {
+        pendingViewCommandUpdateJSON = updateJson
+        pendingViewCommandUpdateEditorId = richTextView.editorId
+        guard !pendingViewCommandUpdateRetryScheduled else { return }
+        pendingViewCommandUpdateRetryScheduled = true
+        pendingViewCommandUpdateRetryGeneration &+= 1
+        let retryGeneration = pendingViewCommandUpdateRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingViewCommandUpdateRetryGeneration else {
+                return
+            }
+            guard self.pendingViewCommandUpdateJSON != nil else {
+                self.pendingViewCommandUpdateRetryScheduled = false
+                return
+            }
+            guard self.pendingViewCommandUpdateEditorId == self.richTextView.editorId else {
+                self.pendingViewCommandUpdateJSON = nil
+                self.pendingViewCommandUpdateEditorId = nil
+                self.pendingViewCommandUpdateRetryScheduled = false
+                return
+            }
+            guard self.richTextView.editorId != 0 else {
+                self.pendingViewCommandUpdateJSON = nil
+                self.pendingViewCommandUpdateEditorId = nil
+                self.pendingViewCommandUpdateRetryScheduled = false
+                return
+            }
+            self.pendingViewCommandUpdateJSON = nil
+            self.pendingViewCommandUpdateEditorId = nil
+            self.pendingViewCommandUpdateRetryScheduled = false
+            let updateJSON = editorGetCurrentState(id: self.richTextView.editorId)
+            _ = self.applyEditorUpdate(updateJSON)
+        }
+    }
+
+    func prepareForEditorCommandJSON() -> String {
+        isApplyingJSUpdate = true
+        defer { isApplyingJSUpdate = false }
+        let preparation = richTextView.textView.prepareForExternalEditorCommand()
+        return NativeEditorViewRegistry.commandPreparationJSON(
+            ready: preparation.ready,
+            updateJSON: preparation.updateJSON,
+            blockedReason: preparation.blockedReason
+        )
     }
 
     // MARK: - Focus Commands
@@ -2111,6 +2639,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
             clearMentionQueryStateAndHidePopover()
             return
         }
+        guard prepareForInputAccessoryMutationOrRetry(.refreshMentionQuery) else { return }
 
         guard let queryState = currentMentionQueryState(trigger: mentions.trigger) else {
             emitMentionQueryChange(query: "", trigger: mentions.trigger, anchor: 0, head: 0, isActive: false)
@@ -2129,6 +2658,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         {
             richTextView.textView.reloadInputViews()
         }
+        markAccessoryMutationSucceeded(.refreshMentionQuery)
         emitMentionQueryChange(
             query: queryState.query,
             trigger: queryState.trigger,
@@ -2139,6 +2669,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     private func clearMentionQueryStateAndHidePopover() {
+        guard prepareForInputAccessoryMutationOrRetry(.clearMentionQueryState) else { return }
         mentionQueryState = nil
         let didChangeToolbarHeight = accessoryToolbar.setMentionSuggestions([])
         refreshSystemAssistantToolbarIfNeeded()
@@ -2148,6 +2679,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         {
             richTextView.textView.reloadInputViews()
         }
+        markAccessoryMutationSucceeded(.clearMentionQueryState)
     }
 
     private func emitMentionQueryChange(
@@ -2174,7 +2706,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         }
         guard json != lastMentionEventJSON else { return }
         lastMentionEventJSON = json
-        onAddonEvent(["eventJson": json])
+        dispatchAddonEvent(json)
     }
 
     private func resolvedMentionAttrs(
@@ -2207,16 +2739,17 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         else {
             return
         }
-        onAddonEvent(["eventJson": json])
+        dispatchAddonEvent(json)
     }
 
     private func emitMentionSelectRequest(
         trigger: String,
         suggestion: NativeMentionSuggestion,
         attrs: [String: Any],
-        range: MentionQueryState
+        range: MentionQueryState,
+        preflightUpdateJSON: String? = nil
     ) {
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "type": "mentionsSelectRequest",
             "trigger": trigger,
             "suggestionKey": suggestion.key,
@@ -2226,12 +2759,39 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
                 "head": Int(range.head),
             ],
         ]
+        if let preflightUpdateJSON {
+            payload["updateJson"] = preflightUpdateJSON
+        }
+        if let documentVersion = documentVersion(fromUpdateJSON: preflightUpdateJSON) {
+            payload["documentVersion"] = documentVersion
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8)
         else {
             return
         }
+        dispatchAddonEvent(json)
+    }
+
+    private func dispatchAddonEvent(_ json: String) {
+        lastAddonEventJSONForTestingValue = json
         onAddonEvent(["eventJson": json])
+    }
+
+    private func documentVersion(fromUpdateJSON updateJSON: String?) -> Int? {
+        guard let updateJSON,
+              let data = updateJSON.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        if let version = raw["documentVersion"] as? Int {
+            return version
+        }
+        if let number = raw["documentVersion"] as? NSNumber {
+            return number.intValue
+        }
+        return nil
     }
 
     private func filteredMentionSuggestions(
@@ -2325,20 +2885,90 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         return false
     }
 
-    private func insertMentionSuggestion(_ suggestion: NativeMentionSuggestion) {
+    private func insertMentionSuggestion(
+        _ suggestion: NativeMentionSuggestion
+    ) {
+        insertMentionSuggestion(suggestionKey: suggestion.key)
+    }
+
+    private func insertMentionSuggestion(
+        retryScope: PendingMentionSuggestionRetry
+    ) {
+        insertMentionSuggestion(
+            suggestionKey: retryScope.suggestionKey,
+            retryScope: retryScope
+        )
+    }
+
+    private func insertMentionSuggestion(
+        suggestionKey: String,
+        retryScope: PendingMentionSuggestionRetry? = nil
+    ) {
         guard let mentions = addons.mentions,
-              let queryState = mentionQueryState
+              mentionQueryState != nil
         else {
             return
         }
+        if let retryScope,
+           !isMentionSuggestionRetryScopeCurrent(retryScope)
+        {
+            return
+        }
 
-        let attrs = resolvedMentionAttrs(trigger: mentions.trigger, suggestion: suggestion)
+        let scopedQueryState = currentMentionQueryState(trigger: mentions.trigger) ?? mentionQueryState
+        guard let scopedQueryState else {
+            clearMentionQueryStateAndHidePopover()
+            return
+        }
+        let preparation = richTextView.textView.prepareForExternalEditorCommand()
+        guard preparation.ready else {
+            scheduleMentionSuggestionRetry(
+                PendingMentionSuggestionRetry(
+                    suggestionKey: suggestionKey,
+                    editorId: richTextView.editorId,
+                    trigger: mentions.trigger,
+                    query: scopedQueryState.query,
+                    anchor: scopedQueryState.anchor,
+                    head: scopedQueryState.head,
+                    documentVersion: currentDocumentVersion(),
+                    textSnapshot: richTextView.textView.text ?? ""
+                )
+            )
+            return
+        }
+        let queryState = currentMentionQueryState(trigger: mentions.trigger)
+            ?? (richTextView.textView.isFirstResponder ? nil : mentionQueryState)
+        guard let queryState else {
+            clearMentionQueryStateAndHidePopover()
+            return
+        }
+        if let retryScope,
+           !doesMentionQueryState(
+                queryState,
+                match: retryScope,
+                acceptingPreflightDocumentVersion: documentVersion(fromUpdateJSON: preparation.updateJSON),
+                currentText: richTextView.textView.text ?? ""
+           )
+        {
+            return
+        }
+        guard let currentSuggestion = filteredMentionSuggestions(
+            for: queryState,
+            config: mentions
+        ).first(where: { $0.key == suggestionKey }) else {
+            clearMentionQueryStateAndHidePopover()
+            return
+        }
+        mentionQueryState = queryState
+
+        let attrs = resolvedMentionAttrs(trigger: mentions.trigger, suggestion: currentSuggestion)
         if mentions.resolveSelectionAttrs || mentions.resolveTheme {
             emitMentionSelectRequest(
                 trigger: mentions.trigger,
-                suggestion: suggestion,
+                suggestion: currentSuggestion,
                 attrs: attrs,
-                range: queryState
+                range: queryState,
+                preflightUpdateJSON: preparation.updateJSON
             )
             lastMentionEventJSON = nil
             clearMentionQueryStateAndHidePopover()
@@ -2364,9 +2994,182 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
             json: json
         )
         richTextView.textView.applyUpdateJSON(updateJSON)
-        emitMentionSelect(trigger: mentions.trigger, suggestion: suggestion, attrs: attrs)
+        emitMentionSelect(trigger: mentions.trigger, suggestion: currentSuggestion, attrs: attrs)
         lastMentionEventJSON = nil
         clearMentionQueryStateAndHidePopover()
+    }
+
+    private func scheduleMentionSuggestionRetry(_ retry: PendingMentionSuggestionRetry) {
+        pendingMentionSuggestionRetry = retry
+        guard !pendingMentionSuggestionRetryScheduled else { return }
+        pendingMentionSuggestionRetryScheduled = true
+        pendingMentionSuggestionRetryGeneration &+= 1
+        let retryGeneration = pendingMentionSuggestionRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingMentionSuggestionRetryGeneration else { return }
+            guard let retry = self.pendingMentionSuggestionRetry else {
+                self.pendingMentionSuggestionRetryScheduled = false
+                return
+            }
+            guard retry.editorId == self.richTextView.editorId else {
+                self.clearPendingMentionSuggestionRetry()
+                return
+            }
+            self.pendingMentionSuggestionRetry = nil
+            self.pendingMentionSuggestionRetryScheduled = false
+            self.insertMentionSuggestion(retryScope: retry)
+        }
+    }
+
+    private func isMentionSuggestionRetryScopeCurrent(
+        _ retry: PendingMentionSuggestionRetry
+    ) -> Bool {
+        guard retry.editorId == richTextView.editorId,
+              addons.mentions?.trigger == retry.trigger
+        else {
+            return false
+        }
+        let queryState = currentMentionQueryState(trigger: retry.trigger) ?? mentionQueryState
+        guard let queryState else { return false }
+        guard doesMentionQueryStateMatchRetryIdentity(queryState, match: retry) else {
+            return false
+        }
+        return isMentionSuggestionRetryDocumentVersionCurrent(retry)
+    }
+
+    private func doesMentionQueryState(
+        _ queryState: MentionQueryState,
+        match retry: PendingMentionSuggestionRetry,
+        acceptingPreflightDocumentVersion preflightDocumentVersion: Int? = nil,
+        currentText: String? = nil
+    ) -> Bool {
+        guard doesMentionQueryStateMatchRetryIdentity(queryState, match: retry) else {
+            return false
+        }
+
+        let currentVersion = currentDocumentVersion()
+        var acceptedPreflightVersionChange = false
+        if let retryVersion = retry.documentVersion,
+           let currentVersion,
+           currentVersion != retryVersion
+        {
+            guard let preflightDocumentVersion,
+                  currentVersion == preflightDocumentVersion
+            else {
+                return false
+            }
+            acceptedPreflightVersionChange = true
+        }
+
+        if queryState.anchor == retry.anchor && queryState.head == retry.head {
+            return true
+        }
+
+        guard acceptedPreflightVersionChange else {
+            return false
+        }
+
+        guard let currentText,
+              let diff = mentionRetryTextDiff(
+                from: retry.textSnapshot,
+                to: currentText
+              ),
+              let mappedRange = mappedMentionRetryRange(retry, through: diff)
+        else {
+            return false
+        }
+
+        return queryState.anchor == mappedRange.anchor && queryState.head == mappedRange.head
+    }
+
+    private func doesMentionQueryStateMatchRetryIdentity(
+        _ queryState: MentionQueryState,
+        match retry: PendingMentionSuggestionRetry
+    ) -> Bool {
+        queryState.trigger == retry.trigger && queryState.query == retry.query
+    }
+
+    private func isMentionSuggestionRetryDocumentVersionCurrent(
+        _ retry: PendingMentionSuggestionRetry
+    ) -> Bool {
+        let currentVersion = currentDocumentVersion()
+        if let retryVersion = retry.documentVersion,
+           let currentVersion,
+           currentVersion != retryVersion
+        {
+            return false
+        }
+        return true
+    }
+
+    private func mentionRetryTextDiff(
+        from oldText: String,
+        to newText: String
+    ) -> MentionRetryTextDiff? {
+        let oldScalars = Array(oldText.unicodeScalars)
+        let newScalars = Array(newText.unicodeScalars)
+        let sharedLength = min(oldScalars.count, newScalars.count)
+
+        var prefix = 0
+        while prefix < sharedLength,
+              oldScalars[prefix] == newScalars[prefix]
+        {
+            prefix += 1
+        }
+
+        var oldEnd = oldScalars.count
+        var newEnd = newScalars.count
+        while oldEnd > prefix,
+              newEnd > prefix,
+              oldScalars[oldEnd - 1] == newScalars[newEnd - 1]
+        {
+            oldEnd -= 1
+            newEnd -= 1
+        }
+
+        guard prefix != oldEnd || prefix != newEnd else {
+            return nil
+        }
+
+        return MentionRetryTextDiff(
+            start: prefix,
+            oldEnd: oldEnd,
+            newEnd: newEnd
+        )
+    }
+
+    private func mappedMentionRetryRange(
+        _ retry: PendingMentionSuggestionRetry,
+        through diff: MentionRetryTextDiff
+    ) -> (anchor: UInt32, head: UInt32)? {
+        let anchor = Int(retry.anchor)
+        let head = Int(retry.head)
+        guard anchor <= head else { return nil }
+
+        if head <= diff.start {
+            return (retry.anchor, retry.head)
+        }
+
+        if anchor >= diff.oldEnd {
+            let delta = diff.newEnd - diff.oldEnd
+            let mappedAnchor = anchor + delta
+            let mappedHead = head + delta
+            guard mappedAnchor >= 0,
+                  mappedHead >= mappedAnchor,
+                  mappedHead <= Int(UInt32.max)
+            else {
+                return nil
+            }
+            return (UInt32(mappedAnchor), UInt32(mappedHead))
+        }
+
+        return nil
+    }
+
+    private func currentDocumentVersion() -> Int? {
+        guard richTextView.editorId != 0 else { return nil }
+        return documentVersion(fromUpdateJSON: editorGetCurrentState(id: richTextView.editorId))
     }
 
     func setMentionQueryStateForTesting(_ state: MentionQueryState?) {
@@ -2379,6 +3182,14 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
 
     func setMentionSuggestionsForTesting(_ suggestions: [NativeMentionSuggestion]) {
         accessoryToolbar.setMentionSuggestions(suggestions)
+    }
+
+    func isShowingMentionSuggestionsForTesting() -> Bool {
+        accessoryToolbar.isShowingMentionSuggestions
+    }
+
+    func lastAddonEventJSONForTesting() -> String? {
+        lastAddonEventJSONForTestingValue
     }
 
     func triggerMentionSuggestionTapForTesting(at index: Int) {
@@ -2398,6 +3209,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     private func updateAccessoryToolbarVisibility() {
+        guard prepareForInputAccessoryMutationOrRetry(.updateAccessoryToolbarVisibility) else { return }
         refreshSystemAssistantToolbarIfNeeded()
         let nextAccessoryView: UIView?
         if showsToolbar &&
@@ -2417,6 +3229,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
                 richTextView.textView.reloadInputViews()
             }
         }
+        markAccessoryMutationSucceeded(.updateAccessoryToolbarVisibility)
     }
 
     private var shouldUseSystemAssistantToolbar: Bool {

@@ -167,6 +167,7 @@ function resetMockNativeModule() {
     mockEditorIdCounter = 0;
     mockNativeModule.editorCreate = jest.fn((_configJson: string) => ++mockEditorIdCounter);
     mockNativeModule.editorDestroy = jest.fn();
+    mockNativeModule.editorPrepareForCommand = jest.fn(() => '{"ready":true}');
     mockNativeModule.collaborationSessionCreate = jest.fn(
         (_configJson: string) => ++mockEditorIdCounter
     );
@@ -274,6 +275,7 @@ import {
     NativeEditorBridge,
     _resetNativeModuleCache,
 } from '../NativeEditorBridge';
+import { Platform } from 'react-native';
 
 // ─── Tests ──────────────────────────────────────────────────────
 
@@ -779,6 +781,37 @@ describe('NativeEditorBridge', () => {
 
             bridge.destroy();
         });
+
+        it('rejects duplicate native update events when requested', () => {
+            const bridge = NativeEditorBridge.create();
+
+            expect(bridge.parseUpdateJson(MOCK_UPDATE_JSON)).not.toBeNull();
+            expect(
+                bridge.parseUpdateJson(MOCK_UPDATE_JSON, {
+                    rejectSameDocumentVersion: true,
+                })
+            ).toBeNull();
+
+            bridge.destroy();
+        });
+
+        it('accepts same-version native update events when state changed', () => {
+            const bridge = NativeEditorBridge.create();
+            const sameVersionSelectionUpdate = JSON.stringify({
+                ...JSON.parse(MOCK_UPDATE_JSON),
+                selection: { type: 'text', anchor: 5, head: 5 },
+            });
+
+            expect(bridge.parseUpdateJson(MOCK_UPDATE_JSON)).not.toBeNull();
+            const update = bridge.parseUpdateJson(sameVersionSelectionUpdate, {
+                rejectSameDocumentVersion: true,
+            });
+
+            expect(update).not.toBeNull();
+            expect(update!.selection).toEqual({ type: 'text', anchor: 5, head: 5 });
+
+            bridge.destroy();
+        });
     });
 
     describe('deleteRange', () => {
@@ -864,6 +897,48 @@ describe('NativeEditorBridge', () => {
 
             bridge.destroy();
         });
+
+        it('cancels explicit scalar insertion when native preflight changed text first', () => {
+            const bridge = NativeEditorBridge.create();
+            const doc = {
+                type: 'doc',
+                content: [{ type: 'mention', attrs: { id: 'u1', label: '@Alice' } }],
+            };
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: true, updateJSON: MOCK_UPDATE_JSON })
+            );
+
+            const update = bridge.insertContentJsonAtSelectionScalar(4, 7, doc);
+
+            expect(update).toBeNull();
+            expect(
+                mockNativeModule.editorInsertContentJsonAtSelectionScalar
+            ).not.toHaveBeenCalled();
+            expect(bridge.consumeLastCommandPreflightUpdate()?.documentVersion).toBe(2);
+
+            bridge.destroy();
+        });
+
+        it('does not resolve lazy explicit scalar insertion content when preflight changed text first', () => {
+            const bridge = NativeEditorBridge.create();
+            const resolveDoc = jest.fn(() => ({
+                type: 'doc',
+                content: [{ type: 'mention', attrs: { id: 'u1', label: '@Alice' } }],
+            }));
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: true, updateJSON: MOCK_UPDATE_JSON })
+            );
+
+            const update = bridge.insertContentJsonAtSelectionScalarLazy(4, 7, resolveDoc);
+
+            expect(update).toBeNull();
+            expect(resolveDoc).not.toHaveBeenCalled();
+            expect(
+                mockNativeModule.editorInsertContentJsonAtSelectionScalar
+            ).not.toHaveBeenCalled();
+
+            bridge.destroy();
+        });
     });
 
     describe('replaceJson', () => {
@@ -897,6 +972,133 @@ describe('NativeEditorBridge', () => {
     });
 
     describe('toggleMark', () => {
+        it('preflights commands and applies flushed native updates before mutating', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: true, updateJSON: MOCK_UPDATE_JSON })
+            );
+
+            const update = bridge.toggleMark('bold');
+
+            expect(mockNativeModule.editorPrepareForCommand).toHaveBeenCalledWith(bridge.editorId);
+            expect(mockNativeModule.editorToggleMarkAtSelectionScalar).toHaveBeenCalledWith(
+                bridge.editorId,
+                11,
+                11,
+                'bold'
+            );
+            expect(update).not.toBeNull();
+
+            bridge.destroy();
+        });
+
+        it('does not mutate when native command preflight is blocked', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce('{"ready":false}');
+
+            const update = bridge.replaceHtml('<p>next</p>');
+
+            expect(update).toBeNull();
+            expect(mockNativeModule.editorReplaceHtml).not.toHaveBeenCalled();
+            expect(bridge.consumeLastCommandBlocked()).toBe(true);
+            expect(bridge.consumeLastCommandBlocked()).toBe(false);
+
+            bridge.destroy();
+        });
+
+        it('does not mutate when native command preflight returns an error payload', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ error: 'invalid editor id' })
+            );
+
+            expect(() => bridge.replaceHtml('<p>next</p>')).toThrow(
+                'NativeEditorBridge: invalid editor id'
+            );
+            expect(mockNativeModule.editorReplaceHtml).not.toHaveBeenCalled();
+
+            bridge.destroy();
+        });
+
+        it('exposes native command blocked reasons once', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: false, blockedReason: 'detached' })
+            );
+
+            const update = bridge.replaceHtml('<p>next</p>');
+
+            expect(update).toBeNull();
+            expect(bridge.consumeLastCommandBlockedReason()).toBe('detached');
+            expect(bridge.consumeLastCommandBlockedReason()).toBeNull();
+
+            bridge.destroy();
+        });
+
+        it('preserves destroyed command blocked reason', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: false, blockedReason: 'destroyed' })
+            );
+
+            const update = bridge.replaceHtml('<p>next</p>');
+
+            expect(update).toBeNull();
+            expect(bridge.consumeLastCommandBlockedInfo()).toEqual({
+                blocked: true,
+                reason: 'destroyed',
+            });
+
+            bridge.destroy();
+        });
+
+        it('consumes native command blocked info atomically', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: false, blockedReason: 'composition' })
+            );
+
+            bridge.replaceHtml('<p>next</p>');
+
+            expect(bridge.consumeLastCommandBlockedInfo()).toEqual({
+                blocked: true,
+                reason: 'composition',
+            });
+            expect(bridge.consumeLastCommandBlockedInfo()).toEqual({
+                blocked: false,
+                reason: null,
+            });
+
+            bridge.destroy();
+        });
+
+        it('exposes blocked info and preflight update from the same preparation', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({
+                    ready: false,
+                    blockedReason: 'composition',
+                    updateJSON: MOCK_UPDATE_JSON,
+                })
+            );
+
+            const update = bridge.replaceHtml('<p>next</p>');
+
+            expect(update).toBeNull();
+            expect(bridge.consumeLastCommandPreflightUpdate()).toEqual(
+                expect.objectContaining({
+                    documentVersion: 2,
+                    selection: { type: 'text', anchor: 11, head: 11 },
+                })
+            );
+            expect(bridge.consumeLastCommandBlockedInfo()).toEqual({
+                blocked: true,
+                reason: 'composition',
+            });
+
+            bridge.destroy();
+        });
+
         it('returns update with active marks', () => {
             const bridge = NativeEditorBridge.create();
 
@@ -953,6 +1155,72 @@ describe('NativeEditorBridge', () => {
             expect(update).not.toBeNull();
 
             bridge.destroy();
+        });
+
+        it('cancels explicit scalar mark updates when native preflight changed text first', () => {
+            const bridge = NativeEditorBridge.create();
+            mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                JSON.stringify({ ready: true, updateJSON: MOCK_UPDATE_JSON })
+            );
+
+            const update = bridge.setMarkAtSelectionScalar(7, 26, 'link', {
+                href: 'https://example.com',
+            });
+
+            expect(update).toBeNull();
+            expect(mockNativeModule.editorSetMarkAtSelectionScalar).not.toHaveBeenCalled();
+            expect(bridge.consumeLastCommandPreflightUpdate()?.documentVersion).toBe(2);
+
+            bridge.destroy();
+        });
+
+        it('ignores versionless Android preflight updates after a document version is known', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const bridge = NativeEditorBridge.create();
+            const versionlessUpdateJson = JSON.stringify({
+                renderElements: [],
+                selection: { type: 'text', anchor: 0, head: 0 },
+                activeState: {
+                    marks: { italic: true },
+                    markAttrs: {},
+                    nodes: {},
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+            });
+
+            try {
+                expect(bridge.parseUpdateJson(MOCK_UPDATE_JSON)?.documentVersion).toBe(2);
+                mockNativeModule.editorPrepareForCommand.mockReturnValueOnce(
+                    JSON.stringify({ ready: true, updateJSON: versionlessUpdateJson })
+                );
+
+                const update = bridge.setMarkAtSelectionScalar(7, 26, 'link', {
+                    href: 'https://example.com',
+                });
+
+                expect(update).not.toBeNull();
+                expect(mockNativeModule.editorSetMarkAtSelectionScalar).toHaveBeenCalledWith(
+                    bridge.editorId,
+                    7,
+                    26,
+                    'link',
+                    JSON.stringify({ href: 'https://example.com' })
+                );
+                expect(bridge.consumeLastCommandPreflightUpdate()).toBeNull();
+            } finally {
+                bridge.destroy();
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
         });
 
         it('removes an attributed link mark from the current selection', () => {

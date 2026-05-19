@@ -82,14 +82,37 @@ final class PositionBridge {
 
     static func utf16OffsetToScalar(_ utf16Offset: Int, in textView: UITextView) -> UInt32 {
         let text = textView.text ?? ""
-        let clampedOffset = min(max(utf16Offset, 0), (text as NSString).length)
         let conversionTable = textViewConversionTable(for: textView)
+        guard !conversionTable.adjustedUtf16ToScalar.isEmpty else { return 0 }
+        let clampedOffset = min(
+            max(utf16Offset, 0),
+            min((text as NSString).length, conversionTable.adjustedUtf16ToScalar.count - 1)
+        )
         return conversionTable.adjustedUtf16ToScalar[clampedOffset]
+    }
+
+    static func utf16OffsetToScalar(_ utf16Offset: Int, in attributedString: NSAttributedString) -> UInt32 {
+        let conversionTable = adjustedConversionTable(for: attributedString)
+        guard !conversionTable.isEmpty else { return 0 }
+        let clampedOffset = min(max(utf16Offset, 0), conversionTable.count - 1)
+        return conversionTable[clampedOffset]
     }
 
     static func scalarToUtf16Offset(_ scalar: UInt32, in textView: UITextView) -> Int {
         let conversionTable = textViewConversionTable(for: textView)
         let utf16ToScalar = conversionTable.adjustedUtf16ToScalar
+        return scalarToUtf16Offset(scalar, inAdjustedUtf16ToScalarTable: utf16ToScalar)
+    }
+
+    static func scalarToUtf16Offset(_ scalar: UInt32, in attributedString: NSAttributedString) -> Int {
+        let utf16ToScalar = adjustedConversionTable(for: attributedString)
+        return scalarToUtf16Offset(scalar, inAdjustedUtf16ToScalarTable: utf16ToScalar)
+    }
+
+    private static func scalarToUtf16Offset(
+        _ scalar: UInt32,
+        inAdjustedUtf16ToScalarTable utf16ToScalar: [UInt32]
+    ) -> Int {
         guard scalar > 0, !utf16ToScalar.isEmpty else {
             return 0
         }

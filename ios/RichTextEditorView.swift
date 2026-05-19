@@ -824,6 +824,19 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let to: UInt32
         let replacementText: String
         let resultingText: String
+        let authorizedText: String
+        let selectionAnchor: UInt32?
+        let selectionHead: UInt32?
+        let capturedWhileFirstResponder: Bool
+        let capturedWhileEditable: Bool
+        let capturedAfterBlur: Bool
+        let inputGeneration: UInt64
+    }
+
+    private enum NativeTextMutationCommitResult {
+        case committed
+        case deferred
+        case rejected
     }
 
     private enum PositionCacheUpdate {
@@ -922,6 +935,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// The plain text from the last Rust render, used by the reconciliation
     /// fallback to detect unauthorized text storage mutations.
     private var lastAuthorizedTextStorage = NSMutableString()
+    private var lastAuthorizedAttributedTextStorage = NSMutableAttributedString()
     private var lastAuthorizedText: String {
         lastAuthorizedTextStorage as String
     }
@@ -973,6 +987,15 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     private var reconciliationWorkScheduled = false
     private var nativeTextMutationCommitScheduled = false
     private var pendingNativeTextMutation: NativeTextMutation?
+    private var nativeTextMutationGeneration: UInt64 = 0
+    private var nativeTextMutationAfterBlurDeadline: TimeInterval?
+    private var nativeTextMutationAfterBlurGeneration: UInt64?
+    private let nativeTextMutationAfterBlurGraceInterval: TimeInterval = 1.0
+    private var desiredInputTraitState = InputTraitState()
+    private var appliedInputTraitState = InputTraitState()
+    private var pendingInputTraitChange = PendingInputTraitChange()
+    private var pendingInputTraitRetryScheduled = false
+    private var pendingInputTraitRetryGeneration: UInt64 = 0
 
     /// Coalesces selection sync until UIKit has finished resolving the
     /// current tap/drag gesture's final caret position.
@@ -986,8 +1009,28 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     private var markedTextReplacementScalarRange: (from: UInt32, to: UInt32)?
     private var markedTextReplacementUtf16Range: NSRange?
     private var markedTextCompositionText: String?
+    private var markedTextCompositionIsExplicitlyEmpty = false
 
     private let editorLayoutManager: EditorLayoutManager
+
+    private struct InputTraitState {
+        var autoCapitalize: String?
+        var autoCorrect: Bool?
+        var keyboardType: String?
+    }
+
+    private struct PendingInputTraitChange {
+        var hasAutoCapitalize = false
+        var autoCapitalize: String?
+        var hasAutoCorrect = false
+        var autoCorrect: Bool?
+        var hasKeyboardType = false
+        var keyboardType: String?
+
+        var isEmpty: Bool {
+            !hasAutoCapitalize && !hasAutoCorrect && !hasKeyboardType
+        }
+    }
 
     // MARK: - Placeholder
 
@@ -1073,6 +1116,19 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func setAutoCapitalize(_ autoCapitalize: String?) {
+        desiredInputTraitState.autoCapitalize = autoCapitalize
+        guard prepareForInputTraitChange() else {
+            pendingInputTraitChange.hasAutoCapitalize = true
+            pendingInputTraitChange.autoCapitalize = autoCapitalize
+            scheduleInputTraitChangeRetry()
+            return
+        }
+        applyAutoCapitalize(autoCapitalize)
+        appliedInputTraitState.autoCapitalize = autoCapitalize
+        clearPendingAutoCapitalize()
+    }
+
+    private func applyAutoCapitalize(_ autoCapitalize: String?) {
         switch autoCapitalize {
         case "none":
             autocapitalizationType = .none
@@ -1083,18 +1139,124 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         default:
             autocapitalizationType = .sentences
         }
+        if isFirstResponder {
+            reloadInputViews()
+        }
     }
 
     func setAutoCorrect(_ autoCorrect: Bool?) {
+        desiredInputTraitState.autoCorrect = autoCorrect
+        guard prepareForInputTraitChange() else {
+            pendingInputTraitChange.hasAutoCorrect = true
+            pendingInputTraitChange.autoCorrect = autoCorrect
+            scheduleInputTraitChangeRetry()
+            return
+        }
+        applyAutoCorrect(autoCorrect)
+        appliedInputTraitState.autoCorrect = autoCorrect
+        clearPendingAutoCorrect()
+    }
+
+    private func applyAutoCorrect(_ autoCorrect: Bool?) {
         let isEnabled = autoCorrect ?? false
         autocorrectionType = isEnabled ? .yes : .no
         spellCheckingType = isEnabled ? .default : .no
+        if isFirstResponder {
+            reloadInputViews()
+        }
     }
 
     func setKeyboardType(_ keyboardType: String?) {
+        desiredInputTraitState.keyboardType = keyboardType
+        guard prepareForInputTraitChange() else {
+            pendingInputTraitChange.hasKeyboardType = true
+            pendingInputTraitChange.keyboardType = keyboardType
+            scheduleInputTraitChangeRetry()
+            return
+        }
+        applyKeyboardType(keyboardType)
+        appliedInputTraitState.keyboardType = keyboardType
+        clearPendingKeyboardType()
+    }
+
+    private func applyKeyboardType(_ keyboardType: String?) {
         self.keyboardType = Self.resolvedKeyboardType(from: keyboardType)
         if isFirstResponder {
             reloadInputViews()
+        }
+    }
+
+    private func prepareForInputTraitChange() -> Bool {
+        guard isFirstResponder, editorId != 0 else { return true }
+        return prepareForExternalEditorUpdate()
+    }
+
+    private func scheduleInputTraitChangeRetry() {
+        guard !pendingInputTraitRetryScheduled else { return }
+        pendingInputTraitRetryScheduled = true
+        pendingInputTraitRetryGeneration &+= 1
+        let retryGeneration = pendingInputTraitRetryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard retryGeneration == self.pendingInputTraitRetryGeneration else { return }
+            self.pendingInputTraitRetryScheduled = false
+            let pending = self.pendingInputTraitChange
+            self.pendingInputTraitChange = PendingInputTraitChange()
+            if pending.hasAutoCapitalize,
+               pending.autoCapitalize == self.desiredInputTraitState.autoCapitalize {
+                self.setAutoCapitalize(pending.autoCapitalize)
+            }
+            if pending.hasAutoCorrect,
+               pending.autoCorrect == self.desiredInputTraitState.autoCorrect {
+                self.setAutoCorrect(pending.autoCorrect)
+            }
+            if pending.hasKeyboardType,
+               pending.keyboardType == self.desiredInputTraitState.keyboardType {
+                self.setKeyboardType(pending.keyboardType)
+            }
+        }
+    }
+
+    private func clearPendingAutoCapitalize() {
+        pendingInputTraitChange.hasAutoCapitalize = false
+        pendingInputTraitChange.autoCapitalize = nil
+        cancelPendingInputTraitRetryIfEmpty()
+    }
+
+    private func clearPendingAutoCorrect() {
+        pendingInputTraitChange.hasAutoCorrect = false
+        pendingInputTraitChange.autoCorrect = nil
+        cancelPendingInputTraitRetryIfEmpty()
+    }
+
+    private func clearPendingKeyboardType() {
+        pendingInputTraitChange.hasKeyboardType = false
+        pendingInputTraitChange.keyboardType = nil
+        cancelPendingInputTraitRetryIfEmpty()
+    }
+
+    private func clearPendingInputTraitRetry() {
+        pendingInputTraitChange = PendingInputTraitChange()
+        guard pendingInputTraitRetryScheduled else { return }
+        pendingInputTraitRetryScheduled = false
+        pendingInputTraitRetryGeneration &+= 1
+    }
+
+    private func cancelPendingInputTraitRetryIfEmpty() {
+        guard pendingInputTraitRetryScheduled, pendingInputTraitChange.isEmpty else { return }
+        pendingInputTraitRetryScheduled = false
+        pendingInputTraitRetryGeneration &+= 1
+    }
+
+    private func replayDesiredInputTraitsIfNeeded() {
+        if desiredInputTraitState.autoCapitalize != appliedInputTraitState.autoCapitalize {
+            setAutoCapitalize(desiredInputTraitState.autoCapitalize)
+        }
+        if desiredInputTraitState.autoCorrect != appliedInputTraitState.autoCorrect {
+            setAutoCorrect(desiredInputTraitState.autoCorrect)
+        }
+        if desiredInputTraitState.keyboardType != appliedInputTraitState.keyboardType {
+            setKeyboardType(desiredInputTraitState.keyboardType)
         }
     }
 
@@ -1232,6 +1394,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let didBecomeFirstResponder = super.becomeFirstResponder()
         if didBecomeFirstResponder {
             ensureInternalTextViewDelegate()
+            clearNativeTextMutationAfterBlurWindow()
             DispatchQueue.main.async { [weak self] in
                 self?.ensureInternalTextViewDelegate()
             }
@@ -1239,6 +1402,31 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             refreshTypingAttributesForSelection()
         }
         return didBecomeFirstResponder
+    }
+
+    override func resignFirstResponder() -> Bool {
+        ensureInternalTextViewDelegate()
+        _ = drainPendingNativeTextMutation(allowAfterBlur: false, allowWhileIntercepting: true)
+
+        let wasFirstResponder = isFirstResponder
+        if wasFirstResponder {
+            nativeTextMutationAfterBlurGeneration = nativeTextMutationGeneration
+            nativeTextMutationAfterBlurDeadline = ProcessInfo.processInfo.systemUptime
+                + nativeTextMutationAfterBlurGraceInterval
+        }
+
+        let didResignFirstResponder = super.resignFirstResponder()
+        if wasFirstResponder || didResignFirstResponder {
+            _ = drainPendingNativeTextMutation(allowAfterBlur: true, allowWhileIntercepting: true)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                _ = self.drainPendingNativeTextMutation(
+                    allowAfterBlur: true,
+                    allowWhileIntercepting: true
+                )
+            }
+        }
+        return didResignFirstResponder
     }
 
     private func isRenderedContentEmpty() -> Bool {
@@ -1408,6 +1596,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
     func lastRenderAppliedPatch() -> Bool {
         lastRenderAppliedPatchForTesting
+    }
+
+    func authorizedTextForTesting() -> String {
+        lastAuthorizedText
     }
 
     func lastApplyUpdateTrace() -> ApplyUpdateTrace? {
@@ -1612,6 +1804,12 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     ///   - initialHTML: Optional HTML to set as initial content.
     func bindEditor(id: UInt64, initialHTML: String? = nil) {
         ensureInternalTextViewDelegate()
+        if editorId == id, initialHTML == nil {
+            return
+        }
+        if editorId != id {
+            discardTransientNativeInputForEditorRebind()
+        }
         editorId = id
 
         if let html = initialHTML, !html.isEmpty {
@@ -1623,10 +1821,12 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             let stateJSON = editorGetCurrentState(id: editorId)
             applyUpdateJSON(stateJSON, notifyDelegate: false)
         }
+        replayDesiredInputTraitsIfNeeded()
     }
 
     /// Unbind from the current editor instance.
     func unbindEditor() {
+        discardTransientNativeInputForEditorRebind()
         editorId = 0
     }
 
@@ -1649,6 +1849,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             super.insertText(text)
             return
         }
+        guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
 
         if markedTextReplacementScalarRange != nil || markedTextRange != nil {
             let replacementRange = trackedMarkedTextReplacementRange()
@@ -1740,6 +1941,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             super.deleteBackward()
             return
         }
+        guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
 
         if markedTextReplacementScalarRange != nil || markedTextRange != nil {
             performTransientTextMutation {
@@ -1892,6 +2094,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         guard !isApplyingRustState else { return }
         guard editorId != 0 else { return }
         guard isEditable else { return }
+        guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
         guard isCaretInsideList() else { return }
         guard let selection = currentScalarSelection() else { return }
 
@@ -1943,6 +2146,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             super.replace(range, withText: text)
             return
         }
+        guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
 
         if markedTextReplacementScalarRange != nil || markedTextRange != nil {
             let replacementRange = trackedMarkedTextReplacementRange()
@@ -1978,21 +2182,36 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
         ensureInternalTextViewDelegate()
         if markedText != nil {
+            guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
             captureMarkedTextReplacementRangeIfNeeded()
+        } else if markedTextReplacementScalarRange == nil, markedTextRange == nil {
+            guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
         }
         isComposing = markedText != nil || markedTextReplacementScalarRange != nil
         Self.inputLog.debug(
             "[setMarkedText] marked=\(self.preview(markedText ?? ""), privacy: .public) nsRange=\(selectedRange.location),\(selectedRange.length) selection=\(self.selectionSummary(), privacy: .public)"
         )
+        if markedText == nil {
+            // Some keyboard paths finalize composition by clearing marked text
+            // instead of calling unmarkText().
+            let composedText = validatedTrackedMarkedTextForCommit()
+            let replacementRange = trackedMarkedTextReplacementRange()
+            performTransientTextMutation {
+                super.setMarkedText(nil, selectedRange: selectedRange)
+            }
+            clearMarkedTextTracking()
+            if shouldCommitMarkedText(composedText, replacementRange: replacementRange) {
+                commitMarkedText(composedText ?? "", replacementRange: replacementRange)
+            } else {
+                restoreAuthorizedTextAfterCancelledCompositionIfNeeded()
+            }
+            return
+        }
+
         performTransientTextMutation {
             super.setMarkedText(markedText, selectedRange: selectedRange)
         }
-        if markedText == nil {
-            clearMarkedTextTracking()
-            restoreAuthorizedTextAfterCancelledCompositionIfNeeded()
-        } else {
-            refreshMarkedTextCompositionText(fallback: markedText)
-        }
+        refreshMarkedTextCompositionText(fallback: markedText)
     }
 
     /// Called when composition is finalized (user selects a candidate or
@@ -2013,6 +2232,8 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                 "[unmarkText] composed=\(self.preview(composed), privacy: .public) replacement=\(self.previewMarkedTextReplacementRange(replacementRange), privacy: .public) selection=\(self.selectionSummary(), privacy: .public)"
             )
             commitMarkedText(composed, replacementRange: replacementRange)
+        } else if shouldCommitMarkedText(composedText, replacementRange: replacementRange) {
+            commitMarkedText(composedText ?? "", replacementRange: replacementRange)
         } else {
             restoreAuthorizedTextAfterCancelledCompositionIfNeeded()
         }
@@ -2023,9 +2244,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
         guard let selectedRange = selectedTextRange else {
             let scalarPos = PositionBridge.cursorScalarOffset(in: self)
+            let utf16Pos = PositionBridge.scalarToUtf16Offset(scalarPos, in: lastAuthorizedText)
             markedTextReplacementScalarRange = (from: scalarPos, to: scalarPos)
             markedTextReplacementUtf16Range = NSRange(
-                location: Int(scalarPos),
+                location: utf16Pos,
                 length: 0
             )
             return
@@ -2055,6 +2277,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         markedTextReplacementScalarRange = nil
         markedTextReplacementUtf16Range = nil
         markedTextCompositionText = nil
+        markedTextCompositionIsExplicitlyEmpty = false
         isComposing = false
     }
 
@@ -2073,14 +2296,30 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     private func currentMarkedTextForCommit() -> String? {
-        markedTextRange.flatMap { text(in: $0) }
+        if markedTextCompositionIsExplicitlyEmpty { return "" }
+        return transientMarkedTextFromAuthorizedDiff()
+            ?? markedTextRange.flatMap { text(in: $0) }
             ?? markedTextCompositionText
-            ?? transientMarkedTextFromAuthorizedDiff()
+    }
+
+    private func validatedTrackedMarkedTextForCommit() -> String? {
+        guard markedTextReplacementScalarRange != nil || markedTextReplacementUtf16Range != nil else {
+            return nil
+        }
+        if markedTextCompositionIsExplicitlyEmpty { return "" }
+        return transientMarkedTextFromAuthorizedDiff()
+            ?? markedTextRange.flatMap { text(in: $0) }
     }
 
     private func refreshMarkedTextCompositionText(fallback: String? = nil) {
-        markedTextCompositionText = markedTextRange.flatMap { text(in: $0) }
-            ?? transientMarkedTextFromAuthorizedDiff()
+        if fallback?.isEmpty == true {
+            markedTextCompositionText = ""
+            markedTextCompositionIsExplicitlyEmpty = true
+            return
+        }
+        markedTextCompositionIsExplicitlyEmpty = false
+        markedTextCompositionText = transientMarkedTextFromAuthorizedDiff()
+            ?? markedTextRange.flatMap { text(in: $0) }
             ?? fallback
     }
 
@@ -2103,6 +2342,27 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             return nil
         }
 
+        if replacementRange.location > 0 {
+            let prefixRange = NSRange(location: 0, length: replacementRange.location)
+            guard currentText.substring(with: prefixRange) == authorizedText.substring(with: prefixRange) else {
+                return nil
+            }
+        }
+
+        let insertedEnd = replacementRange.location + insertedLength
+        let authorizedSuffixLength = authorizedText.length - replacementEnd
+        let currentSuffixLength = currentText.length - insertedEnd
+        guard authorizedSuffixLength == currentSuffixLength else { return nil }
+        if authorizedSuffixLength > 0 {
+            let authorizedSuffixRange = NSRange(location: replacementEnd, length: authorizedSuffixLength)
+            let currentSuffixRange = NSRange(location: insertedEnd, length: currentSuffixLength)
+            guard currentText.substring(with: currentSuffixRange)
+                == authorizedText.substring(with: authorizedSuffixRange)
+            else {
+                return nil
+            }
+        }
+
         return currentText.substring(
             with: NSRange(location: replacementRange.location, length: insertedLength)
         )
@@ -2114,13 +2374,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     ) {
         guard editorId != 0 else { return }
         guard let replacementRange else {
-            performInterceptedInput {
+            performInterceptedInput(flushPendingNativeTextMutation: false) {
                 insertTextInRust(text, at: PositionBridge.cursorScalarOffset(in: self))
             }
             return
         }
 
-        performInterceptedInput {
+        performInterceptedInput(flushPendingNativeTextMutation: false) {
             if replacementRange.from == replacementRange.to {
                 insertTextInRust(text, at: replacementRange.from)
             } else {
@@ -2131,6 +2391,16 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                 )
             }
         }
+    }
+
+    private func shouldCommitMarkedText(
+        _ text: String?,
+        replacementRange: (from: UInt32, to: UInt32)?
+    ) -> Bool {
+        guard let text else { return false }
+        if !text.isEmpty { return true }
+        guard let replacementRange else { return false }
+        return replacementRange.from != replacementRange.to
     }
 
     private func restoreAuthorizedTextAfterCancelledCompositionIfNeeded() {
@@ -2163,6 +2433,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             super.paste(sender)
             return
         }
+        guard prepareForExternalEditorUpdate() else { return }
 
         Self.inputLog.debug(
             "[paste] selection=\(self.selectionSummary(), privacy: .public) textState=\(self.textSnapshotSummary(), privacy: .public)"
@@ -2192,7 +2463,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                     documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
                 ), let html = String(data: htmlData, encoding: .utf8) {
                     performInterceptedInput {
-                        pasteHTML(html)
+                        if !pasteHTML(html, detectContentChange: true),
+                           !attrStr.string.isEmpty {
+                            pastePlainText(attrStr.string)
+                        }
                     }
                     return
                 }
@@ -2218,7 +2492,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView === self else { return }
         ensureInternalTextViewDelegate()
-        guard !isApplyingRustState, !isComposing, !nativeTextMutationCommitScheduled else { return }
+        guard !isApplyingRustState,
+              !isComposing,
+              !nativeTextMutationCommitScheduled,
+              pendingNativeTextMutation == nil
+        else {
+            return
+        }
         if normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded() {
             return
         }
@@ -2278,7 +2558,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         delegate = self
     }
 
-    private func performInterceptedInput(_ action: () -> Void) {
+    private func performInterceptedInput(
+        flushPendingNativeTextMutation: Bool = true,
+        _ action: () -> Void
+    ) {
+        if flushPendingNativeTextMutation, interceptedInputDepth == 0 {
+            guard flushPendingNativeTextMutationCommitIfNeeded() else { return }
+        }
         interceptedInputDepth += 1
         Self.inputLog.debug(
             "[intercept.begin] depth=\(self.interceptedInputDepth) selection=\(self.selectionSummary(), privacy: .public) textState=\(self.textSnapshotSummary(), privacy: .public)"
@@ -2290,6 +2576,12 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             Self.inputLog.debug(
                 "[intercept.end] depth=\(self.interceptedInputDepth) selection=\(self.selectionSummary(), privacy: .public) textState=\(self.textSnapshotSummary(), privacy: .public)"
             )
+            if self.interceptedInputDepth == 0 {
+                _ = self.drainPendingNativeTextMutation(
+                    allowAfterBlur: false,
+                    allowWhileIntercepting: false
+                )
+            }
         }
     }
 
@@ -2402,6 +2694,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         guard !isApplyingRustState,
               !isComposing,
               !nativeTextMutationCommitScheduled,
+              pendingNativeTextMutation == nil,
               editorId != 0
         else {
             return
@@ -2421,9 +2714,11 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         editorDelegate?.editorTextView(self, selectionDidChange: docAnchor, head: docHead)
     }
 
-    func applyTheme(_ theme: EditorTheme?) {
-        self.theme = theme
+    @discardableResult
+    func applyTheme(_ theme: EditorTheme?) -> Bool {
         if editorId != 0 {
+            guard prepareForExternalEditorUpdate() else { return false }
+            self.theme = theme
             let previousOffset = contentOffset
             let stateJSON = editorGetCurrentState(id: editorId)
             applyUpdateJSON(stateJSON, notifyDelegate: false)
@@ -2431,11 +2726,13 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                 preserveScrollOffset(previousOffset)
             }
         } else {
+            self.theme = theme
             refreshTypingAttributesForSelection()
         }
         if heightBehavior == .autoGrow {
             notifyHeightChangeIfNeeded(force: true)
         }
+        return true
     }
 
     private func preserveScrollOffset(_ previousOffset: CGPoint) {
@@ -2871,8 +3168,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarToggleMark(_ markName: String) {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         guard let selection = currentScalarSelection() else { return }
         performInterceptedInput {
             let updateJSON = editorToggleMarkAtSelectionScalar(
@@ -2886,8 +3182,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarToggleList(_ listType: String, isActive: Bool) {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         guard let selection = currentScalarSelection() else { return }
         performInterceptedInput {
             let updateJSON = isActive
@@ -2907,8 +3202,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarToggleBlockquote() {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         guard let selection = currentScalarSelection() else { return }
         performInterceptedInput {
             let updateJSON = editorToggleBlockquoteAtSelectionScalar(
@@ -2921,8 +3215,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarToggleHeading(_ level: Int) {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         guard let selection = currentScalarSelection() else { return }
         guard let level = UInt8(exactly: level), (1...6).contains(level) else { return }
         performInterceptedInput {
@@ -2937,8 +3230,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarIndentListItem() {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         guard let selection = currentScalarSelection() else { return }
         performInterceptedInput {
             let updateJSON = editorIndentListItemAtSelectionScalar(
@@ -2951,8 +3243,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarOutdentListItem() {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         guard let selection = currentScalarSelection() else { return }
         performInterceptedInput {
             let updateJSON = editorOutdentListItemAtSelectionScalar(
@@ -2965,16 +3256,14 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarInsertNode(_ nodeType: String) {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         performInterceptedInput {
             insertNodeInRust(nodeType)
         }
     }
 
     func performToolbarUndo() {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         performInterceptedInput {
             let updateJSON = editorUndo(id: editorId)
             applyUpdateJSON(updateJSON)
@@ -2982,12 +3271,17 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func performToolbarRedo() {
-        guard editorId != 0 else { return }
-        guard isEditable else { return }
+        guard prepareForToolbarCommand() else { return }
         performInterceptedInput {
             let updateJSON = editorRedo(id: editorId)
             applyUpdateJSON(updateJSON)
         }
+    }
+
+    private func prepareForToolbarCommand() -> Bool {
+        guard editorId != 0 else { return false }
+        guard isEditable else { return false }
+        return prepareForExternalEditorUpdate()
     }
 
     /// Insert text at a scalar position via the Rust editor.
@@ -3026,6 +3320,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
               authorized.character(at: prefix) == current.character(at: prefix) {
             prefix += 1
         }
+        prefix = sharedUtf16ScalarBoundary(atOrBefore: prefix, in: authorizedText, and: currentText)
 
         var authorizedEnd = authorized.length
         var currentEnd = current.length
@@ -3035,6 +3330,8 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             authorizedEnd -= 1
             currentEnd -= 1
         }
+        authorizedEnd = utf16ScalarBoundary(atOrAfter: authorizedEnd, in: authorizedText)
+        currentEnd = utf16ScalarBoundary(atOrAfter: currentEnd, in: currentText)
 
         let replacementLength = currentEnd - prefix
         guard replacementLength >= 0 else { return nil }
@@ -3042,16 +3339,229 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             with: NSRange(location: prefix, length: replacementLength)
         )
 
+        let selectedScalarRange = selectedTextRange.map {
+            PositionBridge.textRangeToScalarRange($0, in: self)
+        }
+        let capturedAfterBlur = canAdoptNativeTextMutationAfterBlur()
+
         return NativeTextMutation(
-            from: PositionBridge.utf16OffsetToScalar(prefix, in: authorizedText),
-            to: PositionBridge.utf16OffsetToScalar(authorizedEnd, in: authorizedText),
+            from: PositionBridge.utf16OffsetToScalar(prefix, in: lastAuthorizedAttributedTextStorage),
+            to: PositionBridge.utf16OffsetToScalar(authorizedEnd, in: lastAuthorizedAttributedTextStorage),
             replacementText: replacementText,
-            resultingText: currentText
+            resultingText: currentText,
+            authorizedText: authorizedText,
+            selectionAnchor: selectedScalarRange?.from,
+            selectionHead: selectedScalarRange?.to,
+            capturedWhileFirstResponder: isFirstResponder || capturedAfterBlur,
+            capturedWhileEditable: isEditable,
+            capturedAfterBlur: capturedAfterBlur,
+            inputGeneration: nativeTextMutationGeneration
         )
     }
 
-    private func shouldAdoptNativeTextStorageMutation() -> Bool {
-        isFirstResponder && isEditable
+    private func nativeTextMutationWithCurrentSelection(
+        _ mutation: NativeTextMutation
+    ) -> NativeTextMutation {
+        let selectedScalarRange = selectedTextRange.map {
+            PositionBridge.textRangeToScalarRange($0, in: self)
+        }
+        return NativeTextMutation(
+            from: mutation.from,
+            to: mutation.to,
+            replacementText: mutation.replacementText,
+            resultingText: mutation.resultingText,
+            authorizedText: mutation.authorizedText,
+            selectionAnchor: selectedScalarRange?.from ?? mutation.selectionAnchor,
+            selectionHead: selectedScalarRange?.to ?? mutation.selectionHead,
+            capturedWhileFirstResponder: mutation.capturedWhileFirstResponder,
+            capturedWhileEditable: mutation.capturedWhileEditable,
+            capturedAfterBlur: mutation.capturedAfterBlur,
+            inputGeneration: mutation.inputGeneration
+        )
+    }
+
+    private func isUtf16ScalarBoundary(_ offset: Int, in text: String) -> Bool {
+        guard offset >= 0, offset <= text.utf16.count else { return false }
+        let utf16Index = text.utf16.index(text.utf16.startIndex, offsetBy: offset)
+        return String.Index(utf16Index, within: text) != nil
+    }
+
+    private func utf16ScalarBoundary(atOrBefore offset: Int, in text: String) -> Int {
+        var candidate = min(max(offset, 0), text.utf16.count)
+        while candidate > 0, !isUtf16ScalarBoundary(candidate, in: text) {
+            candidate -= 1
+        }
+        return candidate
+    }
+
+    private func utf16ScalarBoundary(atOrAfter offset: Int, in text: String) -> Int {
+        var candidate = min(max(offset, 0), text.utf16.count)
+        while candidate < text.utf16.count, !isUtf16ScalarBoundary(candidate, in: text) {
+            candidate += 1
+        }
+        return candidate
+    }
+
+    private func sharedUtf16ScalarBoundary(atOrBefore offset: Int, in lhs: String, and rhs: String) -> Int {
+        var candidate = min(max(offset, 0), lhs.utf16.count, rhs.utf16.count)
+        while candidate > 0,
+              (!isUtf16ScalarBoundary(candidate, in: lhs) || !isUtf16ScalarBoundary(candidate, in: rhs)) {
+            candidate -= 1
+        }
+        return candidate
+    }
+
+    private func shouldAdoptNativeTextStorageMutation(
+        _ mutation: NativeTextMutation,
+        allowAfterBlur: Bool = false
+    ) -> Bool {
+        if isFirstResponder && isEditable {
+            return true
+        }
+        return allowAfterBlur
+            && mutation.capturedAfterBlur
+            && mutation.inputGeneration == nativeTextMutationGeneration
+            && canAdoptNativeTextMutationAfterBlur()
+            && mutation.capturedWhileFirstResponder
+            && mutation.capturedWhileEditable
+    }
+
+    private func canAdoptNativeTextMutationAfterBlur() -> Bool {
+        guard let deadline = nativeTextMutationAfterBlurDeadline else {
+            return false
+        }
+        guard nativeTextMutationAfterBlurGeneration == nativeTextMutationGeneration else {
+            clearNativeTextMutationAfterBlurWindow()
+            return false
+        }
+        guard ProcessInfo.processInfo.systemUptime <= deadline else {
+            clearNativeTextMutationAfterBlurWindow()
+            return false
+        }
+        return true
+    }
+
+    private func clearNativeTextMutationAfterBlurWindow() {
+        nativeTextMutationAfterBlurDeadline = nil
+        nativeTextMutationAfterBlurGeneration = nil
+    }
+
+    private func advanceNativeTextMutationGeneration() {
+        nativeTextMutationGeneration &+= 1
+        clearNativeTextMutationAfterBlurWindow()
+    }
+
+    func expireNativeTextMutationAfterBlurDeadlineForTesting() {
+        nativeTextMutationAfterBlurDeadline = ProcessInfo.processInfo.systemUptime - 0.001
+    }
+
+    func discardTransientNativeInputForEditorRebind() {
+        pendingNativeTextMutation = nil
+        nativeTextMutationCommitScheduled = false
+        clearPendingInputTraitRetry()
+        markedTextReplacementScalarRange = nil
+        markedTextReplacementUtf16Range = nil
+        markedTextCompositionText = nil
+        markedTextCompositionIsExplicitlyEmpty = false
+        isComposing = false
+        advanceNativeTextMutationGeneration()
+    }
+
+    @discardableResult
+    private func flushPendingNativeTextMutationCommitIfNeeded() -> Bool {
+        drainPendingNativeTextMutation(
+            allowAfterBlur: false,
+            allowWhileIntercepting: true
+        )
+    }
+
+    @discardableResult
+    func prepareForExternalEditorUpdate() -> Bool {
+        guard prepareActiveCompositionForExternalMutation() else { return false }
+        return drainPendingNativeTextMutation(
+            allowAfterBlur: true,
+            allowWhileIntercepting: true
+        )
+    }
+
+    @discardableResult
+    func prepareForExternalEditorCommand() -> (ready: Bool, updateJSON: String?, blockedReason: String?) {
+        let previousEditorId = editorId
+        let previousAuthorizedText = lastAuthorizedText
+        let previousStateJSON = previousEditorId != 0 ? editorGetCurrentState(id: previousEditorId) : nil
+        guard prepareForExternalEditorUpdate() else {
+            return (false, nil, "composition")
+        }
+        guard editorId != 0 else {
+            return (true, nil, nil)
+        }
+        let currentStateJSON = editorGetCurrentState(id: editorId)
+        guard lastAuthorizedText != previousAuthorizedText
+                || previousEditorId != editorId
+                || previousStateJSON != currentStateJSON
+        else {
+            return (true, nil, nil)
+        }
+        return (true, currentStateJSON, nil)
+    }
+
+    private func prepareActiveCompositionForExternalMutation() -> Bool {
+        guard isComposing else { return true }
+
+        let composedText = validatedTrackedMarkedTextForCommit()
+        let replacementRange = trackedMarkedTextReplacementRange()
+        finishTransientMarkedTextMutation()
+
+        guard shouldCommitMarkedText(composedText, replacementRange: replacementRange) else {
+            restoreAuthorizedTextAfterCancelledCompositionIfNeeded()
+            return false
+        }
+
+        commitMarkedText(composedText ?? "", replacementRange: replacementRange)
+        return true
+    }
+
+    @discardableResult
+    private func drainPendingNativeTextMutation(
+        allowAfterBlur: Bool,
+        allowWhileIntercepting: Bool
+    ) -> Bool {
+        guard nativeTextMutationCommitScheduled
+                || pendingNativeTextMutation != nil
+                || (!isComposing && textStorage.string != lastAuthorizedText)
+        else {
+            return true
+        }
+
+        nativeTextMutationCommitScheduled = false
+        let currentText = textStorage.string
+        let mutation: NativeTextMutation?
+        if let pendingNativeTextMutation,
+           pendingNativeTextMutation.resultingText == currentText,
+           pendingNativeTextMutation.authorizedText == lastAuthorizedText
+        {
+            mutation = nativeTextMutationWithCurrentSelection(pendingNativeTextMutation)
+        } else {
+            mutation = nativeTextMutationFromAuthorizedDiff(currentText: currentText)
+        }
+
+        guard let mutation else {
+            pendingNativeTextMutation = nil
+            return true
+        }
+
+        switch commitNativeTextMutationIfPossible(
+            mutation,
+            allowAfterBlur: allowAfterBlur,
+            allowWhileIntercepting: allowWhileIntercepting
+        ) {
+        case .committed, .rejected:
+            pendingNativeTextMutation = nil
+            return true
+        case .deferred:
+            pendingNativeTextMutation = mutation
+            return false
+        }
     }
 
     private func scheduleNativeTextMutationCommit(_ mutation: NativeTextMutation) {
@@ -3061,43 +3571,99 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         nativeTextMutationCommitScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.nativeTextMutationCommitScheduled = false
-            guard let mutation = self.pendingNativeTextMutation else { return }
-            self.pendingNativeTextMutation = nil
-
-            guard self.editorId != 0,
-                  !self.isApplyingRustState,
-                  !self.isInterceptingInput,
-                  !self.isComposing,
-                  self.shouldAdoptNativeTextStorageMutation()
-            else {
-                if self.textStorage.string != self.lastAuthorizedText {
-                    self.scheduleReconciliationFromRust()
-                }
-                return
-            }
-            guard self.textStorage.string == mutation.resultingText else {
-                if self.textStorage.string != self.lastAuthorizedText {
-                    self.scheduleReconciliationFromRust()
-                }
-                return
-            }
-
-            self.performInterceptedInput {
-                if mutation.from == mutation.to {
-                    guard !mutation.replacementText.isEmpty else { return }
-                    self.insertTextInRust(mutation.replacementText, at: mutation.from)
-                } else if mutation.replacementText.isEmpty {
-                    self.deleteScalarRangeInRust(from: mutation.from, to: mutation.to)
-                } else {
-                    self.replaceTextRangeInRust(
-                        from: mutation.from,
-                        to: mutation.to,
-                        with: mutation.replacementText
-                    )
-                }
-            }
+            _ = self.drainPendingNativeTextMutation(
+                allowAfterBlur: true,
+                allowWhileIntercepting: true
+            )
         }
+    }
+
+    @discardableResult
+    private func commitNativeTextMutationIfPossible(
+        _ mutation: NativeTextMutation,
+        allowAfterBlur: Bool,
+        allowWhileIntercepting: Bool
+    ) -> NativeTextMutationCommitResult {
+        guard editorId != 0 else {
+            return .rejected
+        }
+
+        guard !isApplyingRustState,
+              (!isInterceptingInput || allowWhileIntercepting),
+              !isComposing
+        else {
+            return .deferred
+        }
+
+        guard shouldAdoptNativeTextStorageMutation(mutation, allowAfterBlur: allowAfterBlur) else {
+            if textStorage.string != lastAuthorizedText {
+                scheduleReconciliationFromRust()
+            }
+            return .rejected
+        }
+
+        guard textStorage.string == mutation.resultingText else {
+            if let refreshedMutation = nativeTextMutationFromAuthorizedDiff(currentText: textStorage.string) {
+                return commitNativeTextMutationIfPossible(
+                    refreshedMutation,
+                    allowAfterBlur: allowAfterBlur,
+                    allowWhileIntercepting: allowWhileIntercepting
+                )
+            }
+            return .rejected
+        }
+
+        guard mutation.authorizedText == lastAuthorizedText else {
+            if let refreshedMutation = nativeTextMutationFromAuthorizedDiff(currentText: textStorage.string) {
+                return commitNativeTextMutationIfPossible(
+                    refreshedMutation,
+                    allowAfterBlur: allowAfterBlur,
+                    allowWhileIntercepting: allowWhileIntercepting
+                )
+            }
+            return .rejected
+        }
+
+        performInterceptedInput(flushPendingNativeTextMutation: false) {
+            if mutation.from == mutation.to {
+                guard !mutation.replacementText.isEmpty else { return }
+                insertTextInRust(mutation.replacementText, at: mutation.from)
+            } else if mutation.replacementText.isEmpty {
+                deleteScalarRangeInRust(from: mutation.from, to: mutation.to)
+            } else {
+                replaceTextRangeInRust(
+                    from: mutation.from,
+                    to: mutation.to,
+                    with: mutation.replacementText
+                )
+            }
+            restoreNativeTextMutationSelectionIfNeeded(mutation)
+        }
+        if mutation.capturedAfterBlur {
+            clearNativeTextMutationAfterBlurWindow()
+        }
+        return .committed
+    }
+
+    private func restoreNativeTextMutationSelectionIfNeeded(_ mutation: NativeTextMutation) {
+        guard let anchor = mutation.selectionAnchor,
+              let head = mutation.selectionHead,
+              editorId != 0
+        else {
+            return
+        }
+
+        let startUtf16 = PositionBridge.scalarToUtf16Offset(min(anchor, head), in: self)
+        let endUtf16 = PositionBridge.scalarToUtf16Offset(max(anchor, head), in: self)
+        let targetRange = NSRange(location: startUtf16, length: max(0, endUtf16 - startUtf16))
+        if selectedRange != targetRange {
+            selectedRange = targetRange
+        }
+        editorSetSelectionScalar(id: editorId, scalarAnchor: anchor, scalarHead: head)
+        refreshTypingAttributesForSelection()
+        let docAnchor = editorScalarToDoc(id: editorId, scalar: anchor)
+        let docHead = editorScalarToDoc(id: editorId, scalar: head)
+        editorDelegate?.editorTextView(self, selectionDidChange: docAnchor, head: docHead)
     }
 
     private func insertNodeInRust(_ nodeType: String) {
@@ -3281,12 +3847,24 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     /// Paste HTML content through Rust.
-    private func pasteHTML(_ html: String) {
+    @discardableResult
+    private func pasteHTML(_ html: String, detectContentChange: Bool = false) -> Bool {
+        let previousHTML = detectContentChange ? editorGetHtml(id: editorId) : nil
+        syncCurrentUIKitSelectionToRust()
         Self.inputLog.debug(
             "[rust.pasteHTML] html=\(self.preview(html), privacy: .public) selection=\(self.selectionSummary(), privacy: .public)"
         )
         let updateJSON = editorInsertContentHtml(id: editorId, html: html)
         applyUpdateJSON(updateJSON)
+        guard let previousHTML else { return true }
+        return editorGetHtml(id: editorId) != previousHTML
+    }
+
+    private func syncCurrentUIKitSelectionToRust() {
+        guard editorId != 0, let range = selectedTextRange else { return }
+        let anchor = PositionBridge.textViewToScalar(range.start, in: self)
+        let head = PositionBridge.textViewToScalar(range.end, in: self)
+        editorSetSelectionScalar(id: editorId, scalarAnchor: anchor, scalarHead: head)
     }
 
     /// Paste plain text through Rust.
@@ -3577,7 +4155,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         _ attrStr: NSAttributedString,
         replaceRange: NSRange? = nil,
         usedPatch: Bool,
-        positionCacheUpdate: PositionCacheUpdate = .scan
+        positionCacheUpdate: PositionCacheUpdate = .scan,
+        authorizedReplaceRange: NSRange? = nil,
+        authorizedReplacementText: String? = nil,
+        authorizedReplacementAttributedText: NSAttributedString? = nil
     ) -> ApplyRenderTrace {
         let totalStartedAt = DispatchTime.now().uptimeNanoseconds
         let replaceUtf16Length = replaceRange?.length ?? textStorage.length
@@ -3626,13 +4207,27 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let endEditingNanos = DispatchTime.now().uptimeNanoseconds - endEditingStartedAt
         let textMutationNanos = DispatchTime.now().uptimeNanoseconds - textMutationStartedAt
         let authorizedTextStartedAt = DispatchTime.now().uptimeNanoseconds
-        if let replaceRange,
-           replaceRange.location >= 0,
-           replaceRange.location + replaceRange.length <= lastAuthorizedTextStorage.length
+        let snapshotReplaceRange = authorizedReplaceRange ?? replaceRange
+        let snapshotReplacementText = authorizedReplacementText ?? attrStr.string
+        let snapshotReplacementAttributedText = authorizedReplacementAttributedText ?? attrStr
+        if let snapshotReplaceRange,
+           snapshotReplaceRange.location >= 0,
+           snapshotReplaceRange.location + snapshotReplaceRange.length <= lastAuthorizedTextStorage.length
         {
-            lastAuthorizedTextStorage.replaceCharacters(in: replaceRange, with: attrStr.string)
+            lastAuthorizedTextStorage.replaceCharacters(
+                in: snapshotReplaceRange,
+                with: snapshotReplacementText
+            )
+            lastAuthorizedAttributedTextStorage.replaceCharacters(
+                in: snapshotReplaceRange,
+                with: snapshotReplacementAttributedText
+            )
         } else {
-            lastAuthorizedTextStorage.setString(attrStr.string)
+            lastAuthorizedTextStorage.setString(replaceRange == nil ? snapshotReplacementText : textStorage.string)
+            let fallbackAttributedSnapshot = replaceRange == nil
+                ? snapshotReplacementAttributedText
+                : NSAttributedString(attributedString: textStorage)
+            lastAuthorizedAttributedTextStorage.setAttributedString(fallbackAttributedSnapshot)
         }
         let authorizedTextNanos = DispatchTime.now().uptimeNanoseconds - authorizedTextStartedAt
         let cacheInvalidationStartedAt = DispatchTime.now().uptimeNanoseconds
@@ -3932,8 +4527,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         }
 
         let existing = textStorage.attributedSubstring(from: fullReplaceRange)
-        let existingString = existing.string as NSString
-        let replacementString = replacement.string as NSString
+        let existingRawString = existing.string
+        let replacementRawString = replacement.string
+        let existingString = existingRawString as NSString
+        let replacementString = replacementRawString as NSString
         let sharedLength = min(existing.length, replacement.length)
 
         var prefix = 0
@@ -3995,6 +4592,17 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             if matchedLength < maxComparableLength {
                 break
             }
+        }
+        prefix = sharedUtf16ScalarBoundary(atOrBefore: prefix, in: existingRawString, and: replacementRawString)
+        while suffix > 0 {
+            let existingSuffixStart = existing.length - suffix
+            let replacementSuffixStart = replacement.length - suffix
+            if suffix <= sharedLength - prefix,
+               isUtf16ScalarBoundary(existingSuffixStart, in: existingRawString),
+               isUtf16ScalarBoundary(replacementSuffixStart, in: replacementRawString) {
+                break
+            }
+            suffix -= 1
         }
 
         guard prefix > 0 || suffix > 0 else {
@@ -4128,7 +4736,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             patchToApply.replacement,
             replaceRange: patchToApply.replaceRange,
             usedPatch: true,
-            positionCacheUpdate: positionCacheUpdate
+            positionCacheUpdate: positionCacheUpdate,
+            authorizedReplaceRange: fullReplaceRange,
+            authorizedReplacementText: attrStr.string,
+            authorizedReplacementAttributedText: attrStr
         )
         let metadataStartedAt = DispatchTime.now().uptimeNanoseconds
         applyTopLevelChildMetadataPatch(
@@ -4172,6 +4783,9 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
               let update = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
         let parseNanos = DispatchTime.now().uptimeNanoseconds - parseStartedAt
+        pendingNativeTextMutation = nil
+        nativeTextMutationCommitScheduled = false
+        advanceNativeTextMutationGeneration()
 
         let renderElements = update["renderElements"] as? [[String: Any]]
         let selectionFromUpdate = (update["selection"] as? [String: Any])
@@ -4536,19 +5150,27 @@ extension EditorTextView: NSTextStorageDelegate {
         // Only care about actual character edits, not attribute-only changes.
         guard editedMask.contains(.editedCharacters) else { return }
 
-        // Skip if this change came from our own Rust apply path.
-        guard !isApplyingRustState, !isInterceptingInput, !isComposing else { return }
+        // Skip if this change came from our own Rust apply path or transient IME composition.
+        guard !isApplyingRustState, !isComposing else { return }
 
         // Skip if no editor is bound yet (nothing to reconcile against).
         guard editorId != 0 else { return }
+
+        PositionBridge.invalidateCache(for: self)
 
         // Compare current text storage content against last authorized snapshot.
         let currentText = textStorage.string
         guard currentText != lastAuthorizedText else { return }
         currentTopLevelChildMetadata = nil
 
-        if shouldAdoptNativeTextStorageMutation(),
-           let mutation = nativeTextMutationFromAuthorizedDiff(currentText: currentText) {
+        let allowAfterBlur = canAdoptNativeTextMutationAfterBlur()
+        if let mutation = nativeTextMutationFromAuthorizedDiff(currentText: currentText),
+           isInterceptingInput
+                || shouldAdoptNativeTextStorageMutation(
+                    mutation,
+                    allowAfterBlur: allowAfterBlur
+                )
+        {
             scheduleNativeTextMutationCommit(mutation)
             return
         }
@@ -4695,6 +5317,8 @@ final class RichTextEditorView: UIView {
     /// The Rust editor instance ID. Setting this binds/unbinds the editor.
     var editorId: UInt64 = 0 {
         didSet {
+            guard oldValue != editorId else { return }
+            textView.discardTransientNativeInputForEditorRebind()
             if editorId != 0 {
                 textView.bindEditor(id: editorId)
             } else {
@@ -4815,12 +5439,14 @@ final class RichTextEditorView: UIView {
         textView.backgroundColor = backgroundColor
     }
 
-    func applyTheme(_ theme: EditorTheme?) {
-        textView.applyTheme(theme)
+    @discardableResult
+    func applyTheme(_ theme: EditorTheme?) -> Bool {
+        guard textView.applyTheme(theme) else { return false }
         let cornerRadius = theme?.borderRadius ?? 0
         layer.cornerRadius = cornerRadius
         clipsToBounds = cornerRadius > 0
         refreshOverlays()
+        return true
     }
 
     func setRemoteSelections(_ selections: [RemoteSelectionDecoration]) {

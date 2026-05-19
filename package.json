@@ -1,6 +1,6 @@
 {
     "name": "@apollohg/react-native-prose-editor",
-    "version": "0.5.16",
+    "version": "0.5.17",
     "description": "Native rich text editor with Rust core for React Native",
     "license": "Apache-2.0",
     "homepage": "https://github.com/apollohg/react-native-prose-editor",
@@ -40,6 +40,7 @@
         "android:test": "cd example/android && ./gradlew :apollohg-react-native-prose-editor:testDebugUnitTest",
         "android:test:perf": "cd example/android && ./gradlew :apollohg-react-native-prose-editor:testDebugUnitTest -PapollohgShowPerfTestOutput=true --tests com.apollohg.editor.NativePerformanceTest",
         "android:test:device": "bash ./scripts/run-android-on-device.sh",
+        "android:test:ime:device": "bash ./scripts/run-android-on-device.sh --class com.apollohg.editor.NativeDeviceImeRegressionTest",
         "android:test:perf:device": "bash ./scripts/run-android-on-device.sh --class com.apollohg.editor.NativeDevicePerformanceTest",
         "ios:test": "bash ./scripts/run-ios-tests.sh",
         "ios:test:perf": "bash ./scripts/run-ios-tests.sh -only-testing:NativeEditorTests/NativePerformanceTests",

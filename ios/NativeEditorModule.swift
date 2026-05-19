@@ -1,156 +1,271 @@
 import ExpoModulesCore
 
+private func nativeUInt64(_ value: Int) -> UInt64? {
+    guard value >= 0 else { return nil }
+    return UInt64(value)
+}
+
+private func nativeUInt32(_ value: Int) -> UInt32? {
+    guard value >= 0, value <= Int(UInt32.max) else { return nil }
+    return UInt32(value)
+}
+
+private func nativeArgumentError(_ field: String) -> String {
+    "{\"error\":\"invalid \(field)\"}"
+}
+
 public class NativeEditorModule: Module {
     public func definition() -> ModuleDefinition {
         Name("NativeEditor")
 
         Function("editorCreate") { (configJson: String) -> Int in
-            Int(editorCreate(configJson: configJson))
+            let editorId = editorCreate(configJson: configJson)
+            NativeEditorViewRegistry.shared.markEditorCreated(editorId: editorId)
+            return Int(editorId)
         }
         Function("editorDestroy") { (id: Int) in
-            editorDestroy(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return }
+            NativeEditorViewRegistry.shared.invalidateDestroyedEditor(editorId: editorId)
+            editorDestroy(id: editorId)
+        }
+        Function("editorPrepareForCommand") { (id: Int) -> String in
+            guard let editorId = nativeUInt64(id) else {
+                return nativeArgumentError("editor id")
+            }
+            return NativeEditorViewRegistry.shared.prepareForCommandJSON(editorId: editorId)
         }
         Function("collaborationSessionCreate") { (configJson: String) -> Int in
             Int(collaborationSessionCreate(configJson: configJson))
         }
         Function("collaborationSessionDestroy") { (id: Int) in
-            collaborationSessionDestroy(id: UInt64(id))
+            guard let sessionId = nativeUInt64(id) else { return }
+            collaborationSessionDestroy(id: sessionId)
         }
         Function("collaborationSessionGetDocumentJson") { (id: Int) -> String in
-            collaborationSessionGetDocumentJson(id: UInt64(id))
+            guard let sessionId = nativeUInt64(id) else { return "{}" }
+            return collaborationSessionGetDocumentJson(id: sessionId)
         }
         Function("collaborationSessionGetEncodedState") { (id: Int) -> String in
-            collaborationSessionGetEncodedState(id: UInt64(id))
+            guard let sessionId = nativeUInt64(id) else { return "[]" }
+            return collaborationSessionGetEncodedState(id: sessionId)
         }
         Function("collaborationSessionGetPeersJson") { (id: Int) -> String in
-            collaborationSessionGetPeersJson(id: UInt64(id))
+            guard let sessionId = nativeUInt64(id) else { return "[]" }
+            return collaborationSessionGetPeersJson(id: sessionId)
         }
         Function("collaborationSessionStart") { (id: Int) -> String in
-            collaborationSessionStart(id: UInt64(id))
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionStart(id: sessionId)
         }
         Function("collaborationSessionApplyLocalDocumentJson") { (id: Int, json: String) -> String in
-            collaborationSessionApplyLocalDocumentJson(id: UInt64(id), json: json)
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionApplyLocalDocumentJson(id: sessionId, json: json)
         }
         Function("collaborationSessionApplyEncodedState") { (id: Int, encodedStateJson: String) -> String in
-            collaborationSessionApplyEncodedState(id: UInt64(id), encodedStateJson: encodedStateJson)
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionApplyEncodedState(id: sessionId, encodedStateJson: encodedStateJson)
         }
         Function("collaborationSessionReplaceEncodedState") { (id: Int, encodedStateJson: String) -> String in
-            collaborationSessionReplaceEncodedState(id: UInt64(id), encodedStateJson: encodedStateJson)
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionReplaceEncodedState(id: sessionId, encodedStateJson: encodedStateJson)
         }
         Function("collaborationSessionHandleMessage") { (id: Int, messageJson: String) -> String in
-            collaborationSessionHandleMessage(id: UInt64(id), messageJson: messageJson)
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionHandleMessage(id: sessionId, messageJson: messageJson)
         }
         Function("collaborationSessionSetLocalAwareness") { (id: Int, awarenessJson: String) -> String in
-            collaborationSessionSetLocalAwareness(id: UInt64(id), awarenessJson: awarenessJson)
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionSetLocalAwareness(id: sessionId, awarenessJson: awarenessJson)
         }
         Function("collaborationSessionClearLocalAwareness") { (id: Int) -> String in
-            collaborationSessionClearLocalAwareness(id: UInt64(id))
+            guard let sessionId = nativeUInt64(id) else { return nativeArgumentError("session id") }
+            return collaborationSessionClearLocalAwareness(id: sessionId)
         }
         Function("editorSetHtml") { (id: Int, html: String) -> String in
-            editorSetHtml(id: UInt64(id), html: html)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorSetHtml(id: editorId, html: html)
         }
         Function("editorGetHtml") { (id: Int) -> String in
-            editorGetHtml(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return "" }
+            return editorGetHtml(id: editorId)
         }
         Function("editorSetJson") { (id: Int, json: String) -> String in
-            editorSetJson(id: UInt64(id), json: json)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorSetJson(id: editorId, json: json)
         }
         Function("editorGetJson") { (id: Int) -> String in
-            editorGetJson(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return "{}" }
+            return editorGetJson(id: editorId)
         }
         Function("editorGetContentSnapshot") { (id: Int) -> String in
-            editorGetContentSnapshot(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return "{\"html\":\"\",\"json\":{}}" }
+            return editorGetContentSnapshot(id: editorId)
         }
         Function("editorInsertText") { (id: Int, pos: Int, text: String) -> String in
-            editorInsertText(id: UInt64(id), pos: UInt32(pos), text: text)
+            guard let editorId = nativeUInt64(id),
+                  let pos = nativeUInt32(pos)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorInsertText(id: editorId, pos: pos, text: text)
         }
         Function("editorInsertTextScalar") { (id: Int, scalarPos: Int, text: String) -> String in
-            editorInsertTextScalar(id: UInt64(id), scalarPos: UInt32(scalarPos), text: text)
+            guard let editorId = nativeUInt64(id),
+                  let scalarPos = nativeUInt32(scalarPos)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorInsertTextScalar(id: editorId, scalarPos: scalarPos, text: text)
         }
         Function("editorReplaceSelectionText") { (id: Int, text: String) -> String in
-            editorReplaceSelectionText(id: UInt64(id), text: text)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorReplaceSelectionText(id: editorId, text: text)
         }
         Function("editorDeleteRange") { (id: Int, from: Int, to: Int) -> String in
-            editorDeleteRange(id: UInt64(id), from: UInt32(from), to: UInt32(to))
+            guard let editorId = nativeUInt64(id),
+                  let from = nativeUInt32(from),
+                  let to = nativeUInt32(to)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorDeleteRange(id: editorId, from: from, to: to)
         }
         Function("editorDeleteScalarRange") { (id: Int, scalarFrom: Int, scalarTo: Int) -> String in
-            editorDeleteScalarRange(
-                id: UInt64(id),
-                scalarFrom: UInt32(scalarFrom),
-                scalarTo: UInt32(scalarTo)
+            guard let editorId = nativeUInt64(id),
+                  let scalarFrom = nativeUInt32(scalarFrom),
+                  let scalarTo = nativeUInt32(scalarTo)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorDeleteScalarRange(
+                id: editorId,
+                scalarFrom: scalarFrom,
+                scalarTo: scalarTo
             )
         }
         Function(
             "editorReplaceTextScalar"
         ) { (id: Int, scalarFrom: Int, scalarTo: Int, text: String) -> String in
-            editorReplaceTextScalar(
-                id: UInt64(id),
-                scalarFrom: UInt32(scalarFrom),
-                scalarTo: UInt32(scalarTo),
+            guard let editorId = nativeUInt64(id),
+                  let scalarFrom = nativeUInt32(scalarFrom),
+                  let scalarTo = nativeUInt32(scalarTo)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorReplaceTextScalar(
+                id: editorId,
+                scalarFrom: scalarFrom,
+                scalarTo: scalarTo,
                 text: text
             )
         }
         Function("editorSplitBlock") { (id: Int, pos: Int) -> String in
-            editorSplitBlock(id: UInt64(id), pos: UInt32(pos))
+            guard let editorId = nativeUInt64(id),
+                  let pos = nativeUInt32(pos)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorSplitBlock(id: editorId, pos: pos)
         }
         Function("editorSplitBlockScalar") { (id: Int, scalarPos: Int) -> String in
-            editorSplitBlockScalar(id: UInt64(id), scalarPos: UInt32(scalarPos))
+            guard let editorId = nativeUInt64(id),
+                  let scalarPos = nativeUInt32(scalarPos)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorSplitBlockScalar(id: editorId, scalarPos: scalarPos)
         }
         Function("editorDeleteAndSplitScalar") { (id: Int, scalarFrom: Int, scalarTo: Int) -> String in
-            editorDeleteAndSplitScalar(
-                id: UInt64(id),
-                scalarFrom: UInt32(scalarFrom),
-                scalarTo: UInt32(scalarTo)
+            guard let editorId = nativeUInt64(id),
+                  let scalarFrom = nativeUInt32(scalarFrom),
+                  let scalarTo = nativeUInt32(scalarTo)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorDeleteAndSplitScalar(
+                id: editorId,
+                scalarFrom: scalarFrom,
+                scalarTo: scalarTo
             )
         }
         Function("editorInsertContentHtml") { (id: Int, html: String) -> String in
-            editorInsertContentHtml(id: UInt64(id), html: html)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorInsertContentHtml(id: editorId, html: html)
         }
         Function("editorToggleMark") { (id: Int, markName: String) -> String in
-            editorToggleMark(id: UInt64(id), markName: markName)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorToggleMark(id: editorId, markName: markName)
         }
         Function("editorSetMark") { (id: Int, markName: String, attrsJson: String) -> String in
-            editorSetMark(id: UInt64(id), markName: markName, attrsJson: attrsJson)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorSetMark(id: editorId, markName: markName, attrsJson: attrsJson)
         }
         Function("editorUnsetMark") { (id: Int, markName: String) -> String in
-            editorUnsetMark(id: UInt64(id), markName: markName)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorUnsetMark(id: editorId, markName: markName)
         }
         Function("editorToggleBlockquote") { (id: Int) -> String in
-            editorToggleBlockquote(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorToggleBlockquote(id: editorId)
         }
         Function("editorToggleHeading") { (id: Int, level: Int) -> String in
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
             guard (1...6).contains(level) else {
                 return "{\"error\":\"invalid heading level\"}"
             }
-            return editorToggleHeading(id: UInt64(id), level: UInt8(level))
+            return editorToggleHeading(id: editorId, level: UInt8(level))
         }
         Function("editorSetSelection") { (id: Int, anchor: Int, head: Int) in
-            editorSetSelection(id: UInt64(id), anchor: UInt32(anchor), head: UInt32(head))
+            guard let editorId = nativeUInt64(id),
+                  let anchor = nativeUInt32(anchor),
+                  let head = nativeUInt32(head)
+            else {
+                return
+            }
+            editorSetSelection(id: editorId, anchor: anchor, head: head)
         }
         Function("editorSetSelectionScalar") { (id: Int, scalarAnchor: Int, scalarHead: Int) in
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return
+            }
             editorSetSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead)
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead
             )
         }
         Function(
             "editorToggleMarkAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, markName: String) -> String in
-            editorToggleMarkAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorToggleMarkAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 markName: markName
             )
         }
         Function(
             "editorSetMarkAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, markName: String, attrsJson: String) -> String in
-            editorSetMarkAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorSetMarkAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 markName: markName,
                 attrsJson: attrsJson
             )
@@ -158,108 +273,175 @@ public class NativeEditorModule: Module {
         Function(
             "editorUnsetMarkAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, markName: String) -> String in
-            editorUnsetMarkAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorUnsetMarkAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 markName: markName
             )
         }
         Function(
             "editorToggleBlockquoteAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int) -> String in
-            editorToggleBlockquoteAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead)
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorToggleBlockquoteAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead
             )
         }
         Function(
             "editorToggleHeadingAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, level: Int) -> String in
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
             guard (1...6).contains(level) else {
                 return "{\"error\":\"invalid heading level\"}"
             }
             return editorToggleHeadingAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 level: UInt8(level)
             )
         }
         Function(
             "editorWrapInListAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, listType: String) -> String in
-            editorWrapInListAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorWrapInListAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 listType: listType
             )
         }
         Function(
             "editorUnwrapFromListAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int) -> String in
-            editorUnwrapFromListAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead)
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorUnwrapFromListAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead
             )
         }
         Function(
             "editorIndentListItemAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int) -> String in
-            editorIndentListItemAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead)
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorIndentListItemAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead
             )
         }
         Function(
             "editorOutdentListItemAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int) -> String in
-            editorOutdentListItemAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead)
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorOutdentListItemAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead
             )
         }
         Function(
             "editorInsertNodeAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, nodeType: String) -> String in
-            editorInsertNodeAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorInsertNodeAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 nodeType: nodeType
             )
         }
         Function("editorGetSelection") { (id: Int) -> String in
-            editorGetSelection(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else {
+                return "{\"type\":\"text\",\"anchor\":0,\"head\":0}"
+            }
+            return editorGetSelection(id: editorId)
         }
         Function("editorGetSelectionState") { (id: Int) -> String in
-            editorGetSelectionState(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorGetSelectionState(id: editorId)
         }
         Function("editorDocToScalar") { (id: Int, docPos: Int) -> Int in
-            Int(editorDocToScalar(id: UInt64(id), docPos: UInt32(docPos)))
+            guard let editorId = nativeUInt64(id),
+                  let docPos = nativeUInt32(docPos)
+            else {
+                return 0
+            }
+            return Int(editorDocToScalar(id: editorId, docPos: docPos))
         }
         Function("editorScalarToDoc") { (id: Int, scalar: Int) -> Int in
-            Int(editorScalarToDoc(id: UInt64(id), scalar: UInt32(scalar)))
+            guard let editorId = nativeUInt64(id),
+                  let scalar = nativeUInt32(scalar)
+            else {
+                return 0
+            }
+            return Int(editorScalarToDoc(id: editorId, scalar: scalar))
         }
         Function("editorGetCurrentState") { (id: Int) -> String in
-            editorGetCurrentState(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorGetCurrentState(id: editorId)
         }
         Function("editorUndo") { (id: Int) -> String in
-            editorUndo(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorUndo(id: editorId)
         }
         Function("editorRedo") { (id: Int) -> String in
-            editorRedo(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorRedo(id: editorId)
         }
         Function("editorCanUndo") { (id: Int) -> Bool in
-            editorCanUndo(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return false }
+            return editorCanUndo(id: editorId)
         }
         Function("editorCanRedo") { (id: Int) -> Bool in
-            editorCanRedo(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return false }
+            return editorCanRedo(id: editorId)
         }
         Function("renderDocumentJson") { (configJson: String, json: String) -> String in
             let editorId = editorCreate(configJson: configJson)
@@ -284,38 +466,52 @@ public class NativeEditorModule: Module {
             return editorSetHtml(id: editorId, html: html)
         }
         Function("editorReplaceHtml") { (id: Int, html: String) -> String in
-            editorReplaceHtml(id: UInt64(id), html: html)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorReplaceHtml(id: editorId, html: html)
         }
         Function("editorReplaceJson") { (id: Int, json: String) -> String in
-            editorReplaceJson(id: UInt64(id), json: json)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorReplaceJson(id: editorId, json: json)
         }
         Function("editorInsertContentJson") { (id: Int, json: String) -> String in
-            editorInsertContentJson(id: UInt64(id), json: json)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorInsertContentJson(id: editorId, json: json)
         }
         Function(
             "editorInsertContentJsonAtSelectionScalar"
         ) { (id: Int, scalarAnchor: Int, scalarHead: Int, json: String) -> String in
-            editorInsertContentJsonAtSelectionScalar(
-                id: UInt64(id),
-                scalarAnchor: UInt32(scalarAnchor),
-                scalarHead: UInt32(scalarHead),
+            guard let editorId = nativeUInt64(id),
+                  let scalarAnchor = nativeUInt32(scalarAnchor),
+                  let scalarHead = nativeUInt32(scalarHead)
+            else {
+                return nativeArgumentError("position")
+            }
+            return editorInsertContentJsonAtSelectionScalar(
+                id: editorId,
+                scalarAnchor: scalarAnchor,
+                scalarHead: scalarHead,
                 json: json
             )
         }
         Function("editorWrapInList") { (id: Int, listType: String) -> String in
-            editorWrapInList(id: UInt64(id), listType: listType)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorWrapInList(id: editorId, listType: listType)
         }
         Function("editorUnwrapFromList") { (id: Int) -> String in
-            editorUnwrapFromList(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorUnwrapFromList(id: editorId)
         }
         Function("editorIndentListItem") { (id: Int) -> String in
-            editorIndentListItem(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorIndentListItem(id: editorId)
         }
         Function("editorOutdentListItem") { (id: Int) -> String in
-            editorOutdentListItem(id: UInt64(id))
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorOutdentListItem(id: editorId)
         }
         Function("editorInsertNode") { (id: Int, nodeType: String) -> String in
-            editorInsertNode(id: UInt64(id), nodeType: nodeType)
+            guard let editorId = nativeUInt64(id) else { return nativeArgumentError("editor id") }
+            return editorInsertNode(id: editorId, nodeType: nodeType)
         }
 
         View(NativeEditorExpoView.self) {
@@ -329,7 +525,7 @@ public class NativeEditorModule: Module {
             )
 
             Prop("editorId") { (view: NativeEditorExpoView, id: Int) in
-                view.setEditorId(UInt64(id))
+                view.setEditorId(nativeUInt64(id) ?? 0)
             }
             Prop("editable") { (view: NativeEditorExpoView, editable: Bool) in
                 view.setEditable(editable)
@@ -386,7 +582,7 @@ public class NativeEditorModule: Module {
                 view.applyPendingEditorUpdateIfNeeded()
             }
 
-            AsyncFunction("applyEditorUpdate") { (view: NativeEditorExpoView, updateJson: String) in
+            AsyncFunction("applyEditorUpdate") { (view: NativeEditorExpoView, updateJson: String) -> Bool in
                 view.applyEditorUpdate(updateJson)
             }
             AsyncFunction("focus") { (view: NativeEditorExpoView) in
