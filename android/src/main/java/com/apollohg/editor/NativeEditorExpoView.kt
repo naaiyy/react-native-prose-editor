@@ -390,6 +390,11 @@ class NativeEditorExpoView(
         val mentionQuery: String? = null
     )
 
+    private data class PendingEditorUpdateEvent(
+        val editorId: Long,
+        val updateJSON: String
+    )
+
     val richTextView: RichTextEditorView = RichTextEditorView(context)
     private val keyboardToolbarView = EditorKeyboardToolbarView(context)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -478,6 +483,9 @@ class NativeEditorExpoView(
     private var pendingNativeActionRetryGeneration = 0
     private var pendingNativeActionRetryAttempts = 0
     private var lastReadyEditorId: Long? = null
+    private val pendingEditorUpdateEvents = java.util.ArrayDeque<PendingEditorUpdateEvent>()
+    private var pendingEditorUpdateDispatchGeneration = 0
+    private var pendingEditorUpdateDispatchScheduled = false
 
     init {
         addView(richTextView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -1737,6 +1745,7 @@ class NativeEditorExpoView(
         isApplyingJSUpdate = true
         return try {
             richTextView.editorEditText.applyUpdateJSON(updateJson)
+            clearPendingEditorUpdateDispatchQueue("jsUpdate")
             true
         } catch (error: Throwable) {
             Log.w(LOG_TAG, "Failed to apply JS editor update", error)
@@ -1812,27 +1821,114 @@ class NativeEditorExpoView(
     }
 
     override fun onEditorUpdate(updateJSON: String) {
+        if (isApplyingJSUpdate) {
+            dispatchEditorUpdate(
+                PendingEditorUpdateEvent(
+                    editorId = richTextView.editorId,
+                    updateJSON = updateJSON
+                ),
+                emitToJS = false
+            )
+            return
+        }
+        pendingEditorUpdateEvents.addLast(
+            PendingEditorUpdateEvent(
+                editorId = richTextView.editorId,
+                updateJSON = updateJSON
+            )
+        )
+        richTextView.editorEditText.recordImeTraceForTesting(
+            "nativeViewEditorUpdateQueued",
+            "queue=${pendingEditorUpdateEvents.size} jsonLength=${updateJSON.length}"
+        )
+        schedulePendingEditorUpdateDispatch()
+    }
+
+    internal fun pendingEditorUpdateEventCountForTesting(): Int =
+        pendingEditorUpdateEvents.size
+
+    private fun schedulePendingEditorUpdateDispatch() {
+        pendingEditorUpdateDispatchScheduled = true
+        val generation = ++pendingEditorUpdateDispatchGeneration
+        mainHandler.postDelayed({
+            if (generation != pendingEditorUpdateDispatchGeneration) return@postDelayed
+            pendingEditorUpdateDispatchScheduled = false
+            drainPendingEditorUpdateEvents()
+        }, EDITOR_UPDATE_EVENT_DEBOUNCE_MS)
+    }
+
+    private fun drainPendingEditorUpdateEvents() {
+        if (pendingEditorUpdateEvents.isEmpty()) return
+        val startedAt = System.nanoTime()
+        var drainedCount = 0
+        while (pendingEditorUpdateEvents.isNotEmpty()) {
+            val event = pendingEditorUpdateEvents.removeFirst()
+            if (event.editorId != richTextView.editorId) {
+                richTextView.editorEditText.recordImeTraceForTesting(
+                    "nativeViewEditorUpdateSkipped",
+                    "reason=staleEditor queuedEditor=${event.editorId} currentEditor=${richTextView.editorId}"
+                )
+                continue
+            }
+            dispatchEditorUpdate(event, emitToJS = true)
+            drainedCount += 1
+        }
+        richTextView.editorEditText.recordImeTraceForTesting(
+            "nativeViewEditorUpdateDrained",
+            "count=$drainedCount totalUs=${nanosToMicros(System.nanoTime() - startedAt)}"
+        )
+    }
+
+    private fun clearPendingEditorUpdateDispatchQueue(reason: String) {
+        if (pendingEditorUpdateEvents.isEmpty() && !pendingEditorUpdateDispatchScheduled) return
+        val clearedCount = pendingEditorUpdateEvents.size
+        pendingEditorUpdateEvents.clear()
+        pendingEditorUpdateDispatchScheduled = false
+        pendingEditorUpdateDispatchGeneration += 1
+        richTextView.editorEditText.recordImeTraceForTesting(
+            "nativeViewEditorUpdateQueueCleared",
+            "reason=$reason count=$clearedCount"
+        )
+    }
+
+    private fun dispatchEditorUpdate(event: PendingEditorUpdateEvent, emitToJS: Boolean) {
+        val updateJSON = event.updateJSON
+        val startedAt = System.nanoTime()
         noteDocumentVersionFromUpdateJSON(updateJSON)
+        val noteNanos = System.nanoTime() - startedAt
+        val toolbarStartedAt = System.nanoTime()
         NativeToolbarState.fromUpdateJson(updateJSON)?.let { state ->
             toolbarState = state
             keyboardToolbarView.applyState(state)
         }
+        val toolbarNanos = System.nanoTime() - toolbarStartedAt
+        val mentionStartedAt = System.nanoTime()
         refreshMentionQuery()
+        val mentionNanos = System.nanoTime() - mentionStartedAt
+        val retryStartedAt = System.nanoTime()
         clearPendingNativeActionRetryIfScopeChanged()
         schedulePendingPreflightWake()
         richTextView.refreshRemoteSelections()
+        val retryNanos = System.nanoTime() - retryStartedAt
         if (heightBehavior == EditorHeightBehavior.AUTO_GROW) {
             post {
                 requestLayout()
                 emitContentHeightIfNeeded(force = false)
             }
         }
-        if (isApplyingJSUpdate) return
-        val event = mapOf<String, Any>(
-            "updateJson" to updateJSON,
-            "editorId" to richTextView.editorId
+        val emitStartedAt = System.nanoTime()
+        if (emitToJS) {
+            val payload = mapOf<String, Any>(
+                "updateJson" to updateJSON,
+                "editorId" to event.editorId
+            )
+            onEditorUpdate(payload)
+        }
+        val totalNanos = System.nanoTime() - startedAt
+        richTextView.editorEditText.recordImeTraceForTesting(
+            "nativeViewEditorUpdateDispatch",
+            "emitToJS=$emitToJS jsonLength=${updateJSON.length} noteUs=${nanosToMicros(noteNanos)} toolbarUs=${nanosToMicros(toolbarNanos)} mentionUs=${nanosToMicros(mentionNanos)} retryUs=${nanosToMicros(retryNanos)} emitUs=${nanosToMicros(System.nanoTime() - emitStartedAt)} totalUs=${nanosToMicros(totalNanos)}"
         )
-        onEditorUpdate(event)
     }
 
     private fun installOutsideTapBlurHandlerIfNeeded() {
@@ -2082,10 +2178,13 @@ class NativeEditorExpoView(
         private const val TOOLBAR_FOCUS_PRESERVE_MS = 750L
         private const val OUTSIDE_TAP_BLUR_DELAY_MS = 100L
         private const val NATIVE_ACTION_RETRY_DELAY_MS = 16L
+        private const val EDITOR_UPDATE_EVENT_DEBOUNCE_MS = 64L
         private const val PENDING_UPDATE_RECOVERY_RETRY_DELAY_MS = 250L
         private const val MAX_NATIVE_ACTION_RETRY_ATTEMPTS = 3
         private const val MAX_PENDING_UPDATE_RETRY_ATTEMPTS = 5
         private const val LOG_TAG = "NativeEditor"
+
+        private fun nanosToMicros(nanos: Long): Long = nanos / 1_000L
     }
 
     private fun resolveActivity(context: Context): Activity? {

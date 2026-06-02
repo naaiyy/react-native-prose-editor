@@ -79,6 +79,8 @@ export function EditorDemoCard({
                 onFocus={onFocus}
                 onBlur={onBlur}
                 remoteSelections={remoteSelections}
+                autoCorrect={true}
+                autoCapitalize={'sentences'}
                 style={[styles.editor, heightBehavior === 'fixed' && styles.editorFixed]}
             />
         </View>

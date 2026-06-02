@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.18] - 2026-06-02
+
+### Changed
+
+- Android Rust render application is deferred after `finishComposingText` and composition commits so the `InputConnection` stays alive for Samsung's follow-up space or autocorrect commit.
+- Android editor update events are debounced and batch-drained, skipping stale-editor payloads.
+- Android IME context strips synthetic empty-block placeholders from surrounding text and reports sentence-caps at rendered line starts (including after list markers), with a Samsung Keyboard fallback for stale shift state.
+- Android composing text carries transient paragraph font styling so Samsung's pre-commit composition matches the surrounding text.
+- iOS tracks an authorized UTF-16 selection range to detect stale UIKit carets left behind by autocomplete/autocorrect and maps them through the replacement range before committing to Rust.
+- iOS inline predictions (marked text without `insertText`) are no longer committed to Rust.
+- Example app output panel updates are debounced during fast typing.
+
+### Fixed
+
+- Android `commitCorrection` followed by a matching `commitText` no longer double-inserts the corrected word.
+- Android `commitCorrection` during active composition defers the Rust insert until the IME's follow-up `commitText`, preventing a missing-word or double-word race.
+- Android `finishComposingText` no longer triggers an `InputConnection` recreation before Samsung's pending space commit arrives.
+- Android single-character delete-and-replace autocorrections, such as Gboard changing `i` to `I`, no longer lose the replacement commit.
+- Android skips redundant spannable re-application when the visible text already matches the incoming Rust render, avoiding a scroll-position reset.
+- Android refreshes IME state after block-split operations and corrects Samsung Keyboard composing text when the keyboard ignores line-boundary sentence caps.
+- iOS caret after autocomplete insertion, autocorrect replacement, and list-context mutations now lands after the replacement text instead of at the pre-mutation offset.
+- iOS `setMarkedText` flushes any pending native autocorrect before entering composition.
+
+### Tests
+
+- Expanded iOS regression coverage for stale-caret mapping, inline prediction isolation, list-context mutations, length-changing autocorrect, and marked-text flushing.
+- Expanded Android regression coverage for sentence-caps, placeholder stripping, Samsung keyboard composing, `InputConnection` lifecycle, correction commit deduplication, render deferral, optimistic render reuse, and surrounding-delete autocorrect handling.
+
 ## [0.5.17] - 2026-05-19
 
 ### Added

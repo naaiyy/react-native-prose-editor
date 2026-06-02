@@ -1237,6 +1237,185 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertEqual(view.textView.reconciliationCount, 0)
     }
 
+    func testNativeAutocompleteInsertionMapsStaleCaretBeforeNextTypedCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 6)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 6, length: 0),
+            with: "there"
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 6, length: 0))
+
+        view.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there!</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello there!")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 12, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 12)
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testNativeAutocompleteInsertionMapsStaleCaretOnScheduledCommit() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 6)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 6, length: 0),
+            with: "there"
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 6, length: 0))
+
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello there")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 11, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 11)
+
+        view.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello there!</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello there!")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 12, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 12)
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testNativeReplacementKeepsCollapsedStaleCaretCollapsedInsideReplacementRange() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>abcd </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 2)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 4),
+            with: "correct"
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 2, length: 0))
+
+        view.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>correct! </p>")
+        XCTAssertEqual(view.textView.textStorage.string, "correct! ")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 8, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 8)
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testInlinePredictionMutationIsNotCommittedToRust() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>autocom</p>")
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        setCollapsedSelection(in: view.textView, utf16Offset: 7)
+        flushMainQueue()
+
+        // Simulate iOS inline prediction: iOS mutates textStorage directly
+        // and sets markedTextRange without calling setMarkedText.
+        view.textView.setMarkedText("plete", selectedRange: NSRange(location: 5, length: 0))
+
+        flushMainQueue()
+
+        // The prediction text must NOT be committed to Rust — Rust state
+        // should still reflect "autocom", not "autocomplete".
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<p>autocom</p>",
+            "inline prediction text must not be committed to Rust"
+        )
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+
+        // Now the user types 'p' while prediction is active.
+        // This should commit only 'p' and discard the prediction.
+        view.textView.insertText("p")
+
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<p>autocomp</p>",
+            "only the typed character should be committed, not the prediction"
+        )
+        XCTAssertEqual(view.textView.textStorage.string, "autocomp")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testInlinePredictionDoesNotCauseReconciliation() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>hello wor</p>")
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        setCollapsedSelection(in: view.textView, utf16Offset: 9)
+        flushMainQueue()
+
+        // Simulate prediction appearing: textStorage gets "ld" appended as marked text.
+        view.textView.setMarkedText("ld", selectedRange: NSRange(location: 2, length: 0))
+
+        // Prediction must be treated as transient — no reconciliation.
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+
+        flushMainQueue()
+
+        // After a run loop cycle, still no reconciliation and Rust unchanged.
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+        XCTAssertEqual(
+            editorGetHtml(id: editorId),
+            "<p>hello wor</p>",
+            "prediction text must not leak into Rust state"
+        )
+    }
+
     func testFocusedNativeDeletionCorrectionCommitsToRustOnNextRunLoop() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }
@@ -1325,6 +1504,37 @@ final class RichTextEditorViewTests: XCTestCase {
 
         XCTAssertEqual(editorGetHtml(id: editorId), "<ul><li><p>the n</p></li></ul>")
         XCTAssertEqual(view.textView.textStorage.string, "the n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testPendingNativeTextMutationInListMapsStaleCaretBeforeNextTypedCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<ul><li><p>teh </p></li></ul>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 4, length: 0))
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<ul><li><p>the n</p></li></ul>")
+        XCTAssertEqual(view.textView.textStorage.string, "the n")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 5, length: 0))
         XCTAssertEqual(view.textView.reconciliationCount, 0)
     }
 
@@ -1449,6 +1659,46 @@ final class RichTextEditorViewTests: XCTestCase {
 
         XCTAssertEqual(editorGetHtml(id: editorId), "<p>the now</p>")
         XCTAssertEqual(view.textView.textStorage.string, "the now")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testNativeMutationUsesUIKitSelectionAlreadyMovedBeforeCapture() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>abcdef</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.beginEditing()
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "ABC"
+        )
+        setCollapsedSelection(in: view.textView, utf16Offset: 3)
+        view.textView.textStorage.endEditing()
+
+        flushMainQueue()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>ABCdef</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "ABCdef")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 3, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 3)
+
+        view.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>ABC!def</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "ABC!def")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 4, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 4)
         XCTAssertEqual(view.textView.reconciliationCount, 0)
     }
 
@@ -1683,6 +1933,43 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertEqual(view.textView.reconciliationCount, 0)
     }
 
+    func testLengthChangingAutocorrectAfterComplexEmojiGraphemesMapsStaleCaret() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        let prefix = "👨‍👩‍👧‍👦 🇦🇺 1️⃣ "
+        view.editorId = editorId
+        view.setContent(html: "<p>\(prefix)dont </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+
+        let correctionRange = (view.textView.textStorage.string as NSString).range(of: "dont")
+        XCTAssertNotEqual(correctionRange.location, NSNotFound)
+        view.textView.textStorage.replaceCharacters(in: correctionRange, with: "don't")
+        assertSelectedUtf16Range(
+            in: view.textView,
+            NSRange(location: prefix.utf16.count + 5, length: 0)
+        )
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>\(prefix)don't n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "\(prefix)don't n")
+        assertSelectedUtf16Range(
+            in: view.textView,
+            NSRange(location: view.textView.textStorage.length, length: 0)
+        )
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
     func testLengthChangingAutocorrectInvalidatesCachedPositionMappingBeforeSelectionCapture() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }
@@ -1710,6 +1997,102 @@ final class RichTextEditorViewTests: XCTestCase {
 
         XCTAssertEqual(editorGetHtml(id: editorId), "<p>don't n</p>")
         XCTAssertEqual(view.textView.textStorage.string, "don't n")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testLengthChangingAutocorrectMapsStaleCaretBeforeNextTypedCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>dont </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: view.textView.textStorage.length)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 3, length: 1),
+            with: "'t"
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 5, length: 0))
+
+        view.textView.insertText("n")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>don't n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "don't n")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 7, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 7)
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testLengthShrinkingAutocorrectMapsStaleCaretBeforeNextTypedCharacter() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>Hello  world</p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 7)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 5, length: 1),
+            with: ""
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 7, length: 0))
+
+        view.textView.insertText("!")
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>Hello !world</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "Hello !world")
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 7, length: 0))
+        assertCollapsedEditorSelection(in: editorId, scalarOffset: 7)
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+    }
+
+    func testSetMarkedTextFlushesPendingStaleNativeAutocorrectBeforeComposition() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+        view.setContent(html: "<p>teh </p>")
+        setCollapsedSelection(in: view.textView, utf16Offset: 4)
+        flushMainQueue()
+
+        XCTAssertTrue(view.textView.becomeFirstResponder())
+        view.textView.textStorage.replaceCharacters(
+            in: NSRange(location: 0, length: 3),
+            with: "the"
+        )
+        assertSelectedUtf16Range(in: view.textView, NSRange(location: 4, length: 0))
+
+        view.textView.setMarkedText("n", selectedRange: NSRange(location: 1, length: 0))
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the </p>")
+        XCTAssertEqual(view.textView.reconciliationCount, 0)
+
+        view.textView.unmarkText()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>the n</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "the n")
         XCTAssertEqual(view.textView.reconciliationCount, 0)
     }
 
@@ -5448,6 +5831,36 @@ final class RichTextEditorViewTests: XCTestCase {
         }
 
         textView.selectedTextRange = range
+    }
+
+    private func selectedUtf16Range(in textView: UITextView) -> NSRange? {
+        guard let range = textView.selectedTextRange else { return nil }
+        let location = textView.offset(from: textView.beginningOfDocument, to: range.start)
+        let length = textView.offset(from: range.start, to: range.end)
+        guard location >= 0, length >= 0 else { return nil }
+        return NSRange(location: location, length: length)
+    }
+
+    private func assertSelectedUtf16Range(
+        in textView: UITextView,
+        _ expectedRange: NSRange,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(selectedUtf16Range(in: textView), expectedRange, file: file, line: line)
+    }
+
+    private func assertCollapsedEditorSelection(
+        in editorId: UInt64,
+        scalarOffset: UInt32,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let selection = currentSelection(in: editorId)
+        let expectedDocPos = editorScalarToDoc(id: editorId, scalar: scalarOffset)
+        XCTAssertEqual(selection["type"] as? String, "text", file: file, line: line)
+        XCTAssertEqual((selection["anchor"] as? NSNumber)?.uint32Value, expectedDocPos, file: file, line: line)
+        XCTAssertEqual((selection["head"] as? NSNumber)?.uint32Value, expectedDocPos, file: file, line: line)
     }
 
     private func previousVisibleCharacterIndex(

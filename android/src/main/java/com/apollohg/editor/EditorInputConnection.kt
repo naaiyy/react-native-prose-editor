@@ -1,5 +1,8 @@
 package com.apollohg.editor
 
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.text.Selection
 import android.view.KeyEvent
 import android.view.inputmethod.BaseInputConnection
@@ -37,8 +40,28 @@ class EditorInputConnection(
     private val boundEditorId: Long,
     private val boundGeneration: Long
 ) : InputConnectionWrapper(baseConnection, true) {
+    private data class SurroundingDeleteRange(
+        val scalarStart: Int,
+        val scalarEnd: Int
+    )
+
 
     companion object {
+        private fun textTraceSummary(text: CharSequence?): String {
+            if (text == null) return "text=null"
+            val value = text.toString()
+            val codePoints = mutableListOf<String>()
+            var index = 0
+            while (index < value.length && codePoints.size < 4) {
+                val codePoint = Character.codePointAt(value, index)
+                codePoints.add(codePoint.toString(16))
+                index += Character.charCount(codePoint)
+            }
+            return "textLength=${value.length} codePoints=${codePoints.joinToString(",")}"
+        }
+
+        private const val DUPLICATE_CORRECTION_COMMIT_WINDOW_MS = 1_000L
+
         internal fun codePointsToUtf16Length(
             text: String,
             fromUtf16Offset: Int,
@@ -74,6 +97,21 @@ class EditorInputConnection(
         }
     }
 
+    private data class PendingDuplicateCorrectionCommit(
+        val text: String,
+        val deadlineMs: Long
+    )
+
+    private data class PendingCompositionCorrectionCommit(
+        val text: String,
+        val deadlineMs: Long,
+        val generation: Long
+    )
+
+    private var pendingDuplicateCorrectionCommit: PendingDuplicateCorrectionCommit? = null
+    private var pendingCompositionCorrectionCommit: PendingCompositionCorrectionCommit? = null
+    private var pendingCompositionCorrectionGeneration: Long = 0L
+
     /**
      * Called when the IME commits finalized text (single character, word,
      * autocomplete selection, etc.).
@@ -81,25 +119,45 @@ class EditorInputConnection(
      * Routes the text through Rust instead of directly inserting into the EditText.
      */
     override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("commitText")) return true
         if (!editorView.isEditable) return true
         if (editorView.isApplyingRustState) {
+            editorView.recordImeTraceForTesting(
+                "commitTextPassthrough",
+                "reason=applyingRust ${textTraceSummary(text)} cursor=$newCursorPosition"
+            )
             return super.commitText(text, newCursorPosition)
         }
         if (editorView.editorId == 0L) {
+            editorView.recordImeTraceForTesting(
+                "commitTextPassthrough",
+                "reason=noEditor ${textTraceSummary(text)} cursor=$newCursorPosition"
+            )
             return super.commitText(text, newCursorPosition)
         }
 
         editorView.recordImeTraceForTesting(
             "commitText",
-            "textLength=${text?.length ?: 0} cursor=$newCursorPosition"
+            "${textTraceSummary(text)} cursor=$newCursorPosition"
         )
-        commitTextToEditor(text?.toString(), newCursorPosition)
+        val committedText = text?.toString()
+        if (consumePendingCompositionCorrectionCommitIfNeeded(committedText, newCursorPosition)) {
+            return true
+        }
+        applyPendingCompositionCorrectionCommitIfNeeded("commitTextBeforePlain")
+        if (consumePendingDuplicateCorrectionCommitIfNeeded(committedText)) {
+            editorView.recordImeTraceForTesting(
+                "commitTextDuplicateCorrectionIgnored",
+                "textLength=${committedText?.length ?: 0}"
+            )
+            return true
+        }
+        commitTextToEditor(committedText, newCursorPosition)
         return true
     }
 
     override fun commitCompletion(text: CompletionInfo?): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("commitCompletion")) return true
         if (!editorView.isEditable) return true
         if (editorView.isApplyingRustState) {
             return super.commitCompletion(text)
@@ -109,14 +167,41 @@ class EditorInputConnection(
         }
         editorView.recordImeTraceForTesting(
             "commitCompletion",
-            "textLength=${text?.text?.length ?: 0}"
+            textTraceSummary(text?.text)
         )
         commitTextToEditor(text?.text?.toString(), 1)
         return true
     }
 
+    override fun getCursorCapsMode(reqModes: Int): Int {
+        val baseCapsMode = super.getCursorCapsMode(reqModes)
+        if (!isCurrentInputSession()) return baseCapsMode
+        val capsMode = editorView.cursorCapsModeForEditor(reqModes, baseCapsMode)
+        if (capsMode != baseCapsMode) {
+            editorView.recordImeTraceForTesting(
+                "getCursorCapsModeAdjusted",
+                "req=$reqModes base=$baseCapsMode caps=$capsMode"
+            )
+        }
+        return capsMode
+    }
+
+    override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence? {
+        if (!isCurrentInputSession()) return super.getTextBeforeCursor(n, flags)
+        val textBeforeCursor = editorView.textBeforeCursorForImeContextForEditor(n, flags)
+            ?: return super.getTextBeforeCursor(n, flags)
+        val raw = super.getTextBeforeCursor(n, flags)
+        if (raw?.toString() != textBeforeCursor.toString()) {
+            editorView.recordImeTraceForTesting(
+                "getTextBeforeCursorAdjusted",
+                "requested=$n rawLength=${raw?.length ?: -1} adjustedLength=${textBeforeCursor.length}"
+            )
+        }
+        return textBeforeCursor
+    }
+
     override fun commitCorrection(correctionInfo: CorrectionInfo?): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("commitCorrection")) return true
         if (!editorView.isEditable) return true
         if (editorView.isApplyingRustState) {
             return super.commitCorrection(correctionInfo)
@@ -135,7 +220,7 @@ class EditorInputConnection(
                 "commitCorrectionComposition",
                 "newLength=${newText.length}"
             )
-            commitTextToEditor(newText, 1)
+            rememberPendingCompositionCorrectionCommit(newText)
             return true
         }
         if (consumeInvalidatedCompositionReplacementRangeAndRestore()) {
@@ -155,33 +240,151 @@ class EditorInputConnection(
             "commitCorrectionResult",
             "applied=$applied"
         )
+        if (applied) {
+            rememberPendingDuplicateCorrectionCommit(newText)
+        }
+        return true
+    }
+
+    private fun rememberPendingDuplicateCorrectionCommit(text: String) {
+        pendingDuplicateCorrectionCommit = PendingDuplicateCorrectionCommit(
+            text = text,
+            deadlineMs = SystemClock.uptimeMillis() + DUPLICATE_CORRECTION_COMMIT_WINDOW_MS
+        )
+    }
+
+    private fun consumePendingDuplicateCorrectionCommitIfNeeded(text: String?): Boolean {
+        val pending = pendingDuplicateCorrectionCommit ?: return false
+        pendingDuplicateCorrectionCommit = null
+        if (text == null) return false
+        if (SystemClock.uptimeMillis() > pending.deadlineMs) return false
+        return text == pending.text
+    }
+
+    private fun rememberPendingCompositionCorrectionCommit(text: String) {
+        val generation = ++pendingCompositionCorrectionGeneration
+        pendingCompositionCorrectionCommit = PendingCompositionCorrectionCommit(
+            text = text,
+            deadlineMs = SystemClock.uptimeMillis() + DUPLICATE_CORRECTION_COMMIT_WINDOW_MS,
+            generation = generation
+        )
+        Handler(Looper.getMainLooper()).post {
+            val pending = pendingCompositionCorrectionCommit ?: return@post
+            if (pending.generation != generation) return@post
+            applyPendingCompositionCorrectionCommitIfNeeded("commitCorrectionDeferred")
+        }
+    }
+
+    private fun consumePendingCompositionCorrectionCommitIfNeeded(
+        text: String?,
+        newCursorPosition: Int
+    ): Boolean {
+        val pending = pendingCompositionCorrectionCommit ?: return false
+        if (SystemClock.uptimeMillis() > pending.deadlineMs) {
+            pendingCompositionCorrectionCommit = null
+            return false
+        }
+        if (text != pending.text) return false
+        pendingCompositionCorrectionCommit = null
+        pendingCompositionCorrectionGeneration += 1L
+        editorView.recordImeTraceForTesting(
+            "commitTextConsumesPendingCorrection",
+            "textLength=${text.length}"
+        )
+        commitTextToEditor(text, newCursorPosition)
+        return true
+    }
+
+    private fun applyPendingCompositionCorrectionCommitIfNeeded(source: String): Boolean {
+        val pending = pendingCompositionCorrectionCommit ?: return false
+        pendingCompositionCorrectionCommit = null
+        pendingCompositionCorrectionGeneration += 1L
+        if (!isCurrentInputSessionFor("applyPendingCompositionCorrection")) return false
+        if (!editorView.isEditable || editorView.editorId == 0L) return false
+        editorView.recordImeTraceForTesting(
+            "applyPendingCompositionCorrection",
+            "source=$source textLength=${pending.text.length}"
+        )
+        commitTextToEditor(pending.text, 1)
         return true
     }
 
     private fun commitTextToEditor(committedText: String?, newCursorPosition: Int) {
-        val replacementRange = trackedCompositionReplacementRange()
+        val startedAt = System.nanoTime()
+        val trackedReplacementRange = trackedCompositionReplacementRange()
+        val rawComposingSpanRange = currentComposingSpanRawRange()
+        val currentAuthorizedComposingSpanRange = currentComposingSpanRange()
+        val visibleReplacementRange = rawComposingSpanRange ?: trackedReplacementRange
+        val replacementRange = trackedReplacementRange?.let { range ->
+            if (range.first == range.second) {
+                currentAuthorizedComposingSpanRange ?: range
+            } else {
+                range
+            }
+        }
         if (replacementRange != null) {
+            editorView.recordImeTraceForTesting(
+                "commitTextRoute",
+                "route=composition replacement=${replacementRange.first}..${replacementRange.second} visible=${visibleReplacementRange?.first}..${visibleReplacementRange?.second} textLength=${committedText?.length ?: 0}"
+            )
             clearCompositionTracking()
             editorView.runWithTransientInputMutationGuard {
                 super.finishComposingText()
             }
             if (committedText != null) {
-                editorView.handleCompositionCommit(
-                    committedText,
-                    replacementRange.first,
-                    replacementRange.second,
-                    newCursorPosition
-                )
+                var didCommitAlreadyVisibleMutation = false
+                if (
+                    trackedReplacementRange?.first == trackedReplacementRange?.second &&
+                    rawComposingSpanRange == null
+                ) {
+                    editorView.runWithDeferredRustUpdateApplication {
+                        didCommitAlreadyVisibleMutation =
+                            editorView.commitAlreadyVisibleCompositionMutationForPendingImeOperationForEditor(
+                                committedText,
+                                newCursorPosition
+                            )
+                    }
+                }
+                if (!didCommitAlreadyVisibleMutation) {
+                    visibleReplacementRange?.let { visibleRange ->
+                        editorView.applyVisibleCompositionCommitForPendingImeOperationForEditor(
+                            committedText,
+                            visibleRange.first,
+                            visibleRange.second,
+                            newCursorPosition
+                        )
+                    }
+                    editorView.runWithDeferredRustUpdateApplication {
+                        editorView.handleCompositionCommit(
+                            committedText,
+                            replacementRange.first,
+                            replacementRange.second,
+                            newCursorPosition
+                        )
+                    }
+                }
             } else {
                 editorView.restoreAuthorizedTextIfNeeded()
             }
         } else {
             if (consumeInvalidatedCompositionReplacementRangeAndRestore()) {
+                editorView.recordImeTraceForTesting(
+                    "commitTextRoute",
+                    "route=restoreInvalidComposition textLength=${committedText?.length ?: 0}"
+                )
                 return
             }
             clearCompositionTracking()
+            editorView.recordImeTraceForTesting(
+                "commitTextRoute",
+                "route=plain textLength=${committedText?.length ?: 0}"
+            )
             committedText?.let { editorView.handleTextCommit(it, newCursorPosition) }
         }
+        editorView.recordImeTraceForTesting(
+            "commitTextRouteDone",
+            "textLength=${committedText?.length ?: 0} totalUs=${nanosToMicros(System.nanoTime() - startedAt)}"
+        )
     }
 
     /**
@@ -193,11 +396,15 @@ class EditorInputConnection(
      * @param afterLength Number of UTF-16 code units to delete after the cursor.
      */
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("deleteSurroundingText")) return true
         if (!editorView.isEditable) return true
         if (editorView.isApplyingRustState) {
             return super.deleteSurroundingText(beforeLength, afterLength)
         }
+        editorView.recordImeTraceForTesting(
+            "deleteSurroundingText",
+            "before=$beforeLength after=$afterLength"
+        )
         if (
             editorView.hasInvalidatedCompositionReplacementRangeForEditor() &&
             isNoOpSurroundingDelete(beforeLength, afterLength)
@@ -224,16 +431,27 @@ class EditorInputConnection(
             refreshComposingTextFromEditable()
             return result || didFallbackDelete
         }
+        if (shouldDeferPlainSurroundingDelete(beforeLength, afterLength)) {
+            return performDeferredPlainSurroundingDelete(
+                beforeLength = beforeLength,
+                afterLength = afterLength,
+                deleteInCodePoints = false
+            )
+        }
         editorView.handleDelete(beforeLength, afterLength)
         return true
     }
 
     override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("deleteSurroundingTextInCodePoints")) return true
         if (!editorView.isEditable) return true
         if (editorView.isApplyingRustState) {
             return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
         }
+        editorView.recordImeTraceForTesting(
+            "deleteSurroundingTextInCodePoints",
+            "before=$beforeLength after=$afterLength"
+        )
         if (
             editorView.hasInvalidatedCompositionReplacementRangeForEditor() &&
             isNoOpSurroundingDelete(beforeLength, afterLength)
@@ -263,6 +481,13 @@ class EditorInputConnection(
             refreshComposingTextFromEditable()
             return result || didFallbackDelete
         }
+        if (shouldDeferPlainSurroundingDelete(beforeLength, afterLength)) {
+            return performDeferredPlainSurroundingDelete(
+                beforeLength = beforeLength,
+                afterLength = afterLength,
+                deleteInCodePoints = true
+            )
+        }
 
         val currentText = editorView.text?.toString().orEmpty()
         val cursor = editorView.selectionStart.coerceAtLeast(0)
@@ -282,6 +507,114 @@ class EditorInputConnection(
         return true
     }
 
+    private fun shouldDeferPlainSurroundingDelete(beforeLength: Int, afterLength: Int): Boolean =
+        beforeLength.coerceAtLeast(0) + afterLength.coerceAtLeast(0) > 0
+
+    private fun performDeferredPlainSurroundingDelete(
+        beforeLength: Int,
+        afterLength: Int,
+        deleteInCodePoints: Boolean
+    ): Boolean {
+        val beforeText = editorView.text?.toString() ?: return true
+        val beforeUtf16Length: Int
+        val afterUtf16Length: Int
+        if (deleteInCodePoints) {
+            val cursor = editorView.selectionStart.coerceAtLeast(0)
+            beforeUtf16Length = codePointsToUtf16Length(
+                text = beforeText,
+                fromUtf16Offset = cursor,
+                codePointCount = beforeLength,
+                forward = false
+            )
+            afterUtf16Length = codePointsToUtf16Length(
+                text = beforeText,
+                fromUtf16Offset = editorView.selectionEnd.coerceAtLeast(cursor),
+                codePointCount = afterLength,
+                forward = true
+            )
+        } else {
+            beforeUtf16Length = beforeLength
+            afterUtf16Length = afterLength
+        }
+        val deleteRange = surroundingDeleteRange(
+            text = beforeText,
+            beforeUtf16Length = beforeUtf16Length,
+            afterUtf16Length = afterUtf16Length
+        )
+
+        editorView.recordImeTraceForTesting(
+            "deferredSurroundingDeleteBegin",
+            "before=$beforeLength after=$afterLength codePoints=$deleteInCodePoints utf16=$beforeUtf16Length,$afterUtf16Length scalar=${deleteRange?.scalarStart}..${deleteRange?.scalarEnd}"
+        )
+
+        var didFallbackDelete = false
+        val result = editorView.runWithTransientInputMutationGuard {
+            val baseResult = if (deleteInCodePoints) {
+                super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+            } else {
+                super.deleteSurroundingText(beforeLength, afterLength)
+            }
+            if (
+                beforeText == editorView.text?.toString() &&
+                (beforeLength > 0 || afterLength > 0)
+            ) {
+                didFallbackDelete = if (deleteInCodePoints) {
+                    deleteTransientTextAroundSelectionInCodePoints(beforeLength, afterLength)
+                } else {
+                    deleteTransientTextAroundSelection(beforeLength, afterLength)
+                }
+            }
+            baseResult
+        }
+        val didDeleteVisibleText = editorView.text?.toString() != beforeText
+        if (didDeleteVisibleText && deleteRange != null) {
+            editorView.authorizeCurrentVisibleTextForPendingImeOperationForEditor()
+            editorView.runWithDeferredRustUpdateApplication {
+                editorView.deleteScalarRangeForPendingImeOperationForEditor(
+                    deleteRange.scalarStart,
+                    deleteRange.scalarEnd
+                )
+            }
+        }
+        editorView.recordImeTraceForTesting(
+            "deferredSurroundingDeleteEnd",
+            "result=$result fallback=$didFallbackDelete visibleDeleted=$didDeleteVisibleText visibleLength=${editorView.text?.length ?: -1}"
+        )
+        return result || didFallbackDelete
+    }
+
+    private fun surroundingDeleteRange(
+        text: String,
+        beforeUtf16Length: Int,
+        afterUtf16Length: Int
+    ): SurroundingDeleteRange? {
+        val rawStart = editorView.selectionStart
+        val rawEnd = editorView.selectionEnd
+        if (rawStart < 0 || rawEnd < 0) return null
+        val selectionStart = rawStart.coerceIn(0, text.length)
+        val selectionEnd = rawEnd.coerceIn(0, text.length)
+        val normalizedStart = minOf(selectionStart, selectionEnd)
+        val normalizedEnd = maxOf(selectionStart, selectionEnd)
+        val rawDeleteStart: Int
+        val rawDeleteEnd: Int
+        if (normalizedStart != normalizedEnd) {
+            rawDeleteStart = normalizedStart
+            rawDeleteEnd = normalizedEnd
+        } else {
+            rawDeleteStart = maxOf(0, normalizedStart - beforeUtf16Length.coerceAtLeast(0))
+            rawDeleteEnd = minOf(text.length, normalizedEnd + afterUtf16Length.coerceAtLeast(0))
+        }
+        val (deleteStart, deleteEnd) = PositionBridge.snapRangeToScalarBoundaries(
+            rawDeleteStart,
+            rawDeleteEnd,
+            text
+        )
+        val scalarStart = PositionBridge.utf16ToScalar(deleteStart, text)
+        val scalarEnd = PositionBridge.utf16ToScalar(deleteEnd, text)
+        if (scalarStart >= scalarEnd) return null
+        return SurroundingDeleteRange(scalarStart, scalarEnd)
+    }
+
     /**
      * Called when the IME sets composing (in-progress) text for CJK/swipe input.
      *
@@ -290,25 +623,37 @@ class EditorInputConnection(
      * to Rust during composition — only when the IME commits or finishes it.
      */
     override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("setComposingText")) return true
         if (!editorView.isEditable) return true
         if (editorView.editorId == 0L) return super.setComposingText(text, newCursorPosition)
         if (editorView.hasInvalidatedCompositionReplacementRangeForEditor()) {
             return finishStaleComposingUpdateAfterInvalidation()
         }
         captureCompositionReplacementRangeIfNeeded()
+        val composingText = text?.toString()
+        val adjustedComposingText =
+            editorView.samsungSentenceCapsComposingTextForEditor(composingText)
+        val textForBaseConnection = if (adjustedComposingText != composingText) {
+            adjustedComposingText
+        } else {
+            text
+        }
         editorView.recordImeTraceForTesting(
             "setComposingText",
-            "textLength=${text?.length ?: 0} cursor=$newCursorPosition"
+            "${textTraceSummary(text)} cursor=$newCursorPosition adjusted=${adjustedComposingText != composingText}"
         )
-        editorView.setComposingTextForEditor(text?.toString())
+        editorView.setComposingTextForEditor(adjustedComposingText)
         return editorView.runWithTransientInputMutationGuard {
-            super.setComposingText(text, newCursorPosition)
+            val result = super.setComposingText(textForBaseConnection, newCursorPosition)
+            if (result) {
+                editorView.applyTransientComposingTextStyleForEditor()
+            }
+            result
         }
     }
 
     override fun setComposingRegion(start: Int, end: Int): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("setComposingRegion")) return true
         if (!editorView.isEditable) return true
         if (editorView.editorId == 0L) return super.setComposingRegion(start, end)
         if (editorView.hasInvalidatedCompositionReplacementRangeForEditor()) {
@@ -322,12 +667,16 @@ class EditorInputConnection(
             "range=$start..$end"
         )
         return editorView.runWithTransientInputMutationGuard {
-            super.setComposingRegion(start, end)
+            val result = super.setComposingRegion(start, end)
+            if (result) {
+                editorView.applyTransientComposingTextStyleForEditor()
+            }
+            result
         }
     }
 
     override fun setSelection(start: Int, end: Int): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("setSelection")) return true
         if (!editorView.isEditable) {
             consumeInvalidatedCompositionReplacementRangeAndRestore()
             return true
@@ -352,17 +701,18 @@ class EditorInputConnection(
      * so it can capture the result and send it to Rust.
      */
     override fun finishComposingText(): Boolean {
+        if (applyPendingCompositionCorrectionCommitIfNeeded("finishComposingText")) return true
         return finishComposingTextInternal(blockWhenCompositionWasCancelled = false)
     }
 
     internal fun flushPendingCompositionForExternalMutation(): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("flushPendingComposition")) return true
         if (!hasPendingComposition()) return true
         return finishComposingTextInternal(blockWhenCompositionWasCancelled = true)
     }
 
     internal fun hasPendingComposition(): Boolean {
-        if (!isCurrentInputSession()) return false
+        if (!isCurrentInputSessionFor("hasPendingComposition")) return false
         if (trackedCompositionReplacementRange() != null) return true
         val editable = editorView.text ?: return false
         val start = BaseInputConnection.getComposingSpanStart(editable)
@@ -371,12 +721,12 @@ class EditorInputConnection(
     }
 
     internal fun refreshComposingTextFromEditableForEditor() {
-        if (!isCurrentInputSession()) return
+        if (!isCurrentInputSessionFor("refreshComposingText")) return
         refreshComposingTextFromEditable()
     }
 
     internal fun clearCompositionTrackingForEditor() {
-        if (!isCurrentInputSession()) return
+        if (!isCurrentInputSessionFor("clearCompositionTracking")) return
         clearCompositionTracking()
     }
 
@@ -392,7 +742,7 @@ class EditorInputConnection(
         }
 
     private fun finishComposingTextInternal(blockWhenCompositionWasCancelled: Boolean): Boolean {
-        if (!isCurrentInputSession()) return true
+        if (!isCurrentInputSessionFor("finishComposingText")) return true
         if (!editorView.isEditable) {
             clearCompositionTracking()
             editorView.restoreAuthorizedTextIfNeeded()
@@ -425,11 +775,13 @@ class EditorInputConnection(
             replacementRange != null &&
             (!composed.isNullOrEmpty() || replacementRange.first != replacementRange.second)
         ) {
-            editorView.handleCompositionCommit(
-                composed.orEmpty(),
-                replacementRange.first,
-                replacementRange.second
-            )
+            editorView.runWithDeferredRustUpdateApplication {
+                editorView.handleCompositionCommit(
+                    composed.orEmpty(),
+                    replacementRange.first,
+                    replacementRange.second
+                )
+            }
             return true
         } else if (replacementRange != null) {
             editorView.restoreAuthorizedTextIfNeeded()
@@ -477,6 +829,19 @@ class EditorInputConnection(
 
     private fun isCurrentInputSession(): Boolean =
         editorView.isInputConnectionCurrentForEditor(boundEditorId, boundGeneration)
+
+    private fun nanosToMicros(nanos: Long): Long = nanos / 1_000L
+
+    private fun isCurrentInputSessionFor(event: String): Boolean {
+        val isCurrent = isCurrentInputSession()
+        if (!isCurrent) {
+            editorView.recordImeTraceForTesting(
+                "${event}Ignored",
+                "reason=stale boundEditor=$boundEditorId boundGen=$boundGeneration"
+            )
+        }
+        return isCurrent
+    }
 
     private fun refreshComposingTextFromEditable() {
         val editable = editorView.text ?: return
@@ -573,6 +938,16 @@ class EditorInputConnection(
             return null
         }
         return editorView.authorizedUtf16Range(start, end)
+    }
+
+    private fun currentComposingSpanRawRange(): Pair<Int, Int>? {
+        val editable = editorView.text ?: return null
+        val start = BaseInputConnection.getComposingSpanStart(editable)
+        val end = BaseInputConnection.getComposingSpanEnd(editable)
+        if (start < 0 || end < 0 || start > end || end > editable.length) {
+            return null
+        }
+        return start to end
     }
 
     /**

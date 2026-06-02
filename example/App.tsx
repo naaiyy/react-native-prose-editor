@@ -59,6 +59,7 @@ const DEFAULT_COLLABORATION_ROOM_ID = 'example-room';
 const MAX_INSERT_IMAGE_DIMENSION = 1024;
 const MAX_INSERT_IMAGE_BASE64_LENGTH = 350_000;
 const INSERT_IMAGE_COMPRESSION_STEPS = [0.72, 0.58, 0.45] as const;
+const OUTPUT_PANEL_UPDATE_DEBOUNCE_MS = 120;
 
 function buildCollaborationSocketUrl(endpoint: string, documentId: string): string {
     const trimmedEndpoint = endpoint.trim();
@@ -122,6 +123,11 @@ function AppScreen() {
     const [baseFontSize, setBaseFontSize] = useState(17);
     const [html, setHtml] = useState(INITIAL_CONTENT);
     const [contentJson, setContentJson] = useState<DocumentJSON | null>(null);
+    const outputPanelUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingOutputPanelUpdateRef = useRef<{
+        html?: string;
+        contentJson?: DocumentJSON | null;
+    }>({});
     const [heightBehavior, setHeightBehavior] =
         useState<NativeRichTextEditorHeightBehavior>('autoGrow');
     const [toolbarPlacement, setToolbarPlacement] =
@@ -190,6 +196,16 @@ function AppScreen() {
             setMentionSelectEvent(null);
         }
     }, [mentionsEnabled]);
+
+    useEffect(
+        () => () => {
+            if (outputPanelUpdateTimerRef.current != null) {
+                clearTimeout(outputPanelUpdateTimerRef.current);
+                outputPanelUpdateTimerRef.current = null;
+            }
+        },
+        []
+    );
 
     const theme = useMemo(() => {
         const fontSize = baseFontSize || 17;
@@ -317,12 +333,44 @@ function AppScreen() {
         }
     };
 
-    const handleContentChangeJSON = (json: DocumentJSON) => {
-        setContentJson(json);
-        if (collaborationEnabled) {
-            collaboration.editorBindings.onContentChangeJSON(json);
+    const flushOutputPanelUpdate = React.useCallback(() => {
+        outputPanelUpdateTimerRef.current = null;
+        const pendingUpdate = pendingOutputPanelUpdateRef.current;
+        pendingOutputPanelUpdateRef.current = {};
+        if (Object.prototype.hasOwnProperty.call(pendingUpdate, 'html')) {
+            setHtml(pendingUpdate.html ?? INITIAL_CONTENT);
         }
-    };
+        if (Object.prototype.hasOwnProperty.call(pendingUpdate, 'contentJson')) {
+            setContentJson(pendingUpdate.contentJson ?? null);
+        }
+    }, []);
+
+    const scheduleOutputPanelUpdate = React.useCallback(() => {
+        if (outputPanelUpdateTimerRef.current != null) return;
+        outputPanelUpdateTimerRef.current = setTimeout(
+            flushOutputPanelUpdate,
+            OUTPUT_PANEL_UPDATE_DEBOUNCE_MS
+        );
+    }, [flushOutputPanelUpdate]);
+
+    const handleContentChange = React.useCallback(
+        (nextHtml: string) => {
+            pendingOutputPanelUpdateRef.current.html = nextHtml;
+            scheduleOutputPanelUpdate();
+        },
+        [scheduleOutputPanelUpdate]
+    );
+
+    const handleContentChangeJSON = React.useCallback(
+        (json: DocumentJSON) => {
+            pendingOutputPanelUpdateRef.current.contentJson = json;
+            scheduleOutputPanelUpdate();
+            if (collaborationEnabled) {
+                collaboration.editorBindings.onContentChangeJSON(json);
+            }
+        },
+        [collaboration.editorBindings, collaborationEnabled, scheduleOutputPanelUpdate]
+    );
 
     const handleSelectionChange = (selection: Selection) => {
         if (collaborationEnabled) {
@@ -593,7 +641,7 @@ function AppScreen() {
                         onRequestImage={openImageRequest}
                         heightBehavior={heightBehavior}
                         toolbarPlacement={toolbarPlacement}
-                        onContentChange={setHtml}
+                        onContentChange={handleContentChange}
                         onContentChangeJSON={handleContentChangeJSON}
                         onSelectionChange={handleSelectionChange}
                         onFocus={handleEditorFocus}

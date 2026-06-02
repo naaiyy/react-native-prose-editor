@@ -827,6 +827,9 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let authorizedText: String
         let selectionAnchor: UInt32?
         let selectionHead: UInt32?
+        let authorizedSelectionUtf16Range: NSRange?
+        let rawSelectionUtf16Range: NSRange?
+        let selectionRevision: UInt64
         let capturedWhileFirstResponder: Bool
         let capturedWhileEditable: Bool
         let capturedAfterBlur: Bool
@@ -991,6 +994,9 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     private var nativeTextMutationAfterBlurDeadline: TimeInterval?
     private var nativeTextMutationAfterBlurGeneration: UInt64?
     private let nativeTextMutationAfterBlurGraceInterval: TimeInterval = 1.0
+    /// Last selection known to match `lastAuthorizedText`, stored in that text's UTF-16 coordinates.
+    private var lastAuthorizedSelectedUtf16Range: NSRange?
+    private var selectionRevision: UInt64 = 0
     private var desiredInputTraitState = InputTraitState()
     private var appliedInputTraitState = InputTraitState()
     private var pendingInputTraitChange = PendingInputTraitChange()
@@ -1399,6 +1405,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                 self?.ensureInternalTextViewDelegate()
             }
             _ = normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded()
+            recordAuthorizedSelectionIfPossible()
             refreshTypingAttributesForSelection()
         }
         return didBecomeFirstResponder
@@ -1459,6 +1466,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let adjustedRange = NSRange(location: 0, length: 0)
         guard currentRange != adjustedRange else { return false }
         selectedRange = adjustedRange
+        noteSelectionDidChange()
         return true
     }
 
@@ -1494,6 +1502,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
         _ = becomeFirstResponder()
         selectedTextRange = textRange
+        noteSelectionDidChange()
         refreshNativeSelectionChromeVisibility()
         onSelectionOrContentMayChange?()
         scheduleSelectionSync()
@@ -1506,6 +1515,30 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let length = offset(from: range.start, to: range.end)
         guard location >= 0, length >= 0 else { return nil }
         return NSRange(location: location, length: length)
+    }
+
+    private func noteSelectionDidChange() {
+        selectionRevision &+= 1
+    }
+
+    private func recordAuthorizedSelectionIfPossible() {
+        guard editorId != 0 else {
+            lastAuthorizedSelectedUtf16Range = nil
+            return
+        }
+        let currentText = textStorage.string
+        guard currentText.utf16.count == lastAuthorizedTextStorage.length,
+              currentText == lastAuthorizedText
+        else {
+            return
+        }
+        lastAuthorizedSelectedUtf16Range = selectedUtf16Range()
+    }
+
+    private func scalarRange(forUtf16Range range: NSRange) -> (from: UInt32, to: UInt32) {
+        let start = PositionBridge.utf16OffsetToScalar(range.location, in: self)
+        let end = PositionBridge.utf16OffsetToScalar(NSMaxRange(range), in: self)
+        return (from: min(start, end), to: max(start, end))
     }
 
     private func scheduleDeferredImageSelection(for range: NSRange) {
@@ -2492,6 +2525,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView === self else { return }
         ensureInternalTextViewDelegate()
+        noteSelectionDidChange()
         guard !isApplyingRustState,
               !isComposing,
               !nativeTextMutationCommitScheduled,
@@ -2502,6 +2536,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         if normalizeSelectionForEmptyBlockAutocapitalizationIfNeeded() {
             return
         }
+        recordAuthorizedSelectionIfPossible()
         refreshNativeSelectionChromeVisibility()
         onSelectionOrContentMayChange?()
         scheduleSelectionSync()
@@ -2538,6 +2573,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         }
 
         selectedTextRange = textRange(from: start, to: end)
+        noteSelectionDidChange()
         refreshNativeSelectionChromeVisibility()
         onSelectionOrContentMayChange?()
         scheduleSelectionSync()
@@ -2710,6 +2746,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         )
 
         editorSetSelectionScalar(id: editorId, scalarAnchor: anchor, scalarHead: head)
+        recordAuthorizedSelectionIfPossible()
         refreshTypingAttributesForSelection()
         editorDelegate?.editorTextView(self, selectionDidChange: docAnchor, head: docHead)
     }
@@ -3339,9 +3376,17 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             with: NSRange(location: prefix, length: replacementLength)
         )
 
-        let selectedScalarRange = selectedTextRange.map {
-            PositionBridge.textRangeToScalarRange($0, in: self)
-        }
+        let rawSelectionUtf16Range = selectedUtf16Range()
+        let authorizedSelectionUtf16Range = lastAuthorizedSelectedUtf16Range
+        let targetSelectionUtf16Range = targetSelectionUtf16RangeForNativeTextMutation(
+            rawSelectionUtf16Range: rawSelectionUtf16Range,
+            authorizedSelectionUtf16Range: authorizedSelectionUtf16Range,
+            replacementStartUtf16: prefix,
+            authorizedEndUtf16: authorizedEnd,
+            currentEndUtf16: currentEnd,
+            currentTextUtf16Length: current.length
+        )
+        let selectedScalarRange = targetSelectionUtf16Range.map(scalarRange(forUtf16Range:))
         let capturedAfterBlur = canAdoptNativeTextMutationAfterBlur()
 
         return NativeTextMutation(
@@ -3352,6 +3397,9 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             authorizedText: authorizedText,
             selectionAnchor: selectedScalarRange?.from,
             selectionHead: selectedScalarRange?.to,
+            authorizedSelectionUtf16Range: authorizedSelectionUtf16Range,
+            rawSelectionUtf16Range: rawSelectionUtf16Range,
+            selectionRevision: selectionRevision,
             capturedWhileFirstResponder: isFirstResponder || capturedAfterBlur,
             capturedWhileEditable: isEditable,
             capturedAfterBlur: capturedAfterBlur,
@@ -3362,9 +3410,37 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     private func nativeTextMutationWithCurrentSelection(
         _ mutation: NativeTextMutation
     ) -> NativeTextMutation {
-        let selectedScalarRange = selectedTextRange.map {
-            PositionBridge.textRangeToScalarRange($0, in: self)
+        let currentSelectionUtf16Range = selectedUtf16Range()
+        let didSelectionChangeAfterCapture = selectionRevision != mutation.selectionRevision
+        let didCurrentRangeMoveAfterCapture: Bool
+        if let currentSelectionUtf16Range,
+           let rawSelectionUtf16Range = mutation.rawSelectionUtf16Range {
+            didCurrentRangeMoveAfterCapture = !NSEqualRanges(
+                currentSelectionUtf16Range,
+                rawSelectionUtf16Range
+            )
+        } else {
+            didCurrentRangeMoveAfterCapture = false
         }
+        let currentSelectionDiffersFromAuthorized: Bool
+        if let currentSelectionUtf16Range,
+           let authorizedSelectionUtf16Range = mutation.authorizedSelectionUtf16Range {
+            currentSelectionDiffersFromAuthorized = !NSEqualRanges(
+                currentSelectionUtf16Range,
+                authorizedSelectionUtf16Range
+            )
+        } else {
+            currentSelectionDiffersFromAuthorized = currentSelectionUtf16Range != nil
+        }
+        let shouldUseCurrentSelection = currentSelectionUtf16Range != nil
+            && (
+                (didSelectionChangeAfterCapture && currentSelectionDiffersFromAuthorized)
+                    || didCurrentRangeMoveAfterCapture
+                    || mutation.rawSelectionUtf16Range == nil
+            )
+        let selectedScalarRange = shouldUseCurrentSelection
+            ? currentSelectionUtf16Range.map(scalarRange(forUtf16Range:))
+            : nil
         return NativeTextMutation(
             from: mutation.from,
             to: mutation.to,
@@ -3373,11 +3449,116 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             authorizedText: mutation.authorizedText,
             selectionAnchor: selectedScalarRange?.from ?? mutation.selectionAnchor,
             selectionHead: selectedScalarRange?.to ?? mutation.selectionHead,
+            authorizedSelectionUtf16Range: mutation.authorizedSelectionUtf16Range,
+            rawSelectionUtf16Range: shouldUseCurrentSelection
+                ? currentSelectionUtf16Range
+                : mutation.rawSelectionUtf16Range,
+            selectionRevision: shouldUseCurrentSelection
+                ? selectionRevision
+                : mutation.selectionRevision,
             capturedWhileFirstResponder: mutation.capturedWhileFirstResponder,
             capturedWhileEditable: mutation.capturedWhileEditable,
             capturedAfterBlur: mutation.capturedAfterBlur,
             inputGeneration: mutation.inputGeneration
         )
+    }
+
+    private func targetSelectionUtf16RangeForNativeTextMutation(
+        rawSelectionUtf16Range: NSRange?,
+        authorizedSelectionUtf16Range: NSRange?,
+        replacementStartUtf16: Int,
+        authorizedEndUtf16: Int,
+        currentEndUtf16: Int,
+        currentTextUtf16Length: Int
+    ) -> NSRange? {
+        guard let authorizedSelection = authorizedSelectionUtf16Range else {
+            return clampedUtf16Range(rawSelectionUtf16Range, length: currentTextUtf16Length)
+        }
+        guard authorizedSelection.location != NSNotFound else {
+            return clampedUtf16Range(rawSelectionUtf16Range, length: currentTextUtf16Length)
+        }
+
+        if let rawSelection = rawSelectionUtf16Range,
+           rawSelection.location != NSNotFound,
+           !NSEqualRanges(rawSelection, authorizedSelection) {
+            return clampedUtf16Range(rawSelection, length: currentTextUtf16Length)
+        }
+
+        if authorizedSelection.length == 0 {
+            let mappedOffset = mapCollapsedAuthorizedSelectionOffsetThroughNativeTextMutation(
+                authorizedSelection.location,
+                replacementStartUtf16: replacementStartUtf16,
+                authorizedEndUtf16: authorizedEndUtf16,
+                currentEndUtf16: currentEndUtf16
+            )
+            let clampedOffset = min(max(mappedOffset, 0), currentTextUtf16Length)
+            return NSRange(location: clampedOffset, length: 0)
+        }
+
+        let mappedStart = mapAuthorizedSelectionOffsetThroughNativeTextMutation(
+            authorizedSelection.location,
+            replacementStartUtf16: replacementStartUtf16,
+            authorizedEndUtf16: authorizedEndUtf16,
+            currentEndUtf16: currentEndUtf16,
+            isRangeStart: true
+        )
+        let mappedEnd = mapAuthorizedSelectionOffsetThroughNativeTextMutation(
+            NSMaxRange(authorizedSelection),
+            replacementStartUtf16: replacementStartUtf16,
+            authorizedEndUtf16: authorizedEndUtf16,
+            currentEndUtf16: currentEndUtf16,
+            isRangeStart: false
+        )
+        let start = min(mappedStart, mappedEnd)
+        let end = max(mappedStart, mappedEnd)
+        let clampedStart = min(max(start, 0), currentTextUtf16Length)
+        let clampedEnd = min(max(end, 0), currentTextUtf16Length)
+        return NSRange(location: clampedStart, length: max(0, clampedEnd - clampedStart))
+    }
+
+    private func clampedUtf16Range(_ range: NSRange?, length: Int) -> NSRange? {
+        guard let range, range.location != NSNotFound else { return nil }
+        let start = min(max(range.location, 0), length)
+        let end = min(max(NSMaxRange(range), 0), length)
+        return NSRange(location: min(start, end), length: abs(end - start))
+    }
+
+    private func mapCollapsedAuthorizedSelectionOffsetThroughNativeTextMutation(
+        _ offset: Int,
+        replacementStartUtf16: Int,
+        authorizedEndUtf16: Int,
+        currentEndUtf16: Int
+    ) -> Int {
+        // UIKit can leave a stale caret at the insertion point during autocomplete.
+        // A collapsed authorized caret should stay collapsed after the inserted text.
+        if replacementStartUtf16 == authorizedEndUtf16,
+           offset == replacementStartUtf16,
+           currentEndUtf16 > replacementStartUtf16 {
+            return currentEndUtf16
+        }
+        if offset <= replacementStartUtf16 {
+            return offset
+        }
+        if offset < authorizedEndUtf16 {
+            return currentEndUtf16
+        }
+        return offset + currentEndUtf16 - authorizedEndUtf16
+    }
+
+    private func mapAuthorizedSelectionOffsetThroughNativeTextMutation(
+        _ offset: Int,
+        replacementStartUtf16: Int,
+        authorizedEndUtf16: Int,
+        currentEndUtf16: Int,
+        isRangeStart: Bool
+    ) -> Int {
+        if offset <= replacementStartUtf16 {
+            return offset
+        }
+        if offset >= authorizedEndUtf16 {
+            return offset + currentEndUtf16 - authorizedEndUtf16
+        }
+        return isRangeStart ? replacementStartUtf16 : currentEndUtf16
     }
 
     private func isUtf16ScalarBoundary(_ offset: Int, in text: String) -> Bool {
@@ -3451,20 +3632,25 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         clearNativeTextMutationAfterBlurWindow()
     }
 
+    private func resetPendingNativeTextMutationState() {
+        pendingNativeTextMutation = nil
+        nativeTextMutationCommitScheduled = false
+        advanceNativeTextMutationGeneration()
+    }
+
     func expireNativeTextMutationAfterBlurDeadlineForTesting() {
         nativeTextMutationAfterBlurDeadline = ProcessInfo.processInfo.systemUptime - 0.001
     }
 
     func discardTransientNativeInputForEditorRebind() {
-        pendingNativeTextMutation = nil
-        nativeTextMutationCommitScheduled = false
+        resetPendingNativeTextMutationState()
+        lastAuthorizedSelectedUtf16Range = nil
         clearPendingInputTraitRetry()
         markedTextReplacementScalarRange = nil
         markedTextReplacementUtf16Range = nil
         markedTextCompositionText = nil
         markedTextCompositionIsExplicitlyEmpty = false
         isComposing = false
-        advanceNativeTextMutationGeneration()
     }
 
     @discardableResult
@@ -3528,7 +3714,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     ) -> Bool {
         guard nativeTextMutationCommitScheduled
                 || pendingNativeTextMutation != nil
-                || (!isComposing && textStorage.string != lastAuthorizedText)
+                || (!isComposing && markedTextRange == nil && textStorage.string != lastAuthorizedText)
         else {
             return true
         }
@@ -3658,8 +3844,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         let targetRange = NSRange(location: startUtf16, length: max(0, endUtf16 - startUtf16))
         if selectedRange != targetRange {
             selectedRange = targetRange
+            noteSelectionDidChange()
         }
         editorSetSelectionScalar(id: editorId, scalarAnchor: anchor, scalarHead: head)
+        recordAuthorizedSelectionIfPossible()
         refreshTypingAttributesForSelection()
         let docAnchor = editorScalarToDoc(id: editorId, scalar: anchor)
         let docHead = editorScalarToDoc(id: editorId, scalar: head)
@@ -4783,9 +4971,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
               let update = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
         let parseNanos = DispatchTime.now().uptimeNanoseconds - parseStartedAt
-        pendingNativeTextMutation = nil
-        nativeTextMutationCommitScheduled = false
-        advanceNativeTextMutationGeneration()
+        resetPendingNativeTextMutationState()
 
         let renderElements = update["renderElements"] as? [[String: Any]]
         let selectionFromUpdate = (update["selection"] as? [String: Any])
@@ -4951,6 +5137,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                     postApplyTrace.selectionOrContentCallbackNanos
             )
         }
+        recordAuthorizedSelectionIfPossible()
         Self.updateLog.debug(
             "[applyUpdateJSON.end] finalSelection=\(self.selectionSummary(), privacy: .public) textState=\(self.textSnapshotSummary(), privacy: .public)"
         )
@@ -4967,6 +5154,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     /// elements directly, not wrapped in an EditorUpdate).
     func applyRenderJSON(_ renderJSON: String) {
         ensureInternalTextViewDelegate()
+        resetPendingNativeTextMutationState()
         Self.updateLog.debug(
             "[applyRenderJSON.begin] before=\(self.textSnapshotSummary(), privacy: .public)"
         )
@@ -4982,6 +5170,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
 
         refreshPlaceholderVisibility()
         _ = performPostApplyMaintenance()
+        recordAuthorizedSelectionIfPossible()
         Self.updateLog.debug(
             "[applyRenderJSON.end] after=\(self.textSnapshotSummary(), privacy: .public)"
         )
@@ -5039,17 +5228,20 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
                     let adjustedRange = NSRange(location: adjustedOffset, length: 0)
                     if selectedRange != adjustedRange {
                         selectedRange = adjustedRange
+                        noteSelectionDidChange()
                     }
                 } else {
                     let targetRange = NSRange(location: endUtf16, length: 0)
                     if selectedRange != targetRange {
                         selectedRange = targetRange
+                        noteSelectionDidChange()
                     }
                 }
             } else {
                 let targetRange = NSRange(location: startUtf16, length: endUtf16 - startUtf16)
                 if selectedRange != targetRange {
                     selectedRange = targetRange
+                    noteSelectionDidChange()
                 }
             }
             let assignmentNanos = DispatchTime.now().uptimeNanoseconds - assignmentStartedAt
@@ -5081,6 +5273,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
             let assignmentStartedAt = DispatchTime.now().uptimeNanoseconds
             if selectedRange != targetRange {
                 selectedRange = targetRange
+                noteSelectionDidChange()
             }
             let assignmentNanos = DispatchTime.now().uptimeNanoseconds - assignmentStartedAt
             let chromeStartedAt = DispatchTime.now().uptimeNanoseconds
@@ -5099,6 +5292,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         case "all":
             let assignmentStartedAt = DispatchTime.now().uptimeNanoseconds
             selectedTextRange = textRange(from: beginningOfDocument, to: endOfDocument)
+            noteSelectionDidChange()
             let assignmentNanos = DispatchTime.now().uptimeNanoseconds - assignmentStartedAt
             let chromeStartedAt = DispatchTime.now().uptimeNanoseconds
             showNativeSelectionChromeIfNeeded()
@@ -5150,8 +5344,11 @@ extension EditorTextView: NSTextStorageDelegate {
         // Only care about actual character edits, not attribute-only changes.
         guard editedMask.contains(.editedCharacters) else { return }
 
-        // Skip if this change came from our own Rust apply path or transient IME composition.
-        guard !isApplyingRustState, !isComposing else { return }
+        // Skip if this change came from our own Rust apply path, transient IME
+        // composition, or an inline prediction. iOS inline predictions (iOS 17+)
+        // mutate textStorage directly and set markedTextRange without calling
+        // setMarkedText, so isComposing remains false — check markedTextRange too.
+        guard !isApplyingRustState, !isComposing, markedTextRange == nil else { return }
 
         // Skip if no editor is bound yet (nothing to reconcile against).
         guard editorId != 0 else { return }

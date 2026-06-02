@@ -4,11 +4,14 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Looper
+import android.provider.Settings
 import android.text.Selection
 import android.text.InputType
+import android.text.style.AbsoluteSizeSpan
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.BaseInputConnection
@@ -57,6 +60,99 @@ class EditorInputConnectionTest {
         assertTrue(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
         assertFalse(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
         assertFalse(editText.inputType hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+    }
+
+    @Test
+    fun `cursor caps mode treats rendered empty block start as sentence start`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderBlocksUpdateJson("Hello", "\u200B"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+
+        assertEquals("Hello\n\u200B", editText.text.toString())
+        assertTrue(
+            editText.cursorCapsModeForEditor(
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES,
+                baseCapsMode = 0
+            ) hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        )
+
+        val editorInfo = EditorInfo()
+        val inputConnection = editText.onCreateInputConnection(editorInfo)
+        assertNotNull(inputConnection)
+        assertTrue(editorInfo.initialCapsMode hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+        assertTrue(
+            inputConnection!!.getCursorCapsMode(InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+                hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        )
+    }
+
+    @Test
+    fun `text before cursor hides synthetic empty block placeholder from IME context`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderBlocksUpdateJson("Hello", "\u200B"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        assertEquals("\n", inputConnection!!.getTextBeforeCursor(1, 0).toString())
+        assertEquals("Hello\n", inputConnection.getTextBeforeCursor(20, 0).toString())
+    }
+
+    @Test
+    fun `initial surrounding text removes synthetic placeholder for IME sentence caps`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderBlocksUpdateJson("Hello", "\u200B"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+
+        val editorInfo = EditorInfo()
+        val inputConnection = editText.onCreateInputConnection(editorInfo)
+        assertNotNull(inputConnection)
+
+        assertEquals("Hello\n", editorInfo.getInitialTextBeforeCursor(20, 0).toString())
+        assertEquals(editText.selectionStart - 1, editorInfo.initialSelStart)
+        assertEquals(editText.selectionEnd - 1, editorInfo.initialSelEnd)
+        assertFalse(editorInfo.getInitialTextBeforeCursor(20, 0).toString().contains("\u200B"))
+        assertTrue(
+            editorInfo.initialCapsMode hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        )
+    }
+
+    @Test
+    fun `Samsung composing text at rendered line start is sentence capitalized`() {
+        val context = RuntimeEnvironment.getApplication()
+        val editText = EditorEditText(context)
+        editText.applyUpdateJSON(renderBlocksUpdateJson("Hello", "\u200B"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+        editText.editorId = 1
+
+        withDefaultInputMethod(context, "com.samsung.android.honeyboard/.service.HoneyBoardService") {
+            val inputConnection = editText.onCreateInputConnection(EditorInfo())
+            assertNotNull(inputConnection)
+
+            assertTrue(inputConnection!!.setComposingText("test", 1))
+
+            assertEquals("Test", editText.composingTextForEditor())
+            assertTrue(
+                editText.imeTraceSnapshotForTesting().any {
+                    it.contains("samsungSentenceCapsFallback")
+                }
+            )
+        }
+    }
+
+    @Test
+    fun `cursor caps mode does not force sentence caps mid line`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("Hello "), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+
+        assertFalse(
+            editText.cursorCapsModeForEditor(
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES,
+                baseCapsMode = 0
+            ) hasInputFlag InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        )
     }
 
     @Test
@@ -199,6 +295,36 @@ class EditorInputConnectionTest {
             assertEquals("fresh", insertedText)
             assertEquals(6, insertedScalar)
         }
+    }
+
+    @Test
+    fun `old input connection remains usable after framework recreation from render`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+        editText.onSetSelectionScalarInRustForTesting = { _, _ -> }
+
+        val inserted = mutableListOf<Pair<String, Int>>()
+        val rendered = StringBuilder()
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserted.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyUpdateJSON(renderUpdateJson(rendered.toString()), notifyListener = false)
+            editText.setSelection(rendered.length)
+        }
+
+        val originalConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(originalConnection)
+        assertTrue(originalConnection!!.commitText("a", 1))
+
+        val recreatedConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(recreatedConnection)
+
+        assertTrue(originalConnection.commitText("b", 1))
+
+        assertEquals(listOf("a" to 0, "b" to 1), inserted)
+        assertEquals("ab", editText.text?.toString())
     }
 
     @Test
@@ -1225,9 +1351,116 @@ class EditorInputConnectionTest {
 
         assertTrue(inputConnection.commitCorrection(CorrectionInfo(0, "teh", "the")))
 
+        assertNull(insertedText)
+        assertNull(insertedScalar)
+
+        assertTrue(inputConnection.commitText("the", 1))
+
         assertEquals("the", insertedText)
         assertEquals(0, insertedScalar)
         assertEquals(0, editText.reconciliationCount)
+    }
+
+    @Test
+    fun `matching commit text after composition correction applies once so space can follow`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val rendered = StringBuilder()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("wouldnt", 1))
+
+        assertTrue(inputConnection.commitCorrection(CorrectionInfo(0, "wouldnt", "wouldn't")))
+
+        assertTrue(inserts.isEmpty())
+        assertEquals("wouldnt", editText.text?.toString())
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        assertTrue(inputConnection.commitText("wouldn't", 1))
+
+        assertEquals(listOf("wouldn't" to 0), inserts)
+        assertEquals("wouldn't", editText.text?.toString())
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        assertTrue(inputConnection.commitText(" ", 1))
+
+        assertEquals(listOf("wouldn't" to 0, " " to 8), inserts)
+        assertEquals("wouldn't ", editText.text?.toString())
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("wouldn't ", editText.text?.toString())
+    }
+
+    @Test
+    fun `single letter composition correction followed by commit text keeps uppercase replacement`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val rendered = StringBuilder()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("i", 1))
+
+        assertTrue(inputConnection.commitCorrection(CorrectionInfo(0, "i", "I")))
+        assertTrue(inputConnection.commitText("I", 1))
+
+        assertEquals(listOf("I" to 0), inserts)
+        assertEquals("I", editText.text?.toString())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("I", editText.text?.toString())
+    }
+
+    @Test
+    fun `single letter composition correction applies when ime sends no follow up commit text`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val rendered = StringBuilder()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("i", 1))
+
+        assertTrue(inputConnection.commitCorrection(CorrectionInfo(0, "i", "I")))
+
+        assertTrue(inserts.isEmpty())
+        assertEquals("i", editText.text?.toString())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf("I" to 0), inserts)
+        assertEquals("I", editText.text?.toString())
     }
 
     @Test
@@ -2131,6 +2364,291 @@ class EditorInputConnectionTest {
     }
 
     @Test
+    fun `composing text uses rendered paragraph font size before Samsung space commit`() {
+        val context = RuntimeEnvironment.getApplication()
+        val density = context.resources.displayMetrics.density
+        val editText = EditorEditText(context)
+        editText.setBaseStyle(24f * density, Color.BLACK, Color.WHITE)
+        editText.applyTheme(
+            EditorTheme.fromJson(
+                """
+                {
+                  "text": { "fontSize": 12, "color": "#112233" }
+                }
+                """.trimIndent()
+            )
+        )
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("word", 1))
+
+        val sizeSpans = editText.text!!.getSpans(0, 4, AbsoluteSizeSpan::class.java)
+        assertTrue(sizeSpans.any { it.size == (12f * density).toInt() })
+    }
+
+    @Test
+    fun `finish composing defers render so pending Samsung space commit uses same connection`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val updates = mutableListOf<String>()
+        editText.editorListener = object : EditorEditText.EditorListener {
+            override fun onSelectionChanged(anchor: Int, head: Int) = Unit
+            override fun onEditorUpdate(updateJSON: String) {
+                updates.add(updateJSON)
+            }
+        }
+
+        val inserted = mutableListOf<Pair<String, Int>>()
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserted.add(text to scalar)
+            val renderedText = when (text) {
+                "word" -> "word"
+                " " -> "word "
+                else -> text
+            }
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(renderedText))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("word", 1))
+
+        assertTrue(inputConnection.finishComposingText())
+
+        assertEquals(listOf("word" to 0), inserted)
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertTrue(updates.isEmpty())
+
+        assertTrue(inputConnection.commitText(" ", 1))
+
+        assertEquals(listOf("word" to 0, " " to 4), inserted)
+        assertEquals("word ", editText.text?.toString())
+        assertEquals(1, updates.size)
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertEquals("word ", editText.text?.toString())
+        assertEquals(1, updates.size)
+    }
+
+    @Test
+    fun `finish composing deferred render applies on next loop without pending commit`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val updates = mutableListOf<String>()
+        editText.editorListener = object : EditorEditText.EditorListener {
+            override fun onSelectionChanged(anchor: Int, head: Int) = Unit
+            override fun onEditorUpdate(updateJSON: String) {
+                updates.add(updateJSON)
+            }
+        }
+        editText.onInsertTextInRustForTesting = { text, _ ->
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(text))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingText("word", 1))
+
+        assertTrue(inputConnection.finishComposingText())
+
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertTrue(updates.isEmpty())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertEquals("word", editText.text?.toString())
+        assertEquals(1, updates.size)
+    }
+
+    @Test
+    fun `composition commit defers render so Samsung autocorrect space commit survives`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("teh"), notifyListener = false)
+        editText.setSelection(0, 3)
+        editText.editorId = 1
+
+        val updates = mutableListOf<String>()
+        editText.editorListener = object : EditorEditText.EditorListener {
+            override fun onSelectionChanged(anchor: Int, head: Int) = Unit
+            override fun onEditorUpdate(updateJSON: String) {
+                updates.add(updateJSON)
+            }
+        }
+
+        val rendered = StringBuilder("teh")
+        val replacements = mutableListOf<Triple<Int, Int, String>>()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onReplaceTextInRustForTesting = { scalarFrom, scalarTo, text ->
+            replacements.add(Triple(scalarFrom, scalarTo, text))
+            rendered.replace(scalarFrom, scalarTo, text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingRegion(0, 3))
+
+        assertTrue(inputConnection.commitText("the", 1))
+
+        assertEquals(listOf(Triple(0, 3, "the")), replacements)
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertTrue(updates.isEmpty())
+
+        assertTrue(inputConnection.commitText(" ", 1))
+
+        assertEquals(listOf(" " to 3), inserts)
+        assertEquals("the ", editText.text?.toString())
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("the ", editText.text?.toString())
+    }
+
+    @Test
+    fun `composition commit uses composing span when tracked range is collapsed`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("wouldnt"), notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = 1
+
+        val rendered = StringBuilder("wouldnt")
+        val replacements = mutableListOf<Triple<Int, Int, String>>()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onReplaceTextInRustForTesting = { scalarFrom, scalarTo, text ->
+            replacements.add(Triple(scalarFrom, scalarTo, text))
+            rendered.replace(scalarFrom, scalarTo, text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        assertTrue(inputConnection!!.setComposingRegion(0, 7))
+        editText.setCompositionReplacementRange(7, 7)
+
+        assertTrue(inputConnection.commitText("wouldn't", 1))
+
+        assertEquals(listOf(Triple(0, 7, "wouldn't")), replacements)
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        assertTrue(inputConnection.commitText(" ", 1))
+
+        assertEquals(listOf(" " to 8), inserts)
+        assertEquals("wouldn't ", editText.text?.toString())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("wouldn't ", editText.text?.toString())
+    }
+
+    @Test
+    fun `composition commit adopts already visible correction instead of inserting duplicate word`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("wouldnt"), notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = 1
+
+        val rendered = StringBuilder("wouldnt")
+        val replacements = mutableListOf<Triple<Int, Int, String>>()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onReplaceTextInRustForTesting = { scalarFrom, scalarTo, text ->
+            replacements.add(Triple(scalarFrom, scalarTo, text))
+            rendered.replace(scalarFrom, scalarTo, text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        editText.setCompositionReplacementRange(7, 7)
+        editText.runWithTransientInputMutationGuard {
+            editText.text!!.replace(0, 7, "wouldn't")
+            Selection.setSelection(editText.text!!, 8, 8)
+            true
+        }
+
+        assertTrue(inputConnection!!.commitText("wouldn't", 1))
+
+        assertTrue(replacements.isEmpty())
+        assertEquals(listOf("'" to 6), inserts)
+        assertEquals("wouldn't", editText.text?.toString())
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        assertTrue(inputConnection.commitText(" ", 1))
+
+        assertEquals(listOf("'" to 6, " " to 8), inserts)
+        assertEquals("wouldn't ", editText.text?.toString())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("wouldn't ", editText.text?.toString())
+    }
+
+    @Test
+    fun `already visible multi typo correction uses visible replacement range`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("woudlnt"), notifyListener = false)
+        editText.setSelection(7)
+        editText.editorId = 1
+
+        val rendered = StringBuilder("woudlnt")
+        val replacements = mutableListOf<Triple<Int, Int, String>>()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onReplaceTextInRustForTesting = { scalarFrom, scalarTo, text ->
+            replacements.add(Triple(scalarFrom, scalarTo, text))
+            rendered.replace(scalarFrom, scalarTo, text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+        editText.setCompositionReplacementRange(7, 7)
+        editText.runWithTransientInputMutationGuard {
+            editText.text!!.replace(0, 7, "wouldn't")
+            Selection.setSelection(editText.text!!, 8, 8)
+            true
+        }
+
+        assertTrue(inputConnection!!.commitText("wouldn't", 1))
+
+        assertEquals(listOf(Triple(3, 6, "ldn'")), replacements)
+        assertTrue(inserts.isEmpty())
+        assertEquals("wouldn't", editText.text?.toString())
+    }
+
+    @Test
     fun `empty commit text over composing range deletes original range`() {
         val editText = EditorEditText(RuntimeEnvironment.getApplication())
         editText.applyUpdateJSON(renderUpdateJson("Hello world"), notifyListener = false)
@@ -2850,6 +3368,147 @@ class EditorInputConnectionTest {
     }
 
     @Test
+    fun `text replacement commit does not optimistically mutate visible text`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("teh "), notifyListener = false)
+        editText.setSelection(0, 3)
+        editText.editorId = 1
+
+        var replacement: Triple<Int, Int, String>? = null
+        editText.onReplaceTextInRustForTesting = { scalarFrom, scalarTo, text ->
+            replacement = Triple(scalarFrom, scalarTo, text)
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        assertTrue(inputConnection!!.commitText("the", 1))
+
+        assertEquals(Triple(0, 3, "the"), replacement)
+        assertEquals("teh ", editText.text?.toString())
+        assertFalse(
+            editText.imeTraceSnapshotForTesting().any {
+                it.contains("optimisticVisibleTextCommit")
+            }
+        )
+    }
+
+    @Test
+    fun `bulk surrounding delete defers render so autocorrect replacement commit survives`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("teh"), notifyListener = false)
+        editText.setSelection(3)
+        editText.editorId = 1
+
+        val rendered = StringBuilder("teh")
+        val deletes = mutableListOf<Pair<Int, Int>>()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onDeleteRangeInRustForTesting = { scalarFrom, scalarTo ->
+            deletes.add(scalarFrom to scalarTo)
+            rendered.delete(scalarFrom, scalarTo)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        assertTrue(inputConnection!!.deleteSurroundingText(3, 0))
+
+        assertEquals(listOf(0 to 3), deletes)
+        assertEquals("", editText.text?.toString())
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        assertTrue(inputConnection.commitText("the", 1))
+
+        assertEquals(listOf("the" to 0), inserts)
+        assertEquals("the", editText.text?.toString())
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("the", editText.text?.toString())
+    }
+
+    @Test
+    fun `single character surrounding delete defers render so case replacement commit survives`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("i"), notifyListener = false)
+        editText.setSelection(1)
+        editText.editorId = 1
+
+        val updates = mutableListOf<String>()
+        editText.editorListener = object : EditorEditText.EditorListener {
+            override fun onSelectionChanged(anchor: Int, head: Int) = Unit
+            override fun onEditorUpdate(updateJSON: String) {
+                updates.add(updateJSON)
+            }
+        }
+
+        val rendered = StringBuilder("i")
+        val deletes = mutableListOf<Pair<Int, Int>>()
+        val inserts = mutableListOf<Pair<String, Int>>()
+        editText.onDeleteRangeInRustForTesting = { scalarFrom, scalarTo ->
+            deletes.add(scalarFrom to scalarTo)
+            rendered.delete(scalarFrom, scalarTo)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            inserts.add(text to scalar)
+            rendered.insert(scalar.coerceIn(0, rendered.length), text)
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson(rendered.toString()))
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        assertTrue(inputConnection!!.deleteSurroundingText(1, 0))
+
+        assertEquals(listOf(0 to 1), deletes)
+        assertEquals("", editText.text?.toString())
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertTrue(updates.isEmpty())
+
+        assertTrue(inputConnection.commitText("I", 1))
+
+        assertEquals(listOf("I" to 0), inserts)
+        assertEquals("I", editText.text?.toString())
+        assertEquals(1, updates.size)
+
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertEquals("I", editText.text?.toString())
+        assertEquals(1, updates.size)
+    }
+
+    @Test
+    fun `bulk surrounding delete no-op does not queue rust delete`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("abc"), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = 1
+
+        val deletes = mutableListOf<Pair<Int, Int>>()
+        editText.onDeleteRangeInRustForTesting = { scalarFrom, scalarTo ->
+            deletes.add(scalarFrom to scalarTo)
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        assertTrue(inputConnection!!.deleteSurroundingText(3, 0))
+
+        assertTrue(deletes.isEmpty())
+        assertEquals("abc", editText.text?.toString())
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+    }
+
+    @Test
     fun `text commit snaps split surrogate selection to scalar boundaries`() {
         val editText = EditorEditText(RuntimeEnvironment.getApplication())
         editText.applyUpdateJSON(renderUpdateJson("A😀B"), notifyListener = false)
@@ -3313,27 +3972,54 @@ class EditorInputConnectionTest {
     }
 
     private fun renderUpdateJson(text: String): String =
+        renderBlocksUpdateJson(text)
+
+    private fun renderBlocksUpdateJson(vararg texts: String): String =
         JSONObject()
             .put(
                 "renderBlocks",
-                JSONArray().put(
-                    JSONArray()
-                        .put(
-                            JSONObject()
-                                .put("type", "blockStart")
-                                .put("nodeType", "paragraph")
-                                .put("depth", 0)
-                        )
-                        .put(
-                            JSONObject()
-                                .put("type", "textRun")
-                                .put("text", text)
-                                .put("marks", JSONArray())
-                        )
-                        .put(JSONObject().put("type", "blockEnd"))
-                )
+                JSONArray().apply {
+                    texts.forEach { put(paragraphRenderBlock(it)) }
+                }
             )
             .toString()
+
+    private fun paragraphRenderBlock(text: String): JSONArray =
+        JSONArray()
+            .put(
+                JSONObject()
+                    .put("type", "blockStart")
+                    .put("nodeType", "paragraph")
+                    .put("depth", 0)
+            )
+            .put(
+                JSONObject()
+                    .put("type", "textRun")
+                    .put("text", text)
+                    .put("marks", JSONArray())
+            )
+            .put(JSONObject().put("type", "blockEnd"))
+
+    private fun withDefaultInputMethod(context: Context, inputMethodId: String, block: () -> Unit) {
+        val previous = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.DEFAULT_INPUT_METHOD
+        )
+        Settings.Secure.putString(
+            context.contentResolver,
+            Settings.Secure.DEFAULT_INPUT_METHOD,
+            inputMethodId
+        )
+        try {
+            block()
+        } finally {
+            Settings.Secure.putString(
+                context.contentResolver,
+                Settings.Secure.DEFAULT_INPUT_METHOD,
+                previous
+            )
+        }
+    }
 
     private infix fun Int.hasInputFlag(flag: Int): Boolean = (this and flag) == flag
 }

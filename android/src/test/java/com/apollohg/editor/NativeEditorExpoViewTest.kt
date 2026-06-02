@@ -3,6 +3,7 @@ package com.apollohg.editor
 import android.app.Activity
 import android.content.Context
 import android.graphics.Rect
+import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
@@ -592,6 +593,49 @@ class NativeEditorExpoViewTest {
 
         assertNull(view.pendingEditorUpdateJsonForTesting())
         assertEquals(9, readyPayloads.last()["editorUpdateRevision"])
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `successful JS editor update clears queued native update events`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778843L
+        val editText = view.richTextView.editorEditText
+        val nativeUpdateJson = renderUpdateJson("native")
+        val jsUpdateJson = renderUpdateJson("controlled")
+
+        view.onAddonEventForTesting = {}
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("initial"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+        editText.onSetSelectionScalarInRustForTesting = { _, _ -> }
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+
+        view.onEditorUpdate(nativeUpdateJson)
+
+        assertEquals(1, view.pendingEditorUpdateEventCountForTesting())
+
+        val applied = AtomicBoolean(false)
+        Handler(Looper.getMainLooper()).post {
+            applied.set(view.applyEditorUpdate(jsUpdateJson))
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(applied.get())
+        assertEquals(0, view.pendingEditorUpdateEventCountForTesting())
+        assertEquals("controlled", editText.text?.toString())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+
+        assertEquals(0, view.pendingEditorUpdateEventCountForTesting())
+        assertTrue(
+            editText.imeTraceSnapshotForTesting().any {
+                it.contains("nativeViewEditorUpdateQueueCleared")
+            }
+        )
 
         NativeEditorViewRegistry.unregister(editorId, view)
     }
