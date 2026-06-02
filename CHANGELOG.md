@@ -308,6 +308,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.18]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.17...0.5.18
 [0.5.17]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.16...0.5.17
 [0.5.16]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.15...0.5.16
 [0.5.15]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.14...0.5.15
