@@ -691,6 +691,8 @@ final class EditorAccessoryToolbarView: UIInputView {
     private static let contentSpacing: CGFloat = 6
     private static let defaultHorizontalInset: CGFloat = 0
     private static let defaultKeyboardOffset: CGFloat = 0
+    private static let chromeTransitionDuration: TimeInterval = 0.18
+    private static let nativeDisabledButtonOpacity: CGFloat = 0.46
 
     private struct ButtonBinding {
         let item: NativeToolbarItem
@@ -727,6 +729,7 @@ final class EditorAccessoryToolbarView: UIInputView {
     private var currentState = NativeToolbarState.empty
     private var theme: EditorToolbarTheme?
     private var mentionTheme: EditorMentionTheme?
+    private var didAnimateChromeTransition = false
     fileprivate var onPressItem: ((NativeToolbarItem) -> Void)?
     var onSelectMentionSuggestion: ((NativeMentionSuggestion) -> Void)?
     var isShowingMentionSuggestions: Bool {
@@ -745,6 +748,16 @@ final class EditorAccessoryToolbarView: UIInputView {
     }
     var chromeBorderWidthForTesting: CGFloat {
         chromeView.layer.borderWidth
+    }
+    var nativeChromeIsTransparentForTesting: Bool {
+        blurView.isHidden
+            && glassTintView.isHidden
+            && chromeView.layer.borderWidth == 0
+            && chromeView.layer.shadowOpacity == 0
+            && (chromeView.backgroundColor ?? .clear) == .clear
+    }
+    var didAnimateChromeTransitionForTesting: Bool {
+        didAnimateChromeTransition
     }
     var nativeToolbarVisibleWidthForTesting: CGFloat {
         activeNativeToolbarScrollViewForTesting.bounds.width
@@ -849,15 +862,42 @@ final class EditorAccessoryToolbarView: UIInputView {
     func apply(mentionTheme: EditorMentionTheme?) {
         self.mentionTheme = mentionTheme
         for button in mentionButtons {
-            button.apply(theme: mentionTheme)
+            button.apply(theme: mentionTheme, toolbarAppearance: resolvedAppearance)
         }
     }
 
     func apply(theme: EditorToolbarTheme?) {
+        apply(theme: theme, animateChrome: false)
+    }
+
+    private func apply(theme: EditorToolbarTheme?, animateChrome: Bool) {
         self.theme = theme
         let usesNativeAppearance = resolvedAppearance == .native
+        let usesTransparentMentionChrome = self.usesTransparentMentionChrome
         let hasFloatingGlassButtons = self.usesFloatingGlassButtons
         let usesBarToolbar = usesNativeBarToolbar
+        let targetBlurHidden = usesTransparentMentionChrome || usesBarToolbar || !usesNativeAppearance
+        let targetBlurAlpha: CGFloat = usesNativeAppearance && !usesTransparentMentionChrome ? resolvedEffectAlpha : 0
+        let targetBlurEffect = usesNativeAppearance && !usesTransparentMentionChrome ? resolvedBlurEffect() : nil
+        let targetGlassHidden = usesTransparentMentionChrome || usesBarToolbar || !usesNativeAppearance
+        let targetGlassBackground = usesNativeAppearance && !usesTransparentMentionChrome
+            ? UIColor.systemBackground.withAlphaComponent(resolvedGlassTintAlpha)
+            : .clear
+        let targetGlassAlpha: CGFloat = targetGlassHidden ? 0 : 1
+        let targetBorderColor = usesTransparentMentionChrome ? UIColor.clear : resolvedBorderColor
+        let targetBorderWidth: CGFloat = usesTransparentMentionChrome || usesBarToolbar
+            ? 0
+            : (usesNativeAppearance
+            ? (1 / UIScreen.main.scale)
+            : resolvedBorderWidth)
+        let targetClipsToBounds =
+            !usesTransparentMentionChrome
+            && ((usesNativeAppearance && !hasFloatingGlassButtons && !usesBarToolbar) || resolvedBorderRadius > 0)
+        let targetShadowOpacity: Float =
+            usesNativeAppearance && !usesTransparentMentionChrome && !hasFloatingGlassButtons && !usesBarToolbar ? 0.08 : 0
+        let targetShadowRadius: CGFloat =
+            usesNativeAppearance && !usesTransparentMentionChrome && !hasFloatingGlassButtons && !usesBarToolbar ? 10 : 0
+
         chromeView.backgroundColor = usesNativeAppearance
             ? .clear
             : (theme?.backgroundColor ?? .systemBackground)
@@ -865,19 +905,6 @@ final class EditorAccessoryToolbarView: UIInputView {
             ? nil
             : (theme?.buttonColor ?? tintColor)
         chromeView.isOpaque = false
-        blurView.isHidden = usesBarToolbar || !usesNativeAppearance
-        blurView.effect = usesNativeAppearance ? resolvedBlurEffect() : nil
-        blurView.alpha = usesNativeAppearance ? resolvedEffectAlpha : 1
-        glassTintView.isHidden = usesBarToolbar || !usesNativeAppearance
-        glassTintView.backgroundColor = usesNativeAppearance
-            ? UIColor.systemBackground.withAlphaComponent(resolvedGlassTintAlpha)
-            : .clear
-        chromeView.layer.borderColor = resolvedBorderColor.cgColor
-        chromeView.layer.borderWidth = usesBarToolbar
-            ? 0
-            : (usesNativeAppearance
-            ? (1 / UIScreen.main.scale)
-            : resolvedBorderWidth)
         chromeView.layer.cornerRadius = resolvedBorderRadius
         if #available(iOS 13.0, *) {
             chromeView.layer.cornerCurve = .continuous
@@ -892,11 +919,68 @@ final class EditorAccessoryToolbarView: UIInputView {
             glassTintView.cornerConfiguration = cornerConfig
         }
         #endif
-        chromeView.clipsToBounds = (usesNativeAppearance && !hasFloatingGlassButtons && !usesBarToolbar) || resolvedBorderRadius > 0
-        chromeView.layer.shadowOpacity = usesNativeAppearance && !hasFloatingGlassButtons && !usesBarToolbar ? 0.08 : 0
-        chromeView.layer.shadowRadius = usesNativeAppearance && !hasFloatingGlassButtons && !usesBarToolbar ? 10 : 0
         chromeView.layer.shadowOffset = CGSize(width: 0, height: 2)
         chromeView.layer.shadowColor = UIColor.black.cgColor
+
+        let applyChromeProperties = {
+            self.blurView.alpha = targetBlurAlpha
+            self.glassTintView.alpha = targetGlassAlpha
+            self.chromeView.layer.borderColor = targetBorderColor.cgColor
+            self.chromeView.layer.borderWidth = targetBorderWidth
+            self.chromeView.layer.shadowOpacity = targetShadowOpacity
+            self.chromeView.layer.shadowRadius = targetShadowRadius
+        }
+        let finishChromeProperties = {
+            self.blurView.isHidden = targetBlurHidden
+            self.blurView.effect = targetBlurEffect
+            self.blurView.alpha = targetBlurAlpha
+            self.glassTintView.isHidden = targetGlassHidden
+            self.glassTintView.backgroundColor = targetGlassHidden ? .clear : targetGlassBackground
+            self.glassTintView.alpha = targetGlassAlpha
+            self.chromeView.layer.borderColor = targetBorderColor.cgColor
+            self.chromeView.layer.borderWidth = targetBorderWidth
+            self.chromeView.layer.shadowOpacity = targetShadowOpacity
+            self.chromeView.layer.shadowRadius = targetShadowRadius
+            self.chromeView.clipsToBounds = targetClipsToBounds
+        }
+
+        let shouldAnimateChrome = animateChrome && UIView.areAnimationsEnabled && window != nil
+        didAnimateChromeTransition = shouldAnimateChrome
+        if shouldAnimateChrome {
+            let blurWasHidden = blurView.isHidden
+            let glassWasHidden = glassTintView.isHidden
+            if !targetBlurHidden {
+                blurView.effect = targetBlurEffect
+            }
+            if !targetBlurHidden || !blurWasHidden {
+                blurView.isHidden = false
+            }
+            if blurWasHidden && !targetBlurHidden {
+                blurView.alpha = 0
+            }
+            if !targetGlassHidden {
+                glassTintView.backgroundColor = targetGlassBackground
+            }
+            if !targetGlassHidden || !glassWasHidden {
+                glassTintView.isHidden = false
+            }
+            if glassWasHidden && !targetGlassHidden {
+                glassTintView.alpha = 0
+            }
+            chromeView.clipsToBounds = targetClipsToBounds
+            UIView.animate(
+                withDuration: Self.chromeTransitionDuration,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut],
+                animations: applyChromeProperties,
+                completion: { _ in
+                    finishChromeProperties()
+                }
+            )
+        } else {
+            finishChromeProperties()
+        }
+
         chromeLeadingConstraint?.constant = resolvedHorizontalInset
         chromeTrailingConstraint?.constant = -resolvedHorizontalInset
         chromeBottomConstraint?.constant = -resolvedKeyboardOffset
@@ -949,6 +1033,7 @@ final class EditorAccessoryToolbarView: UIInputView {
         mentionScrollView.isHidden = !hasSuggestions
         scrollView.isHidden = hasSuggestions
         mentionRowHeightConstraint?.constant = hasSuggestions ? Self.mentionRowHeight : 0
+        apply(theme: theme, animateChrome: hadSuggestions != hasSuggestions)
         invalidateIntrinsicContentSize()
         setNeedsLayout()
         return hadSuggestions != hasSuggestions
@@ -987,6 +1072,9 @@ final class EditorAccessoryToolbarView: UIInputView {
     }
     var firstButtonTintColorForTesting: UIColor? {
         buttonBindings.first?.button.tintColor
+    }
+    func firstButtonTitleColorForTesting(_ state: UIControl.State) -> UIColor? {
+        buttonBindings.first?.button.titleColor(for: state)
     }
     var firstButtonTintAdjustmentModeForTesting: UIView.TintAdjustmentMode {
         buttonBindings.first?.button.tintAdjustmentMode ?? .automatic
@@ -1552,7 +1640,10 @@ final class EditorAccessoryToolbarView: UIInputView {
         #endif
 
         if resolvedAppearance == .native {
-            button.tintColor = enabled ? nil : .systemGray
+            let tintColor = enabled ? theme?.buttonColor : resolvedNativeDisabledButtonTintColor()
+            button.tintColor = tintColor
+            button.setTitleColor(tintColor, for: .normal)
+            button.setTitleColor(resolvedNativeDisabledButtonTintColor(), for: .disabled)
             button.tintAdjustmentMode = enabled ? .automatic : .normal
             button.alpha = 1
             button.backgroundColor = active
@@ -1602,7 +1693,25 @@ final class EditorAccessoryToolbarView: UIInputView {
         theme?.resolvedButtonBorderRadius ?? 8
     }
 
+    private func resolvedNativeDisabledButtonTintColor() -> UIColor {
+        theme?.buttonDisabledColor ?? resolvedNativeButtonTintColor.withAlphaComponent(Self.nativeDisabledButtonOpacity)
+    }
+
+    private var resolvedNativeButtonTintColor: UIColor {
+        theme?.buttonColor ?? tintColor ?? .label
+    }
+
     private var usesFloatingGlassButtons: Bool {
+        return false
+    }
+
+    private var usesTransparentMentionChrome: Bool {
+        guard resolvedAppearance == .native, !mentionButtons.isEmpty else { return false }
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            return true
+        }
+        #endif
         return false
     }
 

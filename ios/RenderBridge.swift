@@ -1104,10 +1104,12 @@ final class RenderBridge {
         }
 
         let tagged = NSMutableAttributedString(attributedString: attributedString)
+        let firstComposedCharacterRange = (tagged.string as NSString)
+            .rangeOfComposedCharacterSequence(at: 0)
         tagged.addAttribute(
             RenderBridgeAttributes.topLevelChildIndex,
             value: NSNumber(value: topLevelChildIndex),
-            range: NSRange(location: 0, length: 1)
+            range: firstComposedCharacterRange
         )
         return tagged
     }

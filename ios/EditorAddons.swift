@@ -131,6 +131,9 @@ func resolveMentionQueryState(
 }
 
 final class MentionSuggestionChipButton: UIButton {
+    private static let horizontalContentInset: CGFloat = 8
+    private static let verticalContentInset: CGFloat = 8
+
     private let titleLabelView = UILabel()
     private let subtitleLabelView = UILabel()
     private let stackView = UIStackView()
@@ -180,10 +183,10 @@ final class MentionSuggestionChipButton: UIButton {
         addSubview(stackView)
 
         NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            stackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stackView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stackView.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalContentInset),
+            stackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalContentInset),
+            stackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalContentInset),
+            stackView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalContentInset),
             heightAnchor.constraint(greaterThanOrEqualToConstant: 40),
         ])
 
@@ -213,6 +216,13 @@ final class MentionSuggestionChipButton: UIButton {
         }
     }
 
+    override func tintColorDidChange() {
+        super.tintColorDidChange()
+        if toolbarAppearance == .native {
+            updateAppearance(highlighted: isHighlighted)
+        }
+    }
+
     @objc private func handleTouchDown() {
         updateAppearance(highlighted: true)
     }
@@ -226,14 +236,46 @@ final class MentionSuggestionChipButton: UIButton {
             layer.cornerRadius = 18
             layer.borderColor = UIColor.clear.cgColor
             layer.borderWidth = 0
+            #if compiler(>=6.2)
+            if #available(iOS 26.0, *) {
+                stackView.isHidden = true
+                backgroundColor = .clear
+                var configuration = highlighted
+                    ? UIButton.Configuration.prominentGlass()
+                    : UIButton.Configuration.glass()
+                configuration.cornerStyle = .capsule
+                configuration.contentInsets = NSDirectionalEdgeInsets(
+                    top: Self.verticalContentInset,
+                    leading: Self.horizontalContentInset,
+                    bottom: Self.verticalContentInset,
+                    trailing: Self.horizontalContentInset
+                )
+                configuration.title = suggestion.label
+                configuration.subtitle = suggestion.subtitle
+                configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+                    var outgoing = incoming
+                    outgoing.font = .systemFont(ofSize: 14, weight: .semibold)
+                    return outgoing
+                }
+                self.configuration = configuration
+                return
+            }
+            #endif
+            stackView.isHidden = false
             backgroundColor = highlighted
                 ? UIColor.white.withAlphaComponent(0.18)
                 : .clear
-            titleLabelView.textColor = .label
-            subtitleLabelView.textColor = .secondaryLabel
+            titleLabelView.textColor = tintColor
+            subtitleLabelView.textColor = tintColor.withAlphaComponent(0.72)
             return
         }
 
+        stackView.isHidden = false
+        if #available(iOS 15.0, *) {
+            var configuration = UIButton.Configuration.plain()
+            configuration.contentInsets = .zero
+            self.configuration = configuration
+        }
         backgroundColor = highlighted
             ? (theme?.optionHighlightedBackgroundColor ?? UIColor.systemBlue.withAlphaComponent(0.12))
             : (theme?.backgroundColor ?? UIColor.secondarySystemBackground)
@@ -251,5 +293,35 @@ final class MentionSuggestionChipButton: UIButton {
 
     func usesNativeAppearanceForTesting() -> Bool {
         toolbarAppearance == .native
+    }
+
+    func titleTextColorForTesting() -> UIColor? {
+        titleLabelView.textColor
+    }
+
+    func subtitleTextColorForTesting() -> UIColor? {
+        subtitleLabelView.textColor
+    }
+
+    func usesNativeGlassTextRenderingForTesting() -> Bool {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            return toolbarAppearance == .native
+                && stackView.isHidden
+                && configuration?.title == suggestion.label
+        }
+        #endif
+        return false
+    }
+
+    func usesNativeGlassSemiboldTitleForTesting() -> Bool {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            return toolbarAppearance == .native
+                && stackView.isHidden
+                && configuration?.titleTextAttributesTransformer != nil
+        }
+        #endif
+        return false
     }
 }

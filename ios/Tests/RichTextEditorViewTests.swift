@@ -120,6 +120,37 @@ final class RichTextEditorViewTests: XCTestCase {
         )
     }
 
+    func testFirstCharacterEmojiInsertedIntoEmptyDocumentRendersVisibleGlyph() {
+        let editorId = editorCreate(configJson: "{}")
+        defer { editorDestroy(id: editorId) }
+
+        let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let window = hostEditorView(view)
+        defer {
+            view.removeFromSuperview()
+            window.isHidden = true
+        }
+        view.editorId = editorId
+
+        setCollapsedSelection(in: view.textView, utf16Offset: 0)
+        view.textView.insertText("😀")
+        flushMainQueue()
+        view.layoutIfNeeded()
+        view.textView.layoutIfNeeded()
+
+        XCTAssertEqual(editorGetHtml(id: editorId), "<p>😀</p>")
+        XCTAssertEqual(view.textView.textStorage.string, "😀")
+
+        let nsString = view.textView.textStorage.string as NSString
+        let emojiRange = nsString.rangeOfComposedCharacterSequence(at: 0)
+        view.textView.layoutManager.ensureLayout(for: view.textView.textContainer)
+        let rect = renderedRect(in: view.textView, utf16Range: emojiRange)
+
+        XCTAssertGreaterThan(emojiRange.length, 1, "test must cover a surrogate-pair emoji")
+        XCTAssertGreaterThan(rect.width, 0, "leading emoji should have a visible glyph width")
+        XCTAssertGreaterThan(rect.height, 0, "leading emoji should have a visible glyph height")
+    }
+
     func testCurrentCaretRectReportsEditorLocalCoordinates() throws {
         let view = RichTextEditorView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
         let window = hostEditorView(view)
@@ -893,7 +924,7 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertEqual(toolbar.nativeToolbarContentOffsetXForTesting, targetOffset, accuracy: 0.1)
     }
 
-    func testAccessoryToolbarNativeDisabledButtonUsesSystemGrayTintAtFullAlpha() {
+    func testAccessoryToolbarNativeDisabledButtonUsesTransparentTintAtFullAlpha() {
         let toolbar = EditorAccessoryToolbarView(frame: .zero)
 
         toolbar.apply(theme: EditorToolbarTheme(dictionary: [
@@ -903,12 +934,17 @@ final class RichTextEditorViewTests: XCTestCase {
 
         XCTAssertEqual(
             toolbar.firstButtonAlphaForTesting, 1.0, accuracy: 0.01,
-            "Disabled native button must stay at full alpha — low alpha is invisible on dark blur backgrounds"
+            "Disabled native button must stay at full alpha because low alpha is invisible on dark blur backgrounds"
         )
-        XCTAssertEqual(
-            toolbar.firstButtonTintColorForTesting, .systemGray,
-            "Disabled native button must use .systemGray tint for contrast against dark blur backgrounds"
+        guard let tintColor = toolbar.firstButtonTintColorForTesting else {
+            return XCTFail("Disabled native button should apply an explicit transparent tint")
+        }
+        XCTAssertEqual(tintColor.cgColor.alpha, 0.46, accuracy: 0.01)
+        XCTAssertNotEqual(
+            tintColor, .systemGray,
+            "Disabled native button should use transparent foreground instead of fixed system gray"
         )
+        XCTAssertEqual(toolbar.firstButtonTitleColorForTesting(.disabled), tintColor)
     }
 
     func testAccessoryToolbarNativeEnabledButtonInheritsSystemTintAtFullAlpha() {
@@ -946,6 +982,150 @@ final class RichTextEditorViewTests: XCTestCase {
         ])
 
         XCTAssertTrue(toolbar.mentionButtonAtForTesting(0)?.usesNativeAppearanceForTesting() == true)
+    }
+
+    func testAccessoryToolbarNativeMentionSuggestionsUseNativeGlassTextRendering() {
+        let toolbar = EditorAccessoryToolbarView(frame: .zero)
+
+        toolbar.apply(theme: EditorToolbarTheme(dictionary: [
+            "appearance": "native",
+        ]))
+        _ = toolbar.setMentionSuggestions([
+            NativeMentionSuggestion(dictionary: [
+                "key": "alice",
+                "title": "Alice Chen",
+                "subtitle": "Design",
+                "label": "@alice",
+                "attrs": ["label": "@alice"],
+            ])!,
+        ])
+
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            XCTAssertTrue(
+                toolbar.mentionButtonAtForTesting(0)?.usesNativeGlassTextRenderingForTesting() == true,
+                "Native mention suggestions should let UIKit render adaptive glass text"
+            )
+            XCTAssertTrue(
+                toolbar.mentionButtonAtForTesting(0)?.usesNativeGlassSemiboldTitleForTesting() == true,
+                "Native mention suggestions should keep the mention label semibold in glass"
+            )
+        }
+        #endif
+    }
+
+    func testAccessoryToolbarNativeMentionSuggestionsUseTransparentOuterChrome() {
+        let toolbar = EditorAccessoryToolbarView(frame: .zero)
+
+        toolbar.apply(theme: EditorToolbarTheme(dictionary: [
+            "appearance": "native",
+        ]))
+
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            XCTAssertFalse(toolbar.nativeChromeIsTransparentForTesting)
+
+            _ = toolbar.setMentionSuggestions([
+                NativeMentionSuggestion(dictionary: [
+                    "key": "alice",
+                    "title": "Alice Chen",
+                    "subtitle": "Design",
+                    "label": "@alice",
+                    "attrs": ["label": "@alice"],
+                ])!,
+            ])
+
+            XCTAssertTrue(
+                toolbar.nativeChromeIsTransparentForTesting,
+                "Native mention chips own the glass surface, so the surrounding toolbar chrome should be transparent"
+            )
+
+            _ = toolbar.setMentionSuggestions([])
+
+            XCTAssertFalse(
+                toolbar.nativeChromeIsTransparentForTesting,
+                "The native toolbar chrome should return when mention suggestions are cleared"
+            )
+        }
+        #endif
+    }
+
+    func testAccessoryToolbarNativeMentionChromeTransitionAnimatesWhenHosted() {
+        #if compiler(>=6.2)
+        guard #available(iOS 26.0, *) else {
+            return
+        }
+
+        let animationsWereEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(true)
+        defer {
+            UIView.setAnimationsEnabled(animationsWereEnabled)
+        }
+
+        let toolbar = EditorAccessoryToolbarView(frame: CGRect(x: 0, y: 0, width: 320, height: 56))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        let viewController = UIViewController()
+        window.rootViewController = viewController
+        window.makeKeyAndVisible()
+        viewController.view.addSubview(toolbar)
+        toolbar.layoutIfNeeded()
+        defer {
+            toolbar.removeFromSuperview()
+            window.isHidden = true
+        }
+
+        toolbar.apply(theme: EditorToolbarTheme(dictionary: [
+            "appearance": "native",
+        ]))
+
+        _ = toolbar.setMentionSuggestions([
+            NativeMentionSuggestion(dictionary: [
+                "key": "alice",
+                "title": "Alice Chen",
+                "subtitle": "Design",
+                "label": "@alice",
+                "attrs": ["label": "@alice"],
+            ])!,
+        ])
+
+        XCTAssertTrue(toolbar.didAnimateChromeTransitionForTesting)
+        XCTAssertFalse(
+            toolbar.nativeChromeIsTransparentForTesting,
+            "The outer chrome should fade out instead of disappearing immediately"
+        )
+
+        let expectation = expectation(description: "chrome transition completed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+
+        XCTAssertTrue(toolbar.nativeChromeIsTransparentForTesting)
+        #endif
+    }
+
+    func testNativeMentionSuggestionFallbackTextTracksTintColor() {
+        if #available(iOS 26.0, *) {
+            return
+        }
+
+        let chip = MentionSuggestionChipButton(
+            suggestion: NativeMentionSuggestion(dictionary: [
+                "key": "alice",
+                "title": "Alice Chen",
+                "subtitle": "Design",
+                "label": "@alice",
+                "attrs": ["label": "@alice"],
+            ])!,
+            theme: nil,
+            toolbarAppearance: .native
+        )
+        let tint = UIColor(red: 0.12, green: 0.34, blue: 0.56, alpha: 1)
+
+        chip.tintColor = tint
+
+        XCTAssertEqual(chip.titleTextColorForTesting(), tint)
+        XCTAssertEqual(chip.subtitleTextColorForTesting(), tint.withAlphaComponent(0.72))
     }
 
     func testAccessoryToolbarNativeLayoutFittingPreservesVisibleHeight() {

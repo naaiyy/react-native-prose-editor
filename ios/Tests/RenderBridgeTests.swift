@@ -79,6 +79,38 @@ final class RenderBridgeTests: XCTestCase {
         )
     }
 
+    func testRender_leadingTopLevelChildMetadataCoversWholeEmoji() {
+        let blocks: [[[String: Any]]] = [[
+            ["type": "blockStart", "nodeType": "paragraph", "depth": 0],
+            ["type": "textRun", "text": "😀", "marks": []],
+            ["type": "blockEnd"],
+        ]]
+
+        let result = RenderBridge.renderBlocks(
+            fromArray: blocks,
+            baseFont: baseFont,
+            textColor: textColor
+        )
+        let firstComposedRange = (result.string as NSString)
+            .rangeOfComposedCharacterSequence(at: 0)
+        var effectiveRange = NSRange(location: NSNotFound, length: 0)
+        let value = result.attribute(
+            RenderBridgeAttributes.topLevelChildIndex,
+            at: 0,
+            longestEffectiveRange: &effectiveRange,
+            in: NSRange(location: 0, length: result.length)
+        ) as? NSNumber
+
+        XCTAssertEqual(result.string, "😀")
+        XCTAssertGreaterThan(firstComposedRange.length, 1, "test must cover a surrogate-pair emoji")
+        XCTAssertEqual(value?.intValue, 0)
+        XCTAssertEqual(
+            effectiveRange,
+            firstComposedRange,
+            "top-level metadata must not split a leading emoji surrogate pair into separate attribute runs"
+        )
+    }
+
     // MARK: - Bold Text Rendering
 
     /// Bold mark should produce a font with the bold trait.

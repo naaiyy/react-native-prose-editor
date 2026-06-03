@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.19] - 2026-06-03
+
+### Fixed
+
+- iOS renders an emoji correctly when it is the first character in the editor.
+- iOS native toolbar mention suggestions now use adaptive foreground rendering without nesting glass inside the toolbar chrome, with semibold glass labels, an animated chrome transition, and tighter item padding.
+- iOS native toolbar disabled buttons now use transparent native foreground color instead of fixed gray.
+- Enabling mentions after editing no longer leaves the example editor bound to a stale or reset native editor instance.
+
+### Tests
+
+- Added iOS regression coverage for leading emoji rendering without splitting UTF-16 surrogate pairs.
+- Added iOS regression coverage for adaptive native toolbar mention suggestion text.
+- Added React wrapper regression coverage for preserving uncontrolled content and native view commands across live mentions toggles.
+
 ## [0.5.18] - 2026-06-02
 
 ### Changed
@@ -308,6 +323,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.19]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.18...0.5.19
 [0.5.18]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.17...0.5.18
 [0.5.17]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.16...0.5.17
 [0.5.16]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.15...0.5.16

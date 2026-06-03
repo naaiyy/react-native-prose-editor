@@ -1159,6 +1159,10 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const pendingControlledSyncAfterNativeUpdateRef = useRef(false);
         const pendingBlockedNativeCommandRetryRef = useRef(false);
         const pendingNativeCommandRetryRef = useRef<(() => boolean) | null>(null);
+        const pendingBridgeRecreationContentRef = useRef<{
+            jsonString: string;
+            selection: Selection;
+        } | null>(null);
         const blockedNativeCommandRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
             null
         );
@@ -1788,6 +1792,11 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         );
 
         useEffect(() => {
+            const preservedUncontrolledContent =
+                value == null && serializedValueJson == null
+                    ? pendingBridgeRecreationContentRef.current
+                    : null;
+            pendingBridgeRecreationContentRef.current = null;
             const bridgeConfig =
                 maxLength != null || serializedSchemaJson || allowBase64Images
                     ? {
@@ -1805,19 +1814,51 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 bridge.setHtml(value);
             } else if (serializedValueJson != null) {
                 bridge.setJsonString(serializedValueJson);
+            } else if (preservedUncontrolledContent != null) {
+                bridge.setJsonString(preservedUncontrolledContent.jsonString);
             } else if (serializedInitialJson != null) {
                 bridge.setJsonString(serializedInitialJson);
             } else if (initialContent) {
                 bridge.setHtml(initialContent);
             }
 
+            if (preservedUncontrolledContent != null) {
+                const preservedSelection = preservedUncontrolledContent.selection;
+                if (preservedSelection.type === 'text') {
+                    const anchor = preservedSelection.anchor ?? 0;
+                    const head = preservedSelection.head ?? anchor;
+                    bridge.setSelection(anchor, head);
+                } else if (
+                    preservedSelection.type === 'node' &&
+                    typeof preservedSelection.pos === 'number'
+                ) {
+                    bridge.setSelection(preservedSelection.pos, preservedSelection.pos);
+                }
+            }
+
             syncStateFromUpdate(bridge.getCurrentState());
             setIsReady(true);
 
             return () => {
+                if (
+                    bridgeRef.current === bridge &&
+                    value == null &&
+                    serializedValueJson == null &&
+                    !bridge.isDestroyed
+                ) {
+                    try {
+                        pendingBridgeRecreationContentRef.current = {
+                            jsonString: bridge.getJsonString(),
+                            selection: selectionRef.current,
+                        };
+                    } catch {
+                        pendingBridgeRecreationContentRef.current = null;
+                    }
+                }
                 bridge.destroy();
-                bridgeRef.current = null;
-                nativeViewRef.current = null;
+                if (bridgeRef.current === bridge) {
+                    bridgeRef.current = null;
+                }
                 pendingNativeUpdateInFlightRef.current = null;
                 pendingDetachedControlledSyncRef.current = false;
                 pendingControlledSyncAfterNativeUpdateRef.current = false;

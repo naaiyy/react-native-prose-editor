@@ -790,6 +790,73 @@ describe('NativeRichTextEditor', () => {
                 })
             );
         });
+
+        it('preserves uncontrolled content when mentions are enabled after mount', () => {
+            const liveDocument = {
+                type: 'doc',
+                content: [
+                    {
+                        type: 'paragraph',
+                        content: [{ type: 'text', text: 'Live content' }],
+                    },
+                ],
+            };
+            const liveDocumentJson = JSON.stringify(liveDocument);
+            const { getByTestId, rerender } = render(
+                <NativeRichTextEditor initialContent='<p>Initial content</p>' />
+            );
+
+            expect(getByTestId('native-editor-view').props.editorId).toBe(1);
+            mockNativeModule.editorGetJson.mockReturnValue(liveDocumentJson);
+            mockNativeModule.editorSetHtml.mockClear();
+            mockNativeModule.editorSetJson.mockClear();
+
+            rerender(
+                <NativeRichTextEditor
+                    initialContent='<p>Initial content</p>'
+                    addons={{
+                        mentions: {
+                            suggestions: [{ key: 'u1', title: 'Alice' }],
+                        },
+                    }}
+                />
+            );
+
+            expect(getByTestId('native-editor-view').props.editorId).toBe(2);
+            expect(mockNativeModule.editorGetJson).toHaveBeenCalledWith(1);
+            expect(mockNativeModule.editorSetJson).toHaveBeenCalledWith(2, liveDocumentJson);
+            expect(mockNativeModule.editorSetHtml).not.toHaveBeenCalled();
+        });
+
+        it('keeps the native view command ref after mentions recreate the editor', () => {
+            const ref = createRef<NativeRichTextEditorRef>();
+            const { getByTestId, rerender } = render(<NativeRichTextEditor ref={ref} />);
+
+            rerender(
+                <NativeRichTextEditor
+                    ref={ref}
+                    addons={{
+                        mentions: {
+                            suggestions: [{ key: 'u1', title: 'Alice' }],
+                        },
+                    }}
+                />
+            );
+            mockApplyEditorUpdate.mockClear();
+
+            act(() => {
+                ref.current!.toggleMark('bold');
+            });
+
+            expect(getByTestId('native-editor-view').props.editorId).toBe(2);
+            expect(mockNativeModule.editorToggleMarkAtSelectionScalar).toHaveBeenCalledWith(
+                2,
+                0,
+                0,
+                'bold'
+            );
+            expect(mockApplyEditorUpdate).toHaveBeenCalledWith(MOCK_BOLD_UPDATE_JSON);
+        });
     });
 
     // ── Ref Methods ─────────────────────────────────────────────
