@@ -1744,7 +1744,10 @@ class NativeEditorExpoView(
         }
         isApplyingJSUpdate = true
         return try {
-            richTextView.editorEditText.applyUpdateJSON(updateJson)
+            richTextView.editorEditText.applyUpdateJSON(
+                updateJson,
+                refreshInputConnectionForExternalUpdate = true
+            )
             clearPendingEditorUpdateDispatchQueue("jsUpdate")
             true
         } catch (error: Throwable) {

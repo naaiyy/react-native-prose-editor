@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.20] - 2026-06-06
+
+### Fixed
+
+- Android now refreshes the focused IME session after JS-driven full-content replacements.
+
 ## [0.5.19] - 2026-06-03
 
 ### Fixed
@@ -323,6 +329,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.20]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.19...0.5.20
 [0.5.19]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.18...0.5.19
 [0.5.18]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.17...0.5.18
 [0.5.17]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.16...0.5.17

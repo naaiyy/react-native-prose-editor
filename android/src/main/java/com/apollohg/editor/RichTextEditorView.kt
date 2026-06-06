@@ -209,13 +209,21 @@ class RichTextEditorView @JvmOverloads constructor(
     fun setContent(html: String) {
         if (editorId == 0L) return
         editorSetHtml(editorId.toULong(), html)
-        editorEditText.applyUpdateJSON(editorGetCurrentState(editorId.toULong()), notifyListener = false)
+        editorEditText.applyUpdateJSON(
+            editorGetCurrentState(editorId.toULong()),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
     }
 
     fun setContent(json: org.json.JSONObject) {
         if (editorId == 0L) return
         editorSetJson(editorId.toULong(), json.toString())
-        editorEditText.applyUpdateJSON(editorGetCurrentState(editorId.toULong()), notifyListener = false)
+        editorEditText.applyUpdateJSON(
+            editorGetCurrentState(editorId.toULong()),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
     }
 
     internal fun rebindEditorIfNeeded(notifyListener: Boolean = true) {

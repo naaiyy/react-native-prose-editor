@@ -204,6 +204,46 @@ class EditorInputConnectionTest {
     }
 
     @Test
+    fun `external clear restarts focused input so fresh connection accepts input`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("sent"), notifyListener = false)
+        assertTrue(editText.requestFocus())
+        editText.setSelection(4)
+        editText.editorId = 1
+        editText.onSetSelectionScalarInRustForTesting = { _, _ -> }
+
+        var insertedText: String? = null
+        editText.onInsertTextInRustForTesting = { text, _ ->
+            insertedText = text
+        }
+
+        val staleConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(staleConnection)
+
+        editText.applyUpdateJSON(
+            renderUpdateJson("\u200B"),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
+        editText.setSelection(editText.text?.length ?: 0)
+
+        assertTrue(
+            editText.imeTraceSnapshotForTesting().any {
+                it.contains("restartInput:source=externalUpdate")
+            }
+        )
+
+        assertTrue(staleConnection!!.commitText("stale", 1))
+        assertNull(insertedText)
+
+        val freshConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(freshConnection)
+        assertTrue(freshConnection!!.commitText("fresh", 1))
+
+        assertEquals("fresh", insertedText)
+    }
+
+    @Test
     fun `destroyed editor input session consumes IME changes without Rust mutation`() {
         val editorId = 880001L
         val editText = EditorEditText(RuntimeEnvironment.getApplication())

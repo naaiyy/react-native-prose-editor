@@ -3779,8 +3779,13 @@ class EditorEditText @JvmOverloads constructor(
      *
      * @param updateJSON The JSON string from editor_insert_text, etc.
      */
-    fun applyUpdateJSON(updateJSON: String, notifyListener: Boolean = true) {
+    fun applyUpdateJSON(
+        updateJSON: String,
+        notifyListener: Boolean = true,
+        refreshInputConnectionForExternalUpdate: Boolean = false
+    ) {
         val totalStartedAt = System.nanoTime()
+        val previousVisibleText = text?.toString().orEmpty()
         val parseStartedAt = totalStartedAt
         val update = try {
             org.json.JSONObject(updateJSON)
@@ -3891,6 +3896,10 @@ class EditorEditText @JvmOverloads constructor(
         } else {
             preserveScrollPosition(previousScrollX, previousScrollY)
         }
+        refreshInputConnectionAfterExternalTextReplacementIfNeeded(
+            enabled = refreshInputConnectionForExternalUpdate,
+            previousVisibleText = previousVisibleText
+        )
         val postApplyNanos = System.nanoTime() - postApplyStartedAt
 
         val totalNanos = System.nanoTime() - totalStartedAt
@@ -3914,6 +3923,17 @@ class EditorEditText @JvmOverloads constructor(
                 totalNanos = totalNanos
             )
         }
+    }
+
+    private fun refreshInputConnectionAfterExternalTextReplacementIfNeeded(
+        enabled: Boolean,
+        previousVisibleText: String
+    ) {
+        if (!enabled || !hasFocus()) return
+        val currentVisibleText = text?.toString().orEmpty()
+        if (currentVisibleText == previousVisibleText) return
+        retireInputConnectionForEditor()
+        restartInputForEditor("externalUpdate")
     }
 
     /**
