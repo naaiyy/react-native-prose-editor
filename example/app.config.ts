@@ -6,6 +6,7 @@ export default {
         slug: 'native-editor-example',
         version: rootPackage.version,
         plugins: [
+            '@apollohg/react-native-prose-editor',
             [
                 'expo-image-picker',
                 {

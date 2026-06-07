@@ -219,6 +219,7 @@ const TITLE_EMPTY_DOC = {
 
 let mockEditorIdCounter = 0;
 const mockApplyEditorUpdate = jest.fn();
+const mockApplyEditorResetUpdate = jest.fn();
 const mockNativeFocus = jest.fn();
 const mockNativeBlur = jest.fn();
 const mockNativeGetCaretRect = jest.fn();
@@ -296,6 +297,7 @@ jest.mock('expo-modules-core', () => {
                 blur: mockNativeBlur,
                 getCaretRect: mockNativeGetCaretRect,
                 applyEditorUpdate: mockApplyEditorUpdate,
+                applyEditorResetUpdate: mockApplyEditorResetUpdate,
             }));
             return React.createElement(View, { testID: 'native-editor-view', ...props });
         }
@@ -331,6 +333,7 @@ describe('NativeRichTextEditor', () => {
         _resetEditorToolbarFrameRegistryForTests();
         mockEditorIdCounter = 0;
         mockApplyEditorUpdate.mockClear();
+        mockApplyEditorResetUpdate.mockClear();
         mockNativeFocus.mockClear();
         mockNativeBlur.mockClear();
         mockNativeGetCaretRect.mockReset();
@@ -2660,6 +2663,386 @@ describe('NativeRichTextEditor', () => {
             expect(mockApplyEditorUpdate).toHaveBeenCalled();
         });
 
+        it('clearContent resets the bridge with normalized empty content', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const ref = createRef<NativeRichTextEditorRef>();
+
+            try {
+                render(<NativeRichTextEditor ref={ref} />);
+
+                act(() => {
+                    ref.current!.clearContent();
+                });
+
+                expect(mockNativeModule.editorSetJson).toHaveBeenCalledWith(
+                    1,
+                    JSON.stringify(NORMALIZED_EMPTY_DOC)
+                );
+                expect(mockNativeModule.editorReplaceJson).not.toHaveBeenCalled();
+                expect(mockApplyEditorResetUpdate).toHaveBeenCalledWith(MOCK_EMPTY_UPDATE_JSON);
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
+        it('retries Android setContentJson after in flight native update is acknowledged', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const ref = createRef<NativeRichTextEditorRef>();
+            const firstDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }],
+            };
+            const firstUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'first', marks: [] }],
+                selection: { type: 'text', anchor: 5, head: 5 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+                documentVersion: 2,
+            });
+            const clearUpdateJson = JSON.stringify({
+                renderElements: [],
+                selection: { type: 'text', anchor: 0, head: 0 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+                documentVersion: 3,
+            });
+
+            try {
+                const { getByTestId } = render(<NativeRichTextEditor ref={ref} />);
+                mockNativeModule.editorReplaceJson
+                    .mockReturnValueOnce(firstUpdateJson)
+                    .mockReturnValueOnce(clearUpdateJson);
+
+                act(() => {
+                    ref.current!.setContentJson(firstDoc);
+                });
+                const queuedRevision = getByTestId('native-editor-view').props.editorUpdateRevision;
+
+                act(() => {
+                    ref.current!.setContentJson({ type: 'doc', content: [] });
+                });
+
+                expect(mockNativeModule.editorReplaceJson).toHaveBeenCalledTimes(1);
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onEditorReady({
+                        nativeEvent: { editorId: 1, editorUpdateRevision: queuedRevision },
+                    });
+                });
+
+                expect(mockNativeModule.editorReplaceJson).toHaveBeenCalledTimes(2);
+                expect(mockNativeModule.editorReplaceJson).toHaveBeenLastCalledWith(
+                    1,
+                    JSON.stringify(NORMALIZED_EMPTY_DOC)
+                );
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
+        it('clearContent supersedes an in flight Android native update', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const ref = createRef<NativeRichTextEditorRef>();
+            const firstDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }],
+            };
+            const firstUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'first', marks: [] }],
+                selection: { type: 'text', anchor: 5, head: 5 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+                documentVersion: 2,
+            });
+            const resetUpdateJson = JSON.stringify({
+                renderElements: [],
+                selection: { type: 'text', anchor: 0, head: 0 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+
+            try {
+                const { getByTestId } = render(<NativeRichTextEditor ref={ref} />);
+                mockNativeModule.editorReplaceJson.mockReturnValueOnce(firstUpdateJson);
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(resetUpdateJson);
+
+                act(() => {
+                    ref.current!.setContentJson(firstDoc);
+                });
+                const queuedRevision = getByTestId('native-editor-view').props.editorUpdateRevision;
+
+                act(() => {
+                    ref.current!.clearContent();
+                });
+
+                expect(mockNativeModule.editorReplaceJson).toHaveBeenCalledTimes(1);
+                expect(mockNativeModule.editorSetJson).toHaveBeenCalledWith(
+                    1,
+                    JSON.stringify(NORMALIZED_EMPTY_DOC)
+                );
+                expect(mockApplyEditorResetUpdate).toHaveBeenCalledWith(resetUpdateJson);
+                expect(getByTestId('native-editor-view').props.editorUpdateJson).toBeUndefined();
+                expect(getByTestId('native-editor-view').props.editorResetUpdateJson).toBe(
+                    resetUpdateJson
+                );
+                const resetRevision =
+                    getByTestId('native-editor-view').props.editorResetUpdateRevision;
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onEditorReady({
+                        nativeEvent: { editorId: 1, editorUpdateRevision: queuedRevision },
+                    });
+                });
+
+                expect(mockNativeModule.editorReplaceJson).toHaveBeenCalledTimes(1);
+                expect(mockNativeModule.editorSetJson).toHaveBeenCalledTimes(1);
+                expect(getByTestId('native-editor-view').props.editorResetUpdateJson).toBe(
+                    resetUpdateJson
+                );
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onEditorReady({
+                        nativeEvent: { editorId: 1, editorUpdateRevision: resetRevision },
+                    });
+                });
+
+                expect(
+                    getByTestId('native-editor-view').props.editorResetUpdateJson
+                ).toBeUndefined();
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
+        it('clears Android reset acknowledgement even when another update is in flight', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const ref = createRef<NativeRichTextEditorRef>();
+            const nextDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'next' }] }],
+            };
+            const resetUpdateJson = JSON.stringify({
+                renderElements: [],
+                selection: { type: 'text', anchor: 0, head: 0 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+            const nextUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'next', marks: [] }],
+                selection: { type: 'text', anchor: 4, head: 4 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+                documentVersion: 4,
+            });
+
+            try {
+                const { getByTestId } = render(<NativeRichTextEditor ref={ref} />);
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(resetUpdateJson);
+                mockNativeModule.editorReplaceJson.mockReturnValueOnce(nextUpdateJson);
+
+                act(() => {
+                    ref.current!.clearContent();
+                });
+                const resetRevision =
+                    getByTestId('native-editor-view').props.editorResetUpdateRevision;
+
+                act(() => {
+                    ref.current!.setContentJson(nextDoc);
+                });
+
+                expect(getByTestId('native-editor-view').props.editorResetUpdateJson).toBe(
+                    resetUpdateJson
+                );
+                expect(getByTestId('native-editor-view').props.editorUpdateJson).toBe(
+                    nextUpdateJson
+                );
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onEditorReady({
+                        nativeEvent: { editorId: 1, editorUpdateRevision: resetRevision },
+                    });
+                });
+
+                expect(
+                    getByTestId('native-editor-view').props.editorResetUpdateJson
+                ).toBeUndefined();
+                expect(getByTestId('native-editor-view').props.editorUpdateJson).toBe(
+                    nextUpdateJson
+                );
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
+        it('queues Android reset again after clear then native typing update then clear', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const ref = createRef<NativeRichTextEditorRef>();
+            const resetUpdateJson = JSON.stringify({
+                renderElements: [],
+                selection: { type: 'text', anchor: 0, head: 0 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+            const secondResetUpdateJson = JSON.stringify({
+                renderElements: [],
+                selection: { type: 'text', anchor: 0, head: 0 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 5,
+            });
+            const typedUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'second', marks: [] }],
+                selection: { type: 'text', anchor: 6, head: 6 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+                documentVersion: 4,
+            });
+
+            try {
+                mockNativeModule.editorGetCurrentState.mockImplementation(() => {
+                    const resetWrites = mockNativeModule.editorSetJson.mock.calls.length;
+                    if (resetWrites === 0) return MOCK_EMPTY_UPDATE_JSON;
+                    if (resetWrites === 1) return resetUpdateJson;
+                    return secondResetUpdateJson;
+                });
+                const { getByTestId } = render(<NativeRichTextEditor ref={ref} />);
+
+                act(() => {
+                    ref.current!.clearContent();
+                });
+                const firstResetRevision =
+                    getByTestId('native-editor-view').props.editorResetUpdateRevision;
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onEditorReady({
+                        nativeEvent: { editorId: 1, editorUpdateRevision: firstResetRevision },
+                    });
+                });
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onEditorUpdate({
+                        nativeEvent: { editorId: 1, updateJson: typedUpdateJson },
+                    });
+                });
+
+                act(() => {
+                    ref.current!.clearContent();
+                });
+
+                expect(mockNativeModule.editorSetJson).toHaveBeenCalledTimes(2);
+                expect(getByTestId('native-editor-view').props.editorResetUpdateJson).toBe(
+                    secondResetUpdateJson
+                );
+                expect(
+                    getByTestId('native-editor-view').props.editorResetUpdateRevision
+                ).toBeGreaterThan(firstResetRevision);
+                expect(mockApplyEditorResetUpdate).toHaveBeenCalledWith(resetUpdateJson);
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
         it('getContent returns bridge.getHtml()', () => {
             const ref = createRef<NativeRichTextEditorRef>();
             render(<NativeRichTextEditor ref={ref} />);
@@ -3526,6 +3909,340 @@ describe('NativeRichTextEditor', () => {
             }
         });
 
+        it('applies reset-mode Android controlled JSON immediately while native update is in flight', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const oldDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'old' }] }],
+            };
+            const remoteDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'remote' }] }],
+            };
+            const localUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'local', marks: [] }],
+                selection: { type: 'text', anchor: 5, head: 5 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: true, canRedo: false },
+                documentVersion: 2,
+            });
+            const remoteResetUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'remote', marks: [] }],
+                selection: { type: 'text', anchor: 6, head: 6 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+            const onContentChangeJSON = jest.fn();
+            const ref = createRef<NativeRichTextEditorRef>();
+
+            try {
+                mockNativeModule.editorGetJson.mockReturnValue(JSON.stringify(oldDoc));
+                mockNativeModule.editorReplaceJson.mockReturnValueOnce(localUpdateJson);
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(MOCK_EMPTY_UPDATE_JSON);
+                const { getByTestId, rerender } = render(
+                    <NativeRichTextEditor
+                        ref={ref}
+                        valueJSON={oldDoc}
+                        valueJSONUpdateMode='reset'
+                        onContentChangeJSON={onContentChangeJSON}
+                    />
+                );
+
+                act(() => {
+                    ref.current!.setContentJson({
+                        type: 'doc',
+                        content: [
+                            {
+                                type: 'paragraph',
+                                content: [{ type: 'text', text: 'local' }],
+                            },
+                        ],
+                    });
+                });
+
+                expect(getByTestId('native-editor-view').props.editorUpdateJson).toBe(
+                    localUpdateJson
+                );
+
+                onContentChangeJSON.mockClear();
+                mockNativeModule.editorSetJson.mockClear();
+                mockNativeModule.editorReplaceJson.mockClear();
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(remoteResetUpdateJson);
+
+                rerender(
+                    <NativeRichTextEditor
+                        ref={ref}
+                        valueJSON={remoteDoc}
+                        valueJSONUpdateMode='reset'
+                        onContentChangeJSON={onContentChangeJSON}
+                    />
+                );
+
+                expect(mockNativeModule.editorReplaceJson).not.toHaveBeenCalled();
+                expect(mockNativeModule.editorSetJson).toHaveBeenCalledWith(
+                    1,
+                    JSON.stringify(remoteDoc)
+                );
+                expect(mockApplyEditorResetUpdate).toHaveBeenCalledWith(remoteResetUpdateJson);
+                expect(getByTestId('native-editor-view').props.editorUpdateJson).toBeUndefined();
+                expect(getByTestId('native-editor-view').props.editorResetUpdateJson).toBe(
+                    remoteResetUpdateJson
+                );
+                expect(onContentChangeJSON).not.toHaveBeenCalled();
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
+        it('preserves live selection for opt-in reset-mode controlled JSON updates', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const oldDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hello' }] }],
+            };
+            const remoteDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hello!' }] }],
+            };
+            const remoteResetUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'hello!', marks: [] }],
+                selection: { type: 'text', anchor: 1, head: 1, anchorScalar: 0, headScalar: 0 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+            const restoredSelectionStateJson = JSON.stringify({
+                selection: { type: 'text', anchor: 5, head: 5, anchorScalar: 5, headScalar: 5 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: ['bold'],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+            const onSelectionChange = jest.fn();
+
+            try {
+                mockNativeModule.editorGetJson.mockReturnValue(JSON.stringify(oldDoc));
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(MOCK_EMPTY_UPDATE_JSON);
+                const { getByTestId, rerender } = render(
+                    <NativeRichTextEditor
+                        valueJSON={oldDoc}
+                        valueJSONUpdateMode='reset'
+                        preserveSelectionOnValueJSONReset
+                        onSelectionChange={onSelectionChange}
+                    />
+                );
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onSelectionChange({
+                        nativeEvent: {
+                            editorId: 1,
+                            anchor: 5,
+                            head: 5,
+                            documentVersion: 1,
+                            stateJson: JSON.stringify({
+                                selection: {
+                                    type: 'text',
+                                    anchor: 5,
+                                    head: 5,
+                                    anchorScalar: 5,
+                                    headScalar: 5,
+                                },
+                                activeState: {
+                                    marks: {},
+                                    markAttrs: {},
+                                    nodes: { paragraph: true },
+                                    commands: {},
+                                    allowedMarks: [],
+                                    insertableNodes: [],
+                                },
+                                historyState: { canUndo: false, canRedo: false },
+                                documentVersion: 1,
+                            }),
+                        },
+                    });
+                });
+
+                mockApplyEditorResetUpdate.mockClear();
+                mockNativeModule.editorSetJson.mockClear();
+                mockNativeModule.editorSetSelection.mockClear();
+                mockNativeModule.editorGetSelectionState.mockReturnValueOnce(
+                    restoredSelectionStateJson
+                );
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(remoteResetUpdateJson);
+
+                rerender(
+                    <NativeRichTextEditor
+                        valueJSON={remoteDoc}
+                        valueJSONUpdateMode='reset'
+                        preserveSelectionOnValueJSONReset
+                        onSelectionChange={onSelectionChange}
+                    />
+                );
+
+                expect(mockNativeModule.editorSetJson).toHaveBeenCalledWith(
+                    1,
+                    JSON.stringify(remoteDoc)
+                );
+                expect(mockNativeModule.editorSetSelection).toHaveBeenCalledWith(1, 5, 5);
+                expect(mockNativeModule.editorGetSelectionState).toHaveBeenCalled();
+                expect(mockApplyEditorResetUpdate).toHaveBeenCalledTimes(1);
+                expect(JSON.parse(mockApplyEditorResetUpdate.mock.calls[0][0]).selection).toEqual({
+                    type: 'text',
+                    anchor: 5,
+                    head: 5,
+                    anchorScalar: 5,
+                    headScalar: 5,
+                });
+                expect(onSelectionChange).toHaveBeenLastCalledWith({
+                    type: 'text',
+                    anchor: 5,
+                    head: 5,
+                    anchorScalar: 5,
+                    headScalar: 5,
+                });
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
+        it('uses explicit reset-mode selection before falling back to live selection', () => {
+            const originalPlatform = Platform.OS;
+            Object.defineProperty(Platform, 'OS', {
+                configurable: true,
+                value: 'android',
+            });
+            const oldDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hello' }] }],
+            };
+            const remoteDoc = {
+                type: 'doc',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'hello!' }] }],
+            };
+            const remoteResetUpdateJson = JSON.stringify({
+                renderElements: [{ type: 'textRun', text: 'hello!', marks: [] }],
+                selection: { type: 'text', anchor: 1, head: 1 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+            const explicitSelectionStateJson = JSON.stringify({
+                selection: { type: 'text', anchor: 7, head: 7, anchorScalar: 7, headScalar: 7 },
+                activeState: {
+                    marks: {},
+                    markAttrs: {},
+                    nodes: { paragraph: true },
+                    commands: {},
+                    allowedMarks: [],
+                    insertableNodes: [],
+                },
+                historyState: { canUndo: false, canRedo: false },
+                documentVersion: 3,
+            });
+
+            try {
+                mockNativeModule.editorGetJson.mockReturnValue(JSON.stringify(oldDoc));
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(MOCK_EMPTY_UPDATE_JSON);
+                const { getByTestId, rerender } = render(
+                    <NativeRichTextEditor
+                        valueJSON={oldDoc}
+                        valueJSONUpdateMode='reset'
+                        preserveSelectionOnValueJSONReset
+                    />
+                );
+
+                act(() => {
+                    getByTestId('native-editor-view').props.onSelectionChange({
+                        nativeEvent: {
+                            editorId: 1,
+                            anchor: 5,
+                            head: 5,
+                            documentVersion: 1,
+                        },
+                    });
+                });
+
+                mockApplyEditorResetUpdate.mockClear();
+                mockNativeModule.editorSetSelection.mockClear();
+                mockNativeModule.editorGetSelectionState.mockReturnValueOnce(
+                    explicitSelectionStateJson
+                );
+                mockNativeModule.editorGetCurrentState.mockReturnValueOnce(remoteResetUpdateJson);
+
+                rerender(
+                    <NativeRichTextEditor
+                        valueJSON={remoteDoc}
+                        valueJSONUpdateMode='reset'
+                        preserveSelectionOnValueJSONReset
+                        selectionOnValueJSONReset={{ type: 'text', anchor: 7, head: 7 }}
+                    />
+                );
+
+                expect(mockNativeModule.editorSetSelection).toHaveBeenCalledWith(1, 7, 7);
+                expect(JSON.parse(mockApplyEditorResetUpdate.mock.calls[0][0]).selection).toEqual({
+                    type: 'text',
+                    anchor: 7,
+                    head: 7,
+                    anchorScalar: 7,
+                    headScalar: 7,
+                });
+            } finally {
+                Object.defineProperty(Platform, 'OS', {
+                    configurable: true,
+                    value: originalPlatform,
+                });
+            }
+        });
+
         it('skips autolink rewriting for controlled value updates', () => {
             const linkedDoc = {
                 type: 'doc',
@@ -3852,6 +4569,29 @@ describe('NativeRichTextEditor', () => {
             });
 
             expect(onContentChangeJSON).toHaveBeenCalledWith(JSON.parse(MOCK_DOCUMENT_JSON_STR));
+        });
+
+        it('emits selection changes before content JSON changes for local edits', () => {
+            const onSelectionChange = jest.fn();
+            const onContentChangeJSON = jest.fn();
+            const ref = createRef<NativeRichTextEditorRef>();
+            render(
+                <NativeRichTextEditor
+                    ref={ref}
+                    onSelectionChange={onSelectionChange}
+                    onContentChangeJSON={onContentChangeJSON}
+                />
+            );
+
+            act(() => {
+                ref.current!.insertText('!');
+            });
+
+            expect(onSelectionChange).toHaveBeenCalledWith({ type: 'text', anchor: 5, head: 5 });
+            expect(onContentChangeJSON).toHaveBeenCalledWith(JSON.parse(MOCK_DOCUMENT_JSON_STR));
+            expect(onSelectionChange.mock.invocationCallOrder[0]).toBeLessThan(
+                onContentChangeJSON.mock.invocationCallOrder[0]
+            );
         });
 
         it('onContentChange fires with HTML from bridge', () => {
@@ -4623,7 +5363,7 @@ describe('NativeRichTextEditor', () => {
             });
         });
 
-        it('retains standalone toolbar frames after blur so native hit-testing works during focus transitions', () => {
+        it('clears standalone toolbar frames after blur to avoid stale native hit-testing', () => {
             const { getByTestId } = render(<NativeRichTextEditor showToolbar={false} />);
 
             act(() => {
@@ -4641,10 +5381,10 @@ describe('NativeRichTextEditor', () => {
                 });
             });
 
-            expect(getByTestId('native-editor-view').props.toolbarFrameJson).toBeDefined();
+            expect(getByTestId('native-editor-view').props.toolbarFrameJson).toBeUndefined();
         });
 
-        it('restores focus instead of emitting blur during standalone toolbar interaction', () => {
+        it('honors native blur events during standalone toolbar interaction', () => {
             const onBlur = jest.fn();
             const { getByTestId } = render(
                 <NativeRichTextEditor showToolbar={false} onBlur={onBlur} />
@@ -4664,8 +5404,8 @@ describe('NativeRichTextEditor', () => {
                 });
             });
 
-            expect(onBlur).not.toHaveBeenCalled();
-            expect(mockNativeFocus).toHaveBeenCalled();
+            expect(onBlur).toHaveBeenCalledTimes(1);
+            expect(mockNativeFocus).not.toHaveBeenCalled();
         });
 
         it('serializes multiple standalone toolbar frames for native outside-tap filtering', () => {
@@ -4684,6 +5424,48 @@ describe('NativeRichTextEditor', () => {
                     { x: 12, y: 24, width: 320, height: 48 },
                     { x: 0, y: 480, width: 390, height: 56 },
                 ],
+            });
+        });
+
+        it('does not serialize toolbar frames owned by another editor', () => {
+            const { getAllByTestId } = render(
+                <View>
+                    <NativeRichTextEditor showToolbar={false} />
+                    <NativeRichTextEditor showToolbar={false} />
+                </View>
+            );
+            const [firstView, secondView] = getAllByTestId('native-editor-view');
+
+            act(() => {
+                _setEditorToolbarFrameForTests(1, { x: 12, y: 24, width: 320, height: 48 }, 2);
+                _setEditorToolbarFrameForTests(2, { x: 0, y: 480, width: 390, height: 56 }, 1);
+                firstView.props.onFocusChange({
+                    nativeEvent: { isFocused: true, editorId: 1 },
+                });
+            });
+
+            expect(JSON.parse(firstView.props.toolbarFrameJson)).toEqual({
+                x: 0,
+                y: 480,
+                width: 390,
+                height: 56,
+            });
+
+            act(() => {
+                firstView.props.onFocusChange({
+                    nativeEvent: { isFocused: false, editorId: 1 },
+                });
+                secondView.props.onFocusChange({
+                    nativeEvent: { isFocused: true, editorId: 2 },
+                });
+            });
+
+            expect(firstView.props.toolbarFrameJson).toBeUndefined();
+            expect(JSON.parse(secondView.props.toolbarFrameJson)).toEqual({
+                x: 12,
+                y: 24,
+                width: 320,
+                height: 48,
             });
         });
 
@@ -7080,6 +7862,7 @@ describe('NativeRichTextEditor', () => {
             capturedRef.redo();
             capturedRef.setContent('<p>x</p>');
             capturedRef.setContentJson({ type: 'doc' });
+            capturedRef.clearContent();
             capturedRef.insertContentHtml('<p>x</p>');
             capturedRef.insertContentJson({ type: 'doc' });
 
@@ -7089,6 +7872,9 @@ describe('NativeRichTextEditor', () => {
             expect(mockNativeModule.editorInsertNodeAtSelectionScalar).not.toHaveBeenCalled();
             expect(mockNativeModule.editorInsertText).not.toHaveBeenCalled();
             expect(mockNativeModule.editorReplaceSelectionText).not.toHaveBeenCalled();
+            expect(mockNativeModule.editorReplaceHtml).not.toHaveBeenCalled();
+            expect(mockNativeModule.editorReplaceJson).not.toHaveBeenCalled();
+            expect(mockNativeModule.editorSetJson).not.toHaveBeenCalled();
             expect(mockNativeModule.editorUndo).not.toHaveBeenCalled();
             expect(mockNativeModule.editorRedo).not.toHaveBeenCalled();
         });

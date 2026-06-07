@@ -3,6 +3,7 @@ package com.apollohg.editor
 import android.graphics.Color
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.text.SpannableStringBuilder
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.Spanned
@@ -927,6 +928,77 @@ class RichTextEditorViewTest {
             0.1f
         )
         assertTrue(actual.height() > 0f)
+    }
+
+    @Test
+    fun `painted caret rect is clipped to glyph height on a spacer line`() {
+        val context = RuntimeEnvironment.getApplication()
+        val editText = EditorEditText(context)
+        editText.layoutParams = ViewGroup.LayoutParams(600, 240)
+        val spanned = SpannableStringBuilder("Hello\nWorld")
+        spanned.setSpan(
+            ParagraphSpacerSpan(spacingPx = 60, baseFontSize = 16, textColor = Color.BLACK),
+            5,
+            6,
+            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        editText.setText(spanned)
+
+        val widthSpec = View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY)
+        val heightSpec = View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY)
+        editText.measure(widthSpec, heightSpec)
+        editText.layout(0, 0, editText.measuredWidth, editText.measuredHeight)
+        editText.setSelection(5) // collapsed caret on the spacer line
+
+        val layout = editText.layout!!
+        val inflatedLineHeight = (layout.getLineBottom(0) - layout.getLineTop(0)).toFloat()
+        // The exact rectangle drawCustomCaret paints (content coordinates, caret width).
+        val caret = editText.customCaretDrawRect()
+
+        assertNotNull("a caret rect should be produced for a collapsed selection", caret)
+        assertTrue("painted caret should have width", caret!!.width() > 0f)
+        assertTrue("painted caret should have height", caret.height() > 0f)
+        assertTrue(
+            "painted caret height ${caret.height()} must exclude the 60px gap (inflated=$inflatedLineHeight)",
+            caret.height() < inflatedLineHeight - 20f
+        )
+    }
+
+    @Test
+    fun `caret rect height excludes the paragraph spacer gap`() {
+        val context = RuntimeEnvironment.getApplication()
+        val editText = EditorEditText(context)
+        editText.layoutParams = ViewGroup.LayoutParams(600, 240)
+        val spanned = SpannableStringBuilder("Hello\nWorld")
+        // Spacer on the inter-block newline inflates the descent of line 0.
+        spanned.setSpan(
+            ParagraphSpacerSpan(spacingPx = 60, baseFontSize = 16, textColor = Color.BLACK),
+            5,
+            6,
+            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        editText.setText(spanned)
+
+        val widthSpec = View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY)
+        val heightSpec = View.MeasureSpec.makeMeasureSpec(240, View.MeasureSpec.EXACTLY)
+        editText.measure(widthSpec, heightSpec)
+        editText.layout(0, 0, editText.measuredWidth, editText.measuredHeight)
+        editText.setSelection(5) // caret on the spacer line (line 0)
+
+        val layout = editText.layout!!
+        val line = 0
+        val inflatedLineHeight = (layout.getLineBottom(line) - layout.getLineTop(line)).toFloat()
+        val rect = editText.caretRect()!!
+
+        assertTrue(
+            "reproduction guard: spacer should inflate the line box",
+            layout.getLineDescent(line) > editText.paint.fontMetrics.descent
+        )
+        assertTrue("caret height should be positive", rect.height() > 0f)
+        assertTrue(
+            "caret height ${rect.height()} must exclude the 60px paragraph gap (inflated line height=$inflatedLineHeight)",
+            rect.height() < inflatedLineHeight - 20f
+        )
     }
 
     @Test

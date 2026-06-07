@@ -204,7 +204,7 @@ class EditorInputConnectionTest {
     }
 
     @Test
-    fun `external clear restarts focused input so fresh connection accepts input`() {
+    fun `external clear keeps same editor input connection accepting input`() {
         val editText = EditorEditText(RuntimeEnvironment.getApplication())
         editText.applyUpdateJSON(renderUpdateJson("sent"), notifyListener = false)
         assertTrue(editText.requestFocus())
@@ -217,8 +217,8 @@ class EditorInputConnectionTest {
             insertedText = text
         }
 
-        val staleConnection = editText.onCreateInputConnection(EditorInfo())
-        assertNotNull(staleConnection)
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
 
         editText.applyUpdateJSON(
             renderUpdateJson("\u200B"),
@@ -233,14 +233,138 @@ class EditorInputConnectionTest {
             }
         )
 
-        assertTrue(staleConnection!!.commitText("stale", 1))
-        assertNull(insertedText)
-
-        val freshConnection = editText.onCreateInputConnection(EditorInfo())
-        assertNotNull(freshConnection)
-        assertTrue(freshConnection!!.commitText("fresh", 1))
+        assertTrue(inputConnection!!.commitText("fresh", 1))
 
         assertEquals("fresh", insertedText)
+    }
+
+    @Test
+    fun `external clear keeps same editor input connection accepting composition`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("sent"), notifyListener = false)
+        assertTrue(editText.requestFocus())
+        editText.setSelection(4)
+        editText.editorId = 1
+        editText.onSetSelectionScalarInRustForTesting = { _, _ -> }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        editText.applyUpdateJSON(
+            renderUpdateJson("\u200B"),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
+        editText.setSelection(editText.text?.length ?: 0)
+
+        assertTrue(inputConnection!!.setComposingText("f", 1))
+        assertTrue(editText.text?.toString()?.contains("f") == true)
+    }
+
+    @Test
+    fun `external clear invalidates rendered editor content`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson("sent"), notifyListener = false)
+        shadowOf(editText).clearWasInvalidated()
+
+        editText.applyUpdateJSON(
+            renderUpdateJson(""),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
+
+        assertEquals("", editText.text?.toString())
+        assertTrue(shadowOf(editText).wasInvalidated())
+    }
+
+    @Test
+    fun `external clear after deferred Rust update clears stale visible text`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        assertTrue(editText.requestFocus())
+        editText.setSelection(0)
+        editText.editorId = 1
+        editText.onSetSelectionScalarInRustForTesting = { _, _ -> }
+
+        var insertedText: String? = null
+        editText.onInsertTextInRustForTesting = { text, _ ->
+            insertedText = text
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        editText.runWithDeferredRustUpdateApplication {
+            editText.runWithTransientInputMutationGuard {
+                editText.text!!.insert(0, "second")
+                editText.setSelection(6)
+                true
+            }
+            editText.applyRustUpdateJSONForTesting(renderUpdateJson("second"))
+        }
+
+        assertTrue(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertEquals("second", editText.text?.toString())
+
+        editText.applyUpdateJSON(
+            renderUpdateJson(""),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
+        editText.setSelection(editText.text?.length ?: 0)
+
+        assertFalse(editText.hasDeferredRustUpdateApplicationForTesting())
+        assertEquals("", editText.text?.toString())
+
+        assertTrue(inputConnection!!.commitText("next", 1))
+        assertEquals("next", insertedText)
+    }
+
+    @Test
+    fun `external clear after preflight native mutation keeps same editor input connection accepting input`() {
+        val editText = EditorEditText(RuntimeEnvironment.getApplication())
+        editText.applyUpdateJSON(renderUpdateJson(""), notifyListener = false)
+        assertTrue(editText.requestFocus())
+        editText.setSelection(0)
+        editText.editorId = 1
+        editText.onSetSelectionScalarInRustForTesting = { _, _ -> }
+
+        var renderedText = ""
+        var insertedText: String? = null
+        editText.onInsertTextInRustForTesting = { text, scalar ->
+            insertedText = text
+            renderedText = renderedText.substring(0, scalar.coerceIn(0, renderedText.length)) +
+                text +
+                renderedText.substring(scalar.coerceIn(0, renderedText.length))
+            editText.applyUpdateJSON(renderUpdateJson(renderedText), notifyListener = false)
+            editText.setSelection(renderedText.length)
+        }
+
+        val inputConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(inputConnection)
+
+        editText.runWithTransientInputMutationGuard {
+            editText.text!!.insert(0, "second")
+            editText.setSelection(6)
+            true
+        }
+
+        assertTrue(editText.prepareForExternalEditorUpdate())
+        assertEquals("second", insertedText)
+        assertEquals("second", editText.text?.toString())
+
+        renderedText = ""
+        insertedText = null
+        editText.applyUpdateJSON(
+            renderUpdateJson("\u200B"),
+            notifyListener = false,
+            refreshInputConnectionForExternalUpdate = true
+        )
+        editText.setSelection(editText.text?.length ?: 0)
+
+        assertEquals("\u200B", editText.text?.toString())
+        assertTrue(inputConnection!!.commitText("next", 1))
+        assertEquals("next", insertedText)
     }
 
     @Test
@@ -2330,11 +2454,12 @@ class EditorInputConnectionTest {
     }
 
     @Test
-    fun `input connection created before read only toggle stays stale after editing resumes`() {
+    fun `focused read only toggle restarts input and keeps stale connection blocked`() {
         val editText = EditorEditText(RuntimeEnvironment.getApplication())
         editText.applyUpdateJSON(renderUpdateJson("abc"), notifyListener = false)
         editText.setSelection(3)
         editText.editorId = 1
+        assertTrue(editText.requestFocus())
 
         var insertedText: String? = null
         editText.onInsertTextInRustForTesting = { text, _ ->
@@ -2347,10 +2472,22 @@ class EditorInputConnectionTest {
         editText.isEditable = false
         editText.isEditable = true
 
+        assertTrue(
+            editText.imeTraceSnapshotForTesting().any {
+                it.contains("restartInput:source=editable")
+            }
+        )
+
         assertTrue(staleConnection!!.commitText("X", 1))
 
         assertEquals("abc", editText.text?.toString())
         assertNull(insertedText)
+
+        val freshConnection = editText.onCreateInputConnection(EditorInfo())
+        assertNotNull(freshConnection)
+
+        assertTrue(freshConnection!!.commitText("Y", 1))
+        assertEquals("Y", insertedText)
     }
 
     @Test

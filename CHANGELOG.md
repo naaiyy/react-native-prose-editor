@@ -1,10 +1,33 @@
 # Changelog
 
+## [0.5.21] - 2026-06-06
+
+### Added
+
+- Added `NativeRichTextEditorRef.clearContent()` as a schema-aware cross-platform way to clear the editor for chat composer and draft reset flows.
+
+### Fixed
+
+- Android now preserves the same-editor input connection while refreshing IME state after JS-driven full-content replacements and native-mutation preflight.
+- Android imperative whole-document content setters now retry after an in-flight native update is acknowledged, so chat-style composers can repeatedly call `clearContent()` or `setContentJson({ type: 'doc', content: [] })` after sending messages.
+- Android now requests a fresh IME input connection when a focused editor is made editable again, preventing chat composers from getting stuck after send flows that briefly pass `editable={false}` while clearing content.
+- Android `clearContent()` now uses a reset-style native update that bypasses composition preflight and clears stale pending update queues.
+- Android now explicitly invalidates the rendered editor view after Rust-backed full-content updates, preventing `clearContent()` resets from leaving stale pre-send text visible until the next key press.
+- Android `clearContent()` now also sends reset updates through a dedicated prop-backed native reset lane, so composer clears are delivered even when the immediate Expo view command is delayed, resolves `false`, or races native view readiness.
+- Android Expo prebuild projects can use the package config plugin to exclude obsolete JNA `armeabi`, `mips`, and `mips64` native libraries, avoiding NDK strip warnings in consuming apps.
+
+### Tests
+
+- Added Android regression coverage for committing and composing text again after an external clear, including after preflight adopts a native text mutation.
+- Added React wrapper regression coverage for retrying Android `setContentJson()` after an in-flight native update and for `clearContent()`.
+- Added Android regression coverage for a focused read-only toggle keeping the old input connection blocked while allowing a fresh connection to type again.
+- Added React wrapper and Android native view coverage for reset updates bypassing blocked preflight, invalidating rendered content, retrying when native readiness is delayed, and superseding stale in-flight editor updates.
+
 ## [0.5.20] - 2026-06-06
 
 ### Fixed
 
-- Android now refreshes the focused IME session after JS-driven full-content replacements.
+- Android refreshes the focused IME session after JS-driven full-content replacements.
 
 ## [0.5.19] - 2026-06-03
 
@@ -329,6 +352,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.21]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.20...0.5.21
 [0.5.20]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.19...0.5.20
 [0.5.19]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.18...0.5.19
 [0.5.18]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.17...0.5.18

@@ -500,7 +500,17 @@ class NativeEditorModule : Module() {
             Prop("editorUpdateRevision") { view: NativeEditorExpoView, editorUpdateRevision: Int ->
                 view.setPendingEditorUpdateRevision(editorUpdateRevision)
             }
+            Prop("editorResetUpdateJson") { view: NativeEditorExpoView, editorResetUpdateJson: String? ->
+                view.setPendingEditorResetUpdateJson(editorResetUpdateJson)
+            }
+            Prop("editorResetUpdateEditorId") { view: NativeEditorExpoView, editorResetUpdateEditorId: Int? ->
+                view.setPendingEditorResetUpdateEditorId(editorResetUpdateEditorId?.let { nativeULong(it)?.toLong() })
+            }
+            Prop("editorResetUpdateRevision") { view: NativeEditorExpoView, editorResetUpdateRevision: Int ->
+                view.setPendingEditorResetUpdateRevision(editorResetUpdateRevision)
+            }
             OnViewDidUpdateProps { view: NativeEditorExpoView ->
+                view.applyPendingEditorResetUpdateIfNeeded()
                 view.applyPendingEditorUpdateIfNeeded()
             }
 
@@ -517,6 +527,10 @@ class NativeEditorModule : Module() {
 
             AsyncFunction("applyEditorUpdate") { view: NativeEditorExpoView, updateJson: String ->
                 view.applyEditorUpdate(updateJson)
+            }
+
+            AsyncFunction("applyEditorResetUpdate") { view: NativeEditorExpoView, updateJson: String ->
+                view.applyEditorResetUpdate(updateJson)
             }
 
         }

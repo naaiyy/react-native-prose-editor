@@ -1187,6 +1187,31 @@ fn test_empty_editor_has_empty_paragraph() {
 }
 
 #[test]
+fn test_insert_text_scalar_after_replace_json_empty_paragraph() {
+    let mut editor = default_editor();
+    editor.set_html("<p>sent</p>").expect("set_html");
+
+    let empty_json = serde_json::json!({
+        "type": "doc",
+        "content": [{ "type": "paragraph", "content": [] }]
+    });
+    editor.replace_json(&empty_json).expect("replace_json");
+    assert_eq!(editor.get_html(), "<p></p>");
+
+    let cursor_scalar = editor.doc_to_scalar(1);
+    assert_eq!(
+        cursor_scalar, 1,
+        "empty paragraph cursor should map after the placeholder scalar"
+    );
+
+    editor
+        .insert_text_scalar(cursor_scalar, "fresh")
+        .expect("insert_text_scalar");
+
+    assert_eq!(editor.get_html(), "<p>fresh</p>");
+}
+
+#[test]
 fn test_set_html_replaces_previous_content() {
     let mut editor = default_editor();
     editor.set_html("<p>First</p>").expect("set_html 1");

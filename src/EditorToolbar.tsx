@@ -198,12 +198,18 @@ export interface EditorToolbarFrame {
 
 type EditorToolbarFrameListener = () => void;
 
-const editorToolbarFrames = new Map<number, EditorToolbarFrame>();
+interface EditorToolbarFrameRegistration {
+    ownerId: number | null;
+    frame: EditorToolbarFrame;
+}
+
+const editorToolbarFrames = new Map<number, EditorToolbarFrameRegistration>();
 const editorToolbarFrameListeners = new Set<EditorToolbarFrameListener>();
 const editorToolbarMentionStateListeners = new Set<EditorToolbarFrameListener>();
 let nextEditorToolbarRegistrationId = 1;
 let activeEditorToolbarInteractions = 0;
 let editorToolbarFocusPreserveUntil = 0;
+let activeEditorToolbarFrameOwnerId: number | null = null;
 
 interface EditorToolbarMentionState {
     ownerId: number;
@@ -229,6 +235,16 @@ function areToolbarFramesEqual(
     );
 }
 
+function areToolbarFrameListsEqual(
+    left: readonly EditorToolbarFrame[],
+    right: readonly EditorToolbarFrame[]
+): boolean {
+    if (left.length !== right.length) {
+        return false;
+    }
+    return left.every((frame, index) => areToolbarFramesEqual(frame, right[index]));
+}
+
 function notifyEditorToolbarFrameListeners() {
     editorToolbarFrameListeners.forEach((listener) => listener());
 }
@@ -237,8 +253,14 @@ function notifyEditorToolbarMentionStateListeners() {
     editorToolbarMentionStateListeners.forEach((listener) => listener());
 }
 
-function getEditorToolbarFramesSnapshot(): EditorToolbarFrame[] {
-    return Array.from(editorToolbarFrames.values());
+function getEditorToolbarFramesSnapshot(ownerId: number): EditorToolbarFrame[] {
+    return Array.from(editorToolbarFrames.values())
+        .filter(
+            (registration) =>
+                registration.ownerId === ownerId ||
+                (registration.ownerId == null && activeEditorToolbarFrameOwnerId === ownerId)
+        )
+        .map((registration) => registration.frame);
 }
 
 function subscribeEditorToolbarMentionState(listener: EditorToolbarFrameListener) {
@@ -260,7 +282,11 @@ function useEditorToolbarMentionState(): EditorToolbarMentionState | null {
     );
 }
 
-function registerEditorToolbarFrame(id: number, frame: EditorToolbarFrame | null) {
+function registerEditorToolbarFrame(
+    id: number,
+    frame: EditorToolbarFrame | null,
+    ownerId: number | null
+) {
     if (frame == null || frame.width <= 0 || frame.height <= 0) {
         if (editorToolbarFrames.delete(id)) {
             notifyEditorToolbarFrameListeners();
@@ -268,12 +294,15 @@ function registerEditorToolbarFrame(id: number, frame: EditorToolbarFrame | null
         return;
     }
 
-    const currentFrame = editorToolbarFrames.get(id);
-    if (areToolbarFramesEqual(currentFrame, frame)) {
+    const currentRegistration = editorToolbarFrames.get(id);
+    if (
+        currentRegistration?.ownerId === ownerId &&
+        areToolbarFramesEqual(currentRegistration.frame, frame)
+    ) {
         return;
     }
 
-    editorToolbarFrames.set(id, frame);
+    editorToolbarFrames.set(id, { ownerId, frame });
     notifyEditorToolbarFrameListeners();
 }
 
@@ -301,17 +330,37 @@ export function isEditorToolbarFocusPreservationActive(): boolean {
     return activeEditorToolbarInteractions > 0 || Date.now() <= editorToolbarFocusPreserveUntil;
 }
 
-export function useEditorToolbarFrames(): readonly EditorToolbarFrame[] {
-    const [frames, setFrames] = useState<EditorToolbarFrame[]>(getEditorToolbarFramesSnapshot);
+export function setActiveEditorToolbarFrameOwnerForEditor(ownerId: number, isActive: boolean) {
+    const nextOwnerId = isActive
+        ? ownerId
+        : activeEditorToolbarFrameOwnerId === ownerId
+          ? null
+          : activeEditorToolbarFrameOwnerId;
+    if (activeEditorToolbarFrameOwnerId === nextOwnerId) {
+        return;
+    }
+    activeEditorToolbarFrameOwnerId = nextOwnerId;
+    notifyEditorToolbarFrameListeners();
+}
+
+export function useEditorToolbarFrames(ownerId: number): readonly EditorToolbarFrame[] {
+    const [frames, setFrames] = useState<EditorToolbarFrame[]>(() =>
+        getEditorToolbarFramesSnapshot(ownerId)
+    );
 
     useEffect(() => {
-        const listener = () => setFrames(getEditorToolbarFramesSnapshot());
+        const listener = () => {
+            const nextFrames = getEditorToolbarFramesSnapshot(ownerId);
+            setFrames((currentFrames) =>
+                areToolbarFrameListsEqual(currentFrames, nextFrames) ? currentFrames : nextFrames
+            );
+        };
         editorToolbarFrameListeners.add(listener);
         listener();
         return () => {
             editorToolbarFrameListeners.delete(listener);
         };
-    }, []);
+    }, [ownerId]);
 
     return frames;
 }
@@ -336,8 +385,12 @@ export function setEditorToolbarMentionState(
     notifyEditorToolbarMentionStateListeners();
 }
 
-export function _setEditorToolbarFrameForTests(id: number, frame: EditorToolbarFrame | null) {
-    registerEditorToolbarFrame(id, frame);
+export function _setEditorToolbarFrameForTests(
+    id: number,
+    frame: EditorToolbarFrame | null,
+    ownerId: number | null = null
+) {
+    registerEditorToolbarFrame(id, frame, ownerId);
 }
 
 export function _resetEditorToolbarFrameRegistryForTests() {
@@ -345,6 +398,7 @@ export function _resetEditorToolbarFrameRegistryForTests() {
     editorToolbarMentionState = null;
     activeEditorToolbarInteractions = 0;
     editorToolbarFocusPreserveUntil = 0;
+    activeEditorToolbarFrameOwnerId = null;
     notifyEditorToolbarFrameListeners();
     notifyEditorToolbarMentionStateListeners();
 }
@@ -891,7 +945,7 @@ export function EditorToolbar({
         }
 
         toolbar.measureInWindow((x, y, width, height) => {
-            registerEditorToolbarFrame(registrationId, { x, y, width, height });
+            registerEditorToolbarFrame(registrationId, { x, y, width, height }, null);
         });
     }, [preserveEditorFocus]);
 

@@ -634,6 +634,21 @@ function AppScreen() {
                                 ? collaboration.editorBindings.valueJSON
                                 : undefined
                         }
+                        valueJSONUpdateMode={
+                            collaborationEnabled
+                                ? collaboration.editorBindings.valueJSONUpdateMode
+                                : undefined
+                        }
+                        preserveSelectionOnValueJSONReset={
+                            collaborationEnabled
+                                ? collaboration.editorBindings.preserveSelectionOnValueJSONReset
+                                : undefined
+                        }
+                        selectionOnValueJSONReset={
+                            collaborationEnabled
+                                ? collaboration.editorBindings.selectionOnValueJSONReset
+                                : undefined
+                        }
                         theme={theme}
                         addons={addons}
                         toolbarItems={toolbarItems}

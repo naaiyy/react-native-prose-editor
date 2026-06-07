@@ -212,6 +212,9 @@ class EditorEditText @JvmOverloads constructor(
                 discardTransientNativeInputForReadOnly()
             }
             field = value
+            if (value) {
+                restartInputForEditorIfFocused("editable")
+            }
         }
 
     /**
@@ -395,7 +398,88 @@ class EditorEditText @JvmOverloads constructor(
         // Background color is applied in setBaseStyle() / applyTheme().
         background = null
         linksClickable = false
+
+        // Suppress the platform caret and draw our own. Android's Editor anchors
+        // the native caret to getLineBottom(line), which a ParagraphSpacerSpan
+        // inflates — stretching the caret into the inter-block gap. Our caret is
+        // clipped to the glyph height via [CaretGeometry]. See [drawCustomCaret].
+        isCursorVisible = false
+
         updateEffectivePadding()
+    }
+
+    // ── Custom caret ────────────────────────────────────────────────────────
+
+    private var caretBlinkVisible = true
+    private val caretPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    private val caretWidthPx: Float by lazy { maxOf(MIN_CARET_WIDTH_PX, resources.displayMetrics.density) }
+    private val caretColor: Int by lazy { resolveCaretColor() }
+    private val caretBlinkRunnable = object : Runnable {
+        override fun run() {
+            caretBlinkVisible = !caretBlinkVisible
+            invalidate()
+            postDelayed(this, CARET_BLINK_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * Reset the caret to solid-on and (re)schedule the blink. Called whenever the
+     * caret could appear or move (focus, window focus, selection change) so it
+     * behaves like the platform caret: solid immediately after a move, then blinks.
+     */
+    private fun restartCaretBlink() {
+        removeCallbacks(caretBlinkRunnable)
+        caretBlinkVisible = true
+        if (CaretGeometry.shouldRender(isFocused, hasWindowFocus(), selectionStart, selectionEnd)) {
+            postDelayed(caretBlinkRunnable, CARET_BLINK_INTERVAL_MS)
+        }
+        invalidate()
+    }
+
+    private fun stopCaretBlink() {
+        removeCallbacks(caretBlinkRunnable)
+        caretBlinkVisible = false
+        invalidate()
+    }
+
+    private fun drawCustomCaret(canvas: android.graphics.Canvas) {
+        if (!caretBlinkVisible) return
+        if (!CaretGeometry.shouldRender(isFocused, hasWindowFocus(), selectionStart, selectionEnd)) return
+        val rect = customCaretDrawRect() ?: return
+        caretPaint.color = caretColor
+        canvas.drawRect(rect.left, rect.top, rect.right, rect.bottom, caretPaint)
+    }
+
+    /**
+     * The caret rectangle in canvas (content) coordinates — clipped to the glyph
+     * height via [CaretGeometry]. No scroll offset is applied: at onDraw time the
+     * framework canvas is already in scrolled content space, exactly like the text
+     * Layout it paints. (This differs from [caretRect], which reports view-relative
+     * coordinates to JS.)
+     */
+    internal fun customCaretDrawRect(): RectF? {
+        val textLayout = layout ?: return null
+        val offset = selectionEnd.coerceIn(0, textLayout.text.length)
+        val bounds = CaretGeometry.verticalBounds(textLayout, offset, paint)
+        val left = totalPaddingLeft + textLayout.getPrimaryHorizontal(offset)
+        return RectF(left, totalPaddingTop + bounds.top, left + caretWidthPx, totalPaddingTop + bounds.bottom)
+    }
+
+    /**
+     * The native caret is tinted by the theme's `colorControlActivated`; resolve
+     * the same value so the replacement keeps the platform appearance, falling
+     * back to the text color when the attribute is not a color.
+     */
+    private fun resolveCaretColor(): Int {
+        val resolved = TypedValue()
+        val found = context.theme.resolveAttribute(
+            android.R.attr.colorControlActivated,
+            resolved,
+            true
+        )
+        val isColor = resolved.type >= TypedValue.TYPE_FIRST_COLOR_INT &&
+            resolved.type <= TypedValue.TYPE_LAST_COLOR_INT
+        return if (found && isColor) resolved.data else currentTextColor
     }
 
     fun setAutoCapitalize(autoCapitalize: String?) {
@@ -631,6 +715,7 @@ class EditorEditText @JvmOverloads constructor(
 
     override fun onDraw(canvas: android.graphics.Canvas) {
         super.onDraw(canvas)
+        drawCustomCaret(canvas)
 
         val placeholderLayout =
             buildPlaceholderLayout(width - compoundPaddingLeft - compoundPaddingRight) ?: return
@@ -953,12 +1038,14 @@ class EditorEditText @JvmOverloads constructor(
         val textLayout = layout ?: return null
         val selectionOffset = selectionEnd.takeIf { it >= 0 } ?: return null
         val clampedOffset = selectionOffset.coerceIn(0, textLayout.text.length)
-        val line = textLayout.getLineForOffset(clampedOffset)
         val caretLeft = textLayout.getPrimaryHorizontal(clampedOffset)
+        // Clip the caret to the rendered glyph height so a ParagraphSpacerSpan's
+        // inflated descent does not stretch it into the inter-block gap.
+        val bounds = CaretGeometry.verticalBounds(textLayout, clampedOffset, paint)
         val left = totalPaddingLeft + caretLeft - scrollX
-        val top = totalPaddingTop + textLayout.getLineTop(line) - scrollY
-        val bottom = totalPaddingTop + textLayout.getLineBottom(line) - scrollY
-        return RectF(left, top.toFloat(), left + 1f, bottom.toFloat())
+        val top = totalPaddingTop + bounds.top - scrollY
+        val bottom = totalPaddingTop + bounds.bottom - scrollY
+        return RectF(left, top, left + 1f, bottom)
     }
 
     // ── Input Handling: Text Commit ─────────────────────────────────────
@@ -1526,7 +1613,10 @@ class EditorEditText @JvmOverloads constructor(
         if (inputConnection?.flushPendingCompositionForExternalMutation() == false) {
             return false
         }
-        return drainNativeTextMutationIfNeeded(allowAfterBlur = true)
+        return drainNativeTextMutationIfNeeded(
+            allowAfterBlur = true,
+            preserveInputConnectionForExternalUpdate = true
+        )
     }
 
     fun prepareForExternalEditorCommand(): CommandPreparation {
@@ -2532,6 +2622,8 @@ class EditorEditText @JvmOverloads constructor(
         }
         ensureSelectionVisible()
         onSelectionOrContentMayChange?.invoke()
+        // Keep the custom caret solid at its new position, then resume blinking.
+        restartCaretBlink()
 
         syncCurrentSelectionToRust()
     }
@@ -2612,6 +2704,7 @@ class EditorEditText @JvmOverloads constructor(
         lastAuthorizedText = text?.toString().orEmpty()
         lastAuthorizedRenderedText = text?.let { SpannableStringBuilder(it) }
         lastAuthorizedTextRevision += 1L
+        currentRenderBlocksJson = null
         clearNativeTextMutationAdoptionSuppression()
         clearNativeTextMutationAfterBlurWindow()
     }
@@ -3017,7 +3110,10 @@ class EditorEditText @JvmOverloads constructor(
         return mutation.scalarFrom < trackedEnd && mutation.scalarTo > trackedStart
     }
 
-    private fun drainNativeTextMutationIfNeeded(allowAfterBlur: Boolean): Boolean {
+    private fun drainNativeTextMutationIfNeeded(
+        allowAfterBlur: Boolean,
+        preserveInputConnectionForExternalUpdate: Boolean = false
+    ): Boolean {
         if (editorId == 0L) return true
         if (discardTransientInputForDestroyedEditorIfNeeded()) return false
         val editable = text
@@ -3026,7 +3122,10 @@ class EditorEditText @JvmOverloads constructor(
 
         val mutation = nativeTextMutationFromAuthorizedDiff(currentText)
         if (mutation != null && shouldAdoptNativeTextMutation(mutation, allowAfterBlur)) {
-            commitNativeTextMutation(mutation)
+            commitNativeTextMutation(
+                mutation,
+                preserveInputConnectionForExternalUpdate = preserveInputConnectionForExternalUpdate
+            )
             return true
         }
         recordImeTraceForTesting(
@@ -3093,7 +3192,10 @@ class EditorEditText @JvmOverloads constructor(
         return true
     }
 
-    private fun commitNativeTextMutation(mutation: NativeTextMutation) {
+    private fun commitNativeTextMutation(
+        mutation: NativeTextMutation,
+        preserveInputConnectionForExternalUpdate: Boolean = false
+    ) {
         if (!hasLiveEditor()) return
         val startedAt = System.nanoTime()
         if ((text?.toString() ?: "") != mutation.resultingText) {
@@ -3104,13 +3206,17 @@ class EditorEditText @JvmOverloads constructor(
             return
         }
         val shouldRestartInput = hasFocus()
-        retireInputConnectionForEditor()
+        if (preserveInputConnectionForExternalUpdate) {
+            clearInputStateForExternalReplacementPreservingConnection()
+        } else {
+            retireInputConnectionForEditor()
+        }
         nativeTextMutationAfterBlurWindow?.didAdoptMutation = true
         clearNativeTextMutationAfterBlurWindow()
 
         recordImeTraceForTesting(
             "nativeMutationApply",
-            "range=${mutation.scalarFrom}..${mutation.scalarTo} replacementLength=${mutation.replacementText.length} restartInput=$shouldRestartInput"
+            "range=${mutation.scalarFrom}..${mutation.scalarTo} replacementLength=${mutation.replacementText.length} restartInput=$shouldRestartInput preserveInputConnection=$preserveInputConnectionForExternalUpdate"
         )
         if (mutation.replacementText.isEmpty()) {
             deleteRangeInRust(mutation.scalarFrom, mutation.scalarTo)
@@ -3123,7 +3229,9 @@ class EditorEditText @JvmOverloads constructor(
         }
         restoreSelectionAfterNativeTextMutation(mutation)
         if (shouldRestartInput) {
-            restartInputForEditor()
+            restartInputForEditor(
+                if (preserveInputConnectionForExternalUpdate) "externalUpdatePreflight" else "explicit"
+            )
         }
         recordImeTraceForTesting(
             "nativeMutationApplyDone",
@@ -3559,7 +3667,8 @@ class EditorEditText @JvmOverloads constructor(
     private fun applyRenderedSpannable(
         spannable: CharSequence,
         replaceRange: RenderReplaceRange? = null,
-        usedPatch: Boolean
+        usedPatch: Boolean,
+        preserveInputConnectionForExternalUpdate: Boolean = false
     ) {
         val startedAt = System.nanoTime()
         val previousScrollX = scrollX
@@ -3579,7 +3688,10 @@ class EditorEditText @JvmOverloads constructor(
             lastAuthorizedRenderedText = text?.let { SpannableStringBuilder(it) }
             lastAuthorizedTextRevision += 1L
             clearNativeTextMutationAdoptionSuppression()
-            if (hadCompositionTracking) {
+            if (hadCompositionTracking && preserveInputConnectionForExternalUpdate) {
+                clearInputStateForExternalReplacementPreservingConnection()
+                shouldRestartInput = true
+            } else if (hadCompositionTracking) {
                 retireInputConnectionForEditor()
                 shouldRestartInput = true
             } else {
@@ -3595,7 +3707,13 @@ class EditorEditText @JvmOverloads constructor(
             "applyRenderedSpannable",
             "mode=$mode usedPatch=$usedPatch incomingLength=${spannable.length} replace=${replaceRange?.start}..${replaceRange?.endExclusive} hadComposition=$hadCompositionTracking restartInput=$shouldRestartInput applyUs=${nanosToMicros(System.nanoTime() - startedAt)} scroll=$previousScrollX,$previousScrollY->$scrollX,$scrollY layout=${layout != null}"
         )
+        invalidateRenderedContent()
         restartInputAfterCompositionInvalidationIfNeeded(shouldRestartInput)
+    }
+
+    private fun invalidateRenderedContent() {
+        invalidate()
+        postInvalidateOnAnimation()
     }
 
     private fun authorizeVisibleTextForMatchedOptimisticRender(spannable: CharSequence) {
@@ -3808,7 +3926,8 @@ class EditorEditText @JvmOverloads constructor(
                 currentRenderBlocksJson?.let { mergeRenderBlocks(it, patch) }
             }
         val resolveRenderBlocksNanos = System.nanoTime() - resolveRenderBlocksStartedAt
-        val shouldSkipRender = resolvedRenderBlocks != null &&
+        val shouldSkipRender = !refreshInputConnectionForExternalUpdate &&
+            resolvedRenderBlocks != null &&
             currentRenderBlocksJson?.let { current ->
                 renderBlocksEqual(current, resolvedRenderBlocks)
             } == true &&
@@ -3871,7 +3990,11 @@ class EditorEditText @JvmOverloads constructor(
             if (canReuseOptimisticVisibleText) {
                 authorizeVisibleTextForMatchedOptimisticRender(fullSpannable)
             } else {
-                applyRenderedSpannable(fullSpannable, usedPatch = false)
+                applyRenderedSpannable(
+                    fullSpannable,
+                    usedPatch = false,
+                    preserveInputConnectionForExternalUpdate = refreshInputConnectionForExternalUpdate
+                )
             }
             pendingOptimisticRenderText = null
             applyRenderNanos = System.nanoTime() - applyStartedAt
@@ -3932,8 +4055,15 @@ class EditorEditText @JvmOverloads constructor(
         if (!enabled || !hasFocus()) return
         val currentVisibleText = text?.toString().orEmpty()
         if (currentVisibleText == previousVisibleText) return
-        retireInputConnectionForEditor()
+        clearInputStateForExternalReplacementPreservingConnection()
         restartInputForEditor("externalUpdate")
+    }
+
+    private fun clearInputStateForExternalReplacementPreservingConnection() {
+        activeInputConnection?.clearCompositionTrackingForEditor()
+        clearCompositionTrackingForEditor()
+        clearCompositionInvalidationForEditor()
+        clearNativeComposingSpans()
     }
 
     /**
@@ -4090,10 +4220,27 @@ class EditorEditText @JvmOverloads constructor(
         super.onFocusChanged(focused, direction, previouslyFocusedRect)
         if (focused) {
             clearNativeTextMutationAfterBlurWindow()
+            restartCaretBlink()
         } else {
             beginNativeTextMutationAfterBlurWindow()
             clearExplicitSelectedImageRange()
+            stopCaretBlink()
         }
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (hasWindowFocus) restartCaretBlink() else stopCaretBlink()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        restartCaretBlink()
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(caretBlinkRunnable)
+        super.onDetachedFromWindow()
     }
 
     private fun selectExplicitImageRange(start: Int, end: Int) {
@@ -4299,5 +4446,9 @@ class EditorEditText @JvmOverloads constructor(
         private const val NATIVE_TEXT_MUTATION_AFTER_BLUR_WINDOW_MS = 750L
         private const val RECENT_HANDLED_HARDWARE_KEY_DOWN_WINDOW_MS = 750L
         private const val LOG_TAG = "NativeEditor"
+
+        // Platform caret blink half-period (Editor.BLINK).
+        private const val CARET_BLINK_INTERVAL_MS = 500L
+        private const val MIN_CARET_WIDTH_PX = 2f
     }
 }

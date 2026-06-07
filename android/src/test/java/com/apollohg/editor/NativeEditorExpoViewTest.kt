@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicReference
 @Config(sdk = [34])
 class NativeEditorExpoViewTest {
     @Test
-    fun `standalone toolbar hit testing normalizes screen coordinates to window coordinates`() {
+    fun `standalone toolbar hit testing uses normalized window coordinates only`() {
         val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
         val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
         val density = expoContext.context.resources.displayMetrics.density
@@ -52,7 +52,7 @@ class NativeEditorExpoViewTest {
                 visibleWindowFrame = visibleWindowFrame
             )
         )
-        assertTrue(
+        assertFalse(
             view.isPointInsideStandaloneToolbarForTesting(
                 rawX = 30f * density,
                 rawY = 50f * density,
@@ -80,6 +80,108 @@ class NativeEditorExpoViewTest {
 
         view.blur()
         assertFalse(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+    }
+
+    @Test
+    fun `outside tap schedules native outside blur`() {
+        val view = attachedNativeEditorView()
+        val event = MotionEvent.obtain(0L, 0L, MotionEvent.ACTION_DOWN, 500f, 500f, 0)
+
+        val decision = view.prepareOutsideTapDecisionForWindowEvent(event)
+        view.handleOutsideTapDecisionFromWindowDispatcher(decision)
+        event.recycle()
+
+        assertEquals(NativeEditorOutsideTapDecision.OUTSIDE_EDITOR, decision)
+        assertTrue(view.hasPendingOutsideTapBlurForTesting())
+        view.cancelOutsideTapBlurFromWindowDispatcher()
+    }
+
+    @Test
+    fun `toolbar frame tap preserves focus before dispatch result`() {
+        val view = attachedNativeEditorView()
+        val density = view.context.resources.displayMetrics.density
+        view.setToolbarFrameJson("""{"x":20,"y":40,"width":100,"height":32}""")
+        view.scheduleOutsideTapBlurFromWindowDispatcher()
+        assertTrue(view.hasPendingOutsideTapBlurForTesting())
+        val event = MotionEvent.obtain(
+            0L,
+            0L,
+            MotionEvent.ACTION_DOWN,
+            30f * density,
+            50f * density,
+            0
+        )
+
+        val decision = view.prepareOutsideTapDecisionForWindowEvent(event)
+        view.handleOutsideTapDecisionFromWindowDispatcher(decision)
+        event.recycle()
+
+        assertEquals(NativeEditorOutsideTapDecision.PRESERVE_FOCUS, decision)
+        assertTrue(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+        assertFalse(view.hasPendingOutsideTapBlurForTesting())
+    }
+
+    @Test
+    fun `outside tap clears stale toolbar focus preservation`() {
+        val view = attachedNativeEditorView()
+        view.markRecentToolbarTouchForTesting()
+        assertTrue(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+
+        val event = MotionEvent.obtain(0L, 0L, MotionEvent.ACTION_DOWN, 500f, 500f, 0)
+        val decision = view.prepareOutsideTapDecisionForWindowEvent(event)
+        view.handleOutsideTapDecisionFromWindowDispatcher(decision)
+        event.recycle()
+
+        assertEquals(NativeEditorOutsideTapDecision.OUTSIDE_EDITOR, decision)
+        assertFalse(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+        assertTrue(view.hasPendingOutsideTapBlurForTesting())
+        view.cancelOutsideTapBlurFromWindowDispatcher()
+    }
+
+    @Test
+    fun `toolbar refocus does not cancel stale pending outside blur`() {
+        val view = attachedNativeEditorView()
+
+        view.scheduleOutsideTapBlurFromWindowDispatcher()
+        assertTrue(view.hasPendingOutsideTapBlurForTesting())
+
+        view.focusFromToolbarPreserveForTesting()
+
+        assertTrue(view.hasPendingOutsideTapBlurForTesting())
+        view.cancelOutsideTapBlurFromWindowDispatcher()
+    }
+
+    @Test
+    fun `outside tap handler installs from app context current activity`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = FrameLayout(activity)
+        activity.setContentView(host)
+        val expoContext = testExpoContext(
+            RuntimeEnvironment.getApplication(),
+            currentActivity = activity
+        )
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+
+        view.onFocusChangeForTesting = {}
+        view.onAddonEventForTesting = {}
+        host.addView(view, FrameLayout.LayoutParams(200, 200))
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setEditorFocusedForOutsideTapDecisionForTesting(true)
+
+        try {
+            view.installOutsideTapBlurHandlerForTesting()
+            assertTrue(view.isOutsideTapBlurHandlerInstalledForTesting())
+
+            val event = MotionEvent.obtain(0L, 0L, MotionEvent.ACTION_DOWN, 500f, 500f, 0)
+            assertEquals(
+                NativeEditorOutsideTapDecision.OUTSIDE_EDITOR,
+                view.prepareOutsideTapDecisionForWindowEvent(event)
+            )
+            event.recycle()
+        } finally {
+            view.cancelOutsideTapBlurFromWindowDispatcher()
+            view.uninstallOutsideTapBlurHandlerForTesting()
+        }
     }
 
     @Test
@@ -641,6 +743,168 @@ class NativeEditorExpoViewTest {
     }
 
     @Test
+    fun `JS editor reset update bypasses preflight and clears stale pending updates`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778844L
+        val editText = view.richTextView.editorEditText
+        val staleUpdateJson = renderUpdateJson("stale")
+        val resetUpdateJson = renderUpdateJson("reset")
+
+        view.onAddonEventForTesting = {}
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = { null }
+        view.onEditorReadyForTesting = {}
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("before"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(staleUpdateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(8)
+        view.scheduleViewCommandUpdateRetryForTesting(staleUpdateJson)
+        view.onEditorUpdate(staleUpdateJson)
+        view.blockEditorUpdatePreflightForTesting = true
+
+        assertEquals(editorId, view.richTextView.editorId)
+        assertEquals(editorId, editText.editorId)
+        val editTextShadow = shadowOf(editText)
+        editTextShadow.clearWasInvalidated()
+        val applied = AtomicBoolean(false)
+        Handler(Looper.getMainLooper()).post {
+            applied.set(view.applyEditorResetUpdate(resetUpdateJson))
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(applied.get())
+        assertEquals("reset", editText.text?.toString())
+        assertTrue(editTextShadow.wasInvalidated())
+        assertNull(view.pendingEditorUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateRevisionForTesting())
+        assertNull(view.pendingViewCommandUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateEventCountForTesting())
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending JS editor reset prop applies through reset path and clears stale pending updates`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778845L
+        val editText = view.richTextView.editorEditText
+        val staleUpdateJson = renderUpdateJson("stale")
+        val resetUpdateJson = renderUpdateJson("")
+
+        view.onAddonEventForTesting = {}
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = { null }
+        view.onEditorReadyForTesting = {}
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("before"), notifyListener = false)
+        editText.setSelection(editText.text?.length ?: 0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorUpdateJson(staleUpdateJson)
+        view.setPendingEditorUpdateEditorId(editorId)
+        view.setPendingEditorUpdateRevision(8)
+        view.scheduleViewCommandUpdateRetryForTesting(staleUpdateJson)
+        view.onEditorUpdate(staleUpdateJson)
+        view.setPendingEditorResetUpdateJson(resetUpdateJson)
+        view.setPendingEditorResetUpdateEditorId(editorId)
+        view.setPendingEditorResetUpdateRevision(9)
+        view.blockEditorUpdatePreflightForTesting = true
+        val editTextShadow = shadowOf(editText)
+        editTextShadow.clearWasInvalidated()
+
+        Handler(Looper.getMainLooper()).post {
+            view.applyPendingEditorResetUpdateIfNeeded()
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("", editText.text?.toString())
+        assertTrue(editTextShadow.wasInvalidated())
+        assertNull(view.pendingEditorResetUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorResetUpdateRevisionForTesting())
+        assertNull(view.pendingEditorUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateRevisionForTesting())
+        assertNull(view.pendingViewCommandUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorUpdateEventCountForTesting())
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending JS editor reset prop retries when editor view is not ready`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778846L
+        val editText = view.richTextView.editorEditText
+        val resetUpdateJson = renderUpdateJson("")
+
+        view.onAddonEventForTesting = {}
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = { null }
+        view.onEditorReadyForTesting = {}
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("before"), notifyListener = false)
+        editText.editorId = 0L
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorResetUpdateJson(resetUpdateJson)
+        view.setPendingEditorResetUpdateEditorId(editorId)
+        view.setPendingEditorResetUpdateRevision(10)
+
+        Handler(Looper.getMainLooper()).post {
+            view.applyPendingEditorResetUpdateIfNeeded()
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("before", editText.text?.toString())
+        assertEquals(resetUpdateJson, view.pendingEditorResetUpdateJsonForTesting())
+
+        editText.editorId = editorId
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+
+        assertEquals("", editText.text?.toString())
+        assertNull(view.pendingEditorResetUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorResetUpdateRevisionForTesting())
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `pending JS editor reset prop applies again when only revision changes`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778847L
+        val editText = view.richTextView.editorEditText
+        val resetUpdateJson = renderUpdateJson("")
+
+        view.onAddonEventForTesting = {}
+        view.onRefreshToolbarStateFromEditorSelectionForTesting = { null }
+        view.onEditorReadyForTesting = {}
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        editText.applyUpdateJSON(renderUpdateJson("first"), notifyListener = false)
+        view.setPendingEditorResetUpdateJson(resetUpdateJson)
+        view.setPendingEditorResetUpdateEditorId(editorId)
+        view.setPendingEditorResetUpdateRevision(1)
+        view.applyPendingEditorResetUpdateIfNeeded()
+
+        assertEquals("", editText.text?.toString())
+        assertNull(view.pendingEditorResetUpdateJsonForTesting())
+
+        editText.applyUpdateJSON(renderUpdateJson("second"), notifyListener = false)
+        view.setPendingEditorResetUpdateRevision(2)
+        view.applyPendingEditorResetUpdateIfNeeded()
+
+        assertEquals("", editText.text?.toString())
+        assertNull(view.pendingEditorResetUpdateJsonForTesting())
+        assertEquals(0, view.pendingEditorResetUpdateRevisionForTesting())
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
     fun `editor ready payload includes acknowledged update revision`() {
         val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
         val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
@@ -659,6 +923,29 @@ class NativeEditorExpoViewTest {
         assertEquals(1, readyPayloads.size)
         assertEquals(editorId, readyPayloads.single()["editorId"])
         assertEquals(4, readyPayloads.single()["editorUpdateRevision"])
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
+    fun `editor ready is suppressed while reset update is pending`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 778848L
+        val readyPayloads = mutableListOf<Map<String, Any>>()
+
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        view.richTextView.editorEditText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setPendingEditorResetUpdateJson(renderUpdateJson(""))
+        view.setPendingEditorResetUpdateEditorId(editorId)
+        view.setPendingEditorResetUpdateRevision(12)
+        view.onEditorReadyForTesting = { payload ->
+            readyPayloads.add(payload)
+        }
+
+        assertFalse(view.emitEditorReadyForTesting(editorUpdateRevision = 12))
+        assertTrue(readyPayloads.isEmpty())
 
         NativeEditorViewRegistry.unregister(editorId, view)
     }
@@ -1742,65 +2029,135 @@ class NativeEditorExpoViewTest {
     }
 
     @Test
-    fun `outside tap dispatcher is shared per window and restores original callback after last view`() {
-        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
-        val firstExpoContext = testExpoContext(activity)
-        val secondExpoContext = testExpoContext(activity)
-        val firstView = NativeEditorExpoView(firstExpoContext.context, firstExpoContext.appContext)
-        val secondView = NativeEditorExpoView(secondExpoContext.context, secondExpoContext.appContext)
-        val window = activity.window
-        val originalCallback = window.callback
-
-        firstView.installOutsideTapBlurHandlerForTesting()
-        val dispatcherCallback = window.callback
-        secondView.installOutsideTapBlurHandlerForTesting()
-
-        assertSame(dispatcherCallback, window.callback)
-
-        firstView.uninstallOutsideTapBlurHandlerForTesting()
-
-        assertSame(dispatcherCallback, window.callback)
-
-        secondView.uninstallOutsideTapBlurHandlerForTesting()
-
-        assertSame(originalCallback, window.callback)
-    }
-
-    @Test
-    fun `outside tap dispatcher wraps newer window callback instead of reinstalling stale dispatcher`() {
+    fun `outside tap observer is shared per window and removed after last view`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val host = activity.findViewById<FrameLayout>(android.R.id.content)
         val firstExpoContext = testExpoContext(activity)
         val secondExpoContext = testExpoContext(activity)
         val firstView = NativeEditorExpoView(firstExpoContext.context, firstExpoContext.appContext)
         val secondView = NativeEditorExpoView(secondExpoContext.context, secondExpoContext.appContext)
-        val window = activity.window
-        host.addView(firstView)
-        host.addView(secondView)
-        firstView.setAttachedToNativeWindowForTesting(true)
-        firstView.onAddonEventForTesting = {}
-        firstView.onFocusChangeForTesting = {}
+        val originalChildCount = host.childCount
 
         firstView.installOutsideTapBlurHandlerForTesting()
-        val firstDispatcher = window.callback
-        val newerCallback = object : android.view.Window.Callback by firstDispatcher {}
-        window.callback = newerCallback
+        val observer = host.getChildAt(host.childCount - 1)
+        assertEquals(originalChildCount + 1, host.childCount)
 
         secondView.installOutsideTapBlurHandlerForTesting()
 
-        assertTrue(window.callback !== firstDispatcher)
+        assertEquals(originalChildCount + 1, host.childCount)
+        assertSame(observer, host.getChildAt(host.childCount - 1))
 
-        assertTrue(firstView.richTextView.editorEditText.requestFocus())
         firstView.uninstallOutsideTapBlurHandlerForTesting()
-        val event = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 9999f, 9999f, 0)
-        window.callback.dispatchTouchEvent(event)
-        event.recycle()
 
-        assertFalse(firstView.hasPendingOutsideTapBlurForTesting())
+        assertEquals(originalChildCount + 1, host.childCount)
+        assertSame(observer, host.getChildAt(host.childCount - 1))
 
         secondView.uninstallOutsideTapBlurHandlerForTesting()
 
-        assertSame(newerCallback, window.callback)
+        assertEquals(originalChildCount, host.childCount)
+    }
+
+    @Test
+    fun `outside tap observer does not consume touches and confirms tap before scheduling blur`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = activity.findViewById<FrameLayout>(android.R.id.content)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val trace = mutableListOf<String>()
+        host.addView(view, FrameLayout.LayoutParams(200, 200))
+        host.layout(0, 0, 1000, 1000)
+        view.layout(0, 0, 200, 200)
+        view.richTextView.layout(0, 0, 200, 200)
+        view.richTextView.editorEditText.layout(0, 0, 200, 200)
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setEditorFocusedForOutsideTapDecisionForTesting(true)
+        view.onAddonEventForTesting = {}
+        view.onFocusChangeForTesting = {}
+        view.onOutsideTapTraceForTesting = { event -> trace.add(event) }
+
+        view.installOutsideTapBlurHandlerForTesting()
+        val observer = host.getChildAt(host.childCount - 1)
+
+        val event = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 9999f, 9999f, 0)
+        val handled = observer.dispatchTouchEvent(event)
+        event.recycle()
+
+        assertFalse(handled)
+        assertFalse(view.hasPendingOutsideTapBlurForTesting())
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(151))
+
+        assertTrue(trace.joinToString(separator = "\n"), view.hasPendingOutsideTapBlurForTesting())
+
+        view.cancelOutsideTapBlurFromWindowDispatcher()
+        view.uninstallOutsideTapBlurHandlerForTesting()
+    }
+
+    @Test
+    fun `outside tap observer cancels outside blur candidate when gesture moves like scroll`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = activity.findViewById<FrameLayout>(android.R.id.content)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        host.addView(view, FrameLayout.LayoutParams(200, 200))
+        host.layout(0, 0, 1000, 1000)
+        view.layout(0, 0, 200, 200)
+        view.richTextView.layout(0, 0, 200, 200)
+        view.richTextView.editorEditText.layout(0, 0, 200, 200)
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setEditorFocusedForOutsideTapDecisionForTesting(true)
+        view.onAddonEventForTesting = {}
+        view.onFocusChangeForTesting = {}
+
+        view.installOutsideTapBlurHandlerForTesting()
+        val observer = host.getChildAt(host.childCount - 1)
+
+        val down = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 9999f, 9999f, 0)
+        val move = MotionEvent.obtain(100L, 116L, MotionEvent.ACTION_MOVE, 9999f, 10099f, 0)
+        observer.dispatchTouchEvent(down)
+        observer.dispatchTouchEvent(move)
+        down.recycle()
+        move.recycle()
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(151))
+
+        assertFalse(view.hasPendingOutsideTapBlurForTesting())
+
+        view.uninstallOutsideTapBlurHandlerForTesting()
+    }
+
+    @Test
+    fun `outside tap handler reinstall does not duplicate observer for same view`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = activity.findViewById<FrameLayout>(android.R.id.content)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+
+        host.addView(view)
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setEditorFocusedForOutsideTapDecisionForTesting(true)
+        view.onAddonEventForTesting = {}
+        view.onFocusChangeForTesting = {}
+
+        view.installOutsideTapBlurHandlerForTesting()
+        assertTrue(view.isOutsideTapBlurHandlerInstalledForTesting())
+        val childCount = host.childCount
+        val observer = host.getChildAt(host.childCount - 1)
+
+        view.installOutsideTapBlurHandlerForTesting()
+        assertTrue(view.isOutsideTapBlurHandlerInstalledForTesting())
+        assertEquals(childCount, host.childCount)
+        assertSame(observer, host.getChildAt(host.childCount - 1))
+
+        val event = MotionEvent.obtain(100L, 100L, MotionEvent.ACTION_DOWN, 9999f, 9999f, 0)
+        assertEquals(
+            NativeEditorOutsideTapDecision.OUTSIDE_EDITOR,
+            view.prepareOutsideTapDecisionForWindowEvent(event)
+        )
+        event.recycle()
+
+        view.cancelOutsideTapBlurFromWindowDispatcher()
+        view.uninstallOutsideTapBlurHandlerForTesting()
     }
 
     @Test
@@ -2114,11 +2471,52 @@ class NativeEditorExpoViewTest {
         val appContext: AppContext
     )
 
-    private fun testExpoContext(context: Context): TestExpoContext {
+    private fun attachedNativeEditorView(): NativeEditorExpoView {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val host = FrameLayout(activity)
+        activity.setContentView(host)
+        val expoContext = testExpoContext(activity)
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editorId = 779904L
+        val editText = view.richTextView.editorEditText
+
+        view.onFocusChangeForTesting = {}
+        view.onAddonEventForTesting = {}
+        host.addView(view, FrameLayout.LayoutParams(200, 200))
+        val widthSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+            200,
+            android.view.View.MeasureSpec.EXACTLY
+        )
+        val heightSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+            200,
+            android.view.View.MeasureSpec.EXACTLY
+        )
+        view.measure(widthSpec, heightSpec)
+        view.layout(0, 0, 200, 200)
+        view.richTextView.setEditorIdWhileDetached(editorId)
+        editText.applyUpdateJSON(renderUpdateJson("ready"), notifyListener = false)
+        editText.setSelection(0)
+        editText.editorId = editorId
+        view.setAttachedToNativeWindowForTesting(true)
+        view.setEditorFocusedForOutsideTapDecisionForTesting(true)
+        return view
+    }
+
+    private fun testExpoContext(
+        context: Context,
+        currentActivity: Activity? = null
+    ): TestExpoContext {
+        val resolvedCurrentActivity = currentActivity ?: context as? Activity
         val reactContext = Class
             .forName("com.facebook.react.bridge.BridgeReactContext")
             .getConstructor(Context::class.java)
             .newInstance(context) as Context
+
+        if (resolvedCurrentActivity != null) {
+            reactContext.javaClass
+                .getMethod("onHostResume", Activity::class.java)
+                .invoke(reactContext, resolvedCurrentActivity)
+        }
 
         val modulesProvider = object : ModulesProvider {
             override fun getModulesList(): List<Class<out Module>> = emptyList()

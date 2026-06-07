@@ -5,6 +5,7 @@ export {
     type NativeRichTextEditorCaretRect,
     type NativeRichTextEditorHeightBehavior,
     type NativeRichTextEditorToolbarPlacement,
+    type NativeRichTextEditorValueJSONUpdateMode,
     type NativeRichTextEditorAutoCapitalize,
     type NativeRichTextEditorKeyboardType,
     type RemoteSelectionDecoration,

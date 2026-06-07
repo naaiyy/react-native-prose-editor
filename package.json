@@ -1,6 +1,6 @@
 {
     "name": "@apollohg/react-native-prose-editor",
-    "version": "0.5.20",
+    "version": "0.5.21",
     "description": "Native rich text editor with Rust core for React Native",
     "license": "Apache-2.0",
     "homepage": "https://github.com/apollohg/react-native-prose-editor",
@@ -20,7 +20,9 @@
             "types": "./dist/index.d.ts",
             "react-native": "./dist/index.js",
             "default": "./dist/index.js"
-        }
+        },
+        "./app.plugin": "./app.plugin.js",
+        "./app.plugin.js": "./app.plugin.js"
     },
     "private": false,
     "publishConfig": {
@@ -74,6 +76,7 @@
     "files": [
         "README.md",
         "LICENSE",
+        "app.plugin.js",
         "dist",
         "android/build.gradle",
         "android/consumer-rules.pro",

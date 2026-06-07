@@ -19,6 +19,13 @@ type EditorDemoCardProps = {
     editorRef: React.RefObject<NativeRichTextEditorRef | null>;
     initialContent: string;
     valueJSON?: DocumentJSON;
+    valueJSONUpdateMode?: React.ComponentProps<typeof NativeRichTextEditor>['valueJSONUpdateMode'];
+    preserveSelectionOnValueJSONReset?: React.ComponentProps<
+        typeof NativeRichTextEditor
+    >['preserveSelectionOnValueJSONReset'];
+    selectionOnValueJSONReset?: React.ComponentProps<
+        typeof NativeRichTextEditor
+    >['selectionOnValueJSONReset'];
     theme: React.ComponentProps<typeof NativeRichTextEditor>['theme'];
     addons?: EditorAddons;
     toolbarItems: readonly EditorToolbarItem[];
@@ -39,6 +46,9 @@ export function EditorDemoCard({
     editorRef,
     initialContent,
     valueJSON,
+    valueJSONUpdateMode,
+    preserveSelectionOnValueJSONReset,
+    selectionOnValueJSONReset,
     theme,
     addons,
     toolbarItems,
@@ -64,6 +74,9 @@ export function EditorDemoCard({
                 ref={editorRef}
                 initialContent={initialContent}
                 valueJSON={valueJSON}
+                valueJSONUpdateMode={valueJSONUpdateMode}
+                preserveSelectionOnValueJSONReset={preserveSelectionOnValueJSONReset}
+                selectionOnValueJSONReset={selectionOnValueJSONReset}
                 theme={theme}
                 addons={addons}
                 toolbarItems={toolbarItems}

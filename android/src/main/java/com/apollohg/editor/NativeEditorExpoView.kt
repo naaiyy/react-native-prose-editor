@@ -12,7 +12,9 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.Window
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
@@ -32,6 +34,13 @@ import java.util.concurrent.atomic.AtomicReference
 import uniffi.editor_core.*
 
 private const val DESTROY_INVALIDATION_AWAIT_TIMEOUT_MS = 250L
+private const val OUTSIDE_TAP_GESTURE_CONFIRM_DELAY_MS = 150L
+
+internal enum class NativeEditorOutsideTapDecision {
+    IGNORE,
+    PRESERVE_FOCUS,
+    OUTSIDE_EDITOR
+}
 
 private class WeakNativeEditorExpoView private constructor(
     val view: WeakReference<NativeEditorExpoView?>
@@ -258,44 +267,80 @@ internal object NativeEditorViewRegistry {
 }
 
 private object NativeEditorOutsideTapDispatcher {
-    private val dispatchers = WeakHashMap<Window, OutsideTapWindowCallback>()
+    private val dispatchers = WeakHashMap<Window, OutsideTapTouchDispatcher>()
 
-    fun register(window: Window, view: NativeEditorExpoView) {
-        val currentCallback = window.callback ?: return
+    fun register(window: Window, view: NativeEditorExpoView): Boolean {
+        val host = contentRootFor(window)
+        if (host == null) {
+            view.traceOutsideTap("register skipped missing content root")
+            return false
+        }
         val previousDispatcher = dispatchers[window]
-        val dispatcher = if (currentCallback is OutsideTapWindowCallback) {
+        val dispatcher = if (previousDispatcher?.host === host) {
             previousDispatcher
-                ?.takeIf { it !== currentCallback }
-                ?.transferViewsTo(currentCallback)
-            currentCallback
         } else {
-            OutsideTapWindowCallback(window, currentCallback).also { nextDispatcher ->
+            OutsideTapTouchDispatcher(host).also { nextDispatcher ->
                 previousDispatcher?.transferViewsTo(nextDispatcher)
-                window.callback = nextDispatcher
+                previousDispatcher?.detach()
+                dispatchers[window] = nextDispatcher
             }
         }
         dispatchers[window] = dispatcher
         dispatcher.add(view)
+        view.traceOutsideTap(
+            "register overlayAttached=${dispatcher.isAttached()} " +
+                "host=${host.javaClass.name} " +
+                "activeViews=${dispatcher.liveViews().size}"
+        )
+        return dispatcher.isAttached()
     }
 
     fun unregister(window: Window, view: NativeEditorExpoView) {
         val dispatcher = dispatchers[window] ?: return
         if (!dispatcher.remove(view)) return
+        dispatcher.detach()
         dispatchers.remove(window)
-        if (window.callback === dispatcher) {
-            window.callback = dispatcher.baseCallback
-        }
     }
 
-    private class OutsideTapWindowCallback(
-        private val window: Window,
-        val baseCallback: Window.Callback
-    ) : Window.Callback by baseCallback {
+    private fun contentRootFor(window: Window): ViewGroup? {
+        val decorView = window.decorView
+        return decorView.findViewById<View>(android.R.id.content) as? ViewGroup
+            ?: decorView as? ViewGroup
+    }
+
+    private class OutsideTapTouchDispatcher(
+        val host: ViewGroup
+    ) : View.OnTouchListener {
+        private data class OutsideTapCandidate(
+            val view: WeakReference<NativeEditorExpoView>,
+            val downRawX: Float,
+            val downRawY: Float,
+            val editorRectOnDown: Rect?,
+            val confirm: Runnable
+        )
+
         private val views = mutableListOf<WeakReference<NativeEditorExpoView>>()
-        private var disabled = false
+        private val pendingOutsideTapCandidates = mutableListOf<OutsideTapCandidate>()
+        private val touchSlopPx = ViewConfiguration.get(host.context).scaledTouchSlop
+        private val scrollChangedListener = ViewTreeObserver.OnScrollChangedListener {
+            cancelPendingOutsideTapCandidates("scroll")
+        }
+        private var scrollListenerTreeObserver: ViewTreeObserver? = null
+        private val observerView = View(host.context).apply {
+            isClickable = false
+            isFocusable = false
+            isFocusableInTouchMode = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+
+        init {
+            observerView.setOnTouchListener(this)
+            attach()
+        }
 
         fun add(view: NativeEditorExpoView) {
             prune()
+            attach()
             if (views.any { it.get() === view }) return
             views.add(WeakReference(view))
         }
@@ -305,48 +350,201 @@ private object NativeEditorOutsideTapDispatcher {
             return views.mapNotNull { it.get() }
         }
 
-        fun transferViewsTo(target: OutsideTapWindowCallback) {
+        fun transferViewsTo(target: OutsideTapTouchDispatcher) {
             liveViews().forEach { target.add(it) }
             views.clear()
-            disabled = true
+            cancelPendingOutsideTapCandidates("transfer")
         }
 
         fun remove(view: NativeEditorExpoView): Boolean {
+            cancelPendingOutsideTapCandidatesFor(view, "remove view")
             views.removeAll { it.get()?.let { candidate -> candidate === view } != false }
             return views.isEmpty()
         }
 
-        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-            if (disabled) {
-                return baseCallback.dispatchTouchEvent(event)
-            }
+        override fun onTouch(view: View, event: MotionEvent): Boolean {
             val activeViews = liveViews()
-            if (event.action != MotionEvent.ACTION_DOWN || activeViews.isEmpty()) {
-                return baseCallback.dispatchTouchEvent(event)
+            if (activeViews.isEmpty()) {
+                return false
             }
 
-            val decisions = activeViews.map { view ->
-                view to view.shouldScheduleOutsideTapBlurForWindowEvent(event)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> handleActionDown(activeViews, event)
+                MotionEvent.ACTION_MOVE -> {
+                    if (hasMovedBeyondTapSlop(event)) {
+                        cancelPendingOutsideTapCandidates("move")
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (hasMovedBeyondTapSlop(event)) {
+                        cancelPendingOutsideTapCandidates("up moved")
+                    } else {
+                        confirmPendingOutsideTapCandidates("up")
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> cancelPendingOutsideTapCandidates("cancel")
             }
-            val result = baseCallback.dispatchTouchEvent(event)
-            decisions.forEach { (view, shouldBlur) ->
-                if (shouldBlur) {
-                    view.scheduleOutsideTapBlurFromWindowDispatcher()
+            return false
+        }
+
+        private fun handleActionDown(activeViews: List<NativeEditorExpoView>, event: MotionEvent) {
+            cancelPendingOutsideTapCandidates("new down")
+            val decisions = activeViews.map { view ->
+                view to view.prepareOutsideTapDecisionForWindowEvent(event)
+            }
+            decisions.forEach { (view, decision) ->
+                view.traceOutsideTap(
+                    "dispatch overlay action=${event.action} raw=${event.rawX.toInt()},${event.rawY.toInt()} decision=$decision"
+                )
+                if (decision == NativeEditorOutsideTapDecision.OUTSIDE_EDITOR) {
+                    scheduleOutsideTapCandidate(view, event)
                 } else {
-                    view.cancelOutsideTapBlurFromWindowDispatcher()
+                    view.handleOutsideTapDecisionFromWindowDispatcher(decision)
                 }
             }
-            return result
+        }
+
+        private fun scheduleOutsideTapCandidate(view: NativeEditorExpoView, event: MotionEvent) {
+            val editorRect = Rect()
+            val editorRectOnDown = if (
+                view.richTextView.editorEditText.getGlobalVisibleRect(editorRect) &&
+                !editorRect.isEmpty
+            ) {
+                editorRect
+            } else {
+                null
+            }
+            val viewRef = WeakReference(view)
+            lateinit var candidate: OutsideTapCandidate
+            val confirm = Runnable {
+                confirmOutsideTapCandidate(candidate, "delay")
+            }
+            candidate = OutsideTapCandidate(
+                view = viewRef,
+                downRawX = event.rawX,
+                downRawY = event.rawY,
+                editorRectOnDown = editorRectOnDown,
+                confirm = confirm
+            )
+            pendingOutsideTapCandidates.add(candidate)
+            ensureScrollListener()
+            view.traceOutsideTap("candidate outside tap")
+            observerView.postDelayed(confirm, OUTSIDE_TAP_GESTURE_CONFIRM_DELAY_MS)
+        }
+
+        private fun confirmPendingOutsideTapCandidates(reason: String) {
+            val candidates = pendingOutsideTapCandidates.toList()
+            candidates.forEach { candidate ->
+                confirmOutsideTapCandidate(candidate, reason)
+            }
+        }
+
+        private fun confirmOutsideTapCandidate(candidate: OutsideTapCandidate, reason: String) {
+            if (!pendingOutsideTapCandidates.remove(candidate)) return
+            removeScrollListenerIfIdle()
+            observerView.removeCallbacks(candidate.confirm)
+            val view = candidate.view.get() ?: return
+            if (editorMovedBeyondTapSlop(view, candidate)) {
+                view.traceOutsideTap("cancel outside tap candidate reason=$reason moved")
+                return
+            }
+            view.traceOutsideTap("confirm outside tap candidate reason=$reason")
+            view.handleOutsideTapDecisionFromWindowDispatcher(NativeEditorOutsideTapDecision.OUTSIDE_EDITOR)
+        }
+
+        private fun hasMovedBeyondTapSlop(event: MotionEvent): Boolean =
+            pendingOutsideTapCandidates.any { candidate ->
+                val dx = event.rawX - candidate.downRawX
+                val dy = event.rawY - candidate.downRawY
+                dx * dx + dy * dy > touchSlopPx * touchSlopPx
+            }
+
+        private fun editorMovedBeyondTapSlop(
+            view: NativeEditorExpoView,
+            candidate: OutsideTapCandidate
+        ): Boolean {
+            val editorRectOnDown = candidate.editorRectOnDown ?: return false
+            val currentRect = Rect()
+            if (!view.richTextView.editorEditText.getGlobalVisibleRect(currentRect)) {
+                return true
+            }
+            val dx = currentRect.left - editorRectOnDown.left
+            val dy = currentRect.top - editorRectOnDown.top
+            return dx * dx + dy * dy > touchSlopPx * touchSlopPx
+        }
+
+        private fun cancelPendingOutsideTapCandidatesFor(view: NativeEditorExpoView, reason: String) {
+            val candidates = pendingOutsideTapCandidates.toList()
+            candidates.forEach { candidate ->
+                if (candidate.view.get() === view) {
+                    pendingOutsideTapCandidates.remove(candidate)
+                    observerView.removeCallbacks(candidate.confirm)
+                    view.traceOutsideTap("cancel outside tap candidate reason=$reason")
+                }
+            }
+            removeScrollListenerIfIdle()
+        }
+
+        private fun cancelPendingOutsideTapCandidates(reason: String) {
+            val candidates = pendingOutsideTapCandidates.toList()
+            pendingOutsideTapCandidates.clear()
+            removeScrollListener()
+            candidates.forEach { candidate ->
+                observerView.removeCallbacks(candidate.confirm)
+                candidate.view.get()?.traceOutsideTap("cancel outside tap candidate reason=$reason")
+            }
+        }
+
+        private fun ensureScrollListener() {
+            val activeObserver = scrollListenerTreeObserver
+            if (activeObserver?.isAlive == true && activeObserver === host.viewTreeObserver) {
+                return
+            }
+            removeScrollListener()
+            val nextObserver = host.viewTreeObserver
+            if (nextObserver.isAlive) {
+                nextObserver.addOnScrollChangedListener(scrollChangedListener)
+                scrollListenerTreeObserver = nextObserver
+            }
+        }
+
+        private fun removeScrollListenerIfIdle() {
+            if (pendingOutsideTapCandidates.isEmpty()) {
+                removeScrollListener()
+            }
+        }
+
+        private fun removeScrollListener() {
+            val observer = scrollListenerTreeObserver
+            if (observer?.isAlive == true) {
+                observer.removeOnScrollChangedListener(scrollChangedListener)
+            }
+            scrollListenerTreeObserver = null
+        }
+
+        fun isAttached(): Boolean = observerView.parent === host
+
+        fun detach() {
+            cancelPendingOutsideTapCandidates("detach")
+            (observerView.parent as? ViewGroup)?.removeView(observerView)
+        }
+
+        private fun attach() {
+            if (observerView.parent !== host) {
+                detach()
+                host.addView(
+                    observerView,
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
+            }
+            observerView.bringToFront()
         }
 
         private fun prune() {
             views.removeAll { it.get() == null }
-            if (views.isEmpty() && window.callback === this) {
-                window.callback = baseCallback
-                if (dispatchers[window] === this) {
-                    dispatchers.remove(window)
-                }
-            }
         }
     }
 }
@@ -415,8 +613,12 @@ class NativeEditorExpoView(
     internal var blockThemePreflightForTesting = false
     internal var onToolbarActionForTesting: ((Map<String, Any>) -> Unit)? = null
     internal var onAddonEventForTesting: ((Map<String, Any>) -> Unit)? = null
+    internal var onSelectionChangeForTesting: ((Map<String, Any>) -> Unit)? = null
     internal var onFocusChangeForTesting: ((Map<String, Any>) -> Unit)? = null
+    internal var onContentHeightChangeForTesting: ((Map<String, Any>) -> Unit)? = null
+    internal var onEditorUpdateForTesting: ((Map<String, Any>) -> Unit)? = null
     internal var onEditorReadyForTesting: ((Map<String, Any>) -> Unit)? = null
+    internal var onOutsideTapTraceForTesting: ((String) -> Unit)? = null
     internal var onRefreshToolbarStateFromEditorSelectionForTesting: (() -> String?)? = null
     internal var onBeforePrepareForEditorCommandForTesting: (() -> Unit)? = null
     private var isAttachedToNativeWindow = false
@@ -424,8 +626,10 @@ class NativeEditorExpoView(
     private var heightBehavior = EditorHeightBehavior.FIXED
     private var lastEmittedContentHeight = 0
     private var outsideTapWindow: Window? = null
+    private var pendingOutsideTapHandlerInstallRetry: Runnable? = null
     private var toolbarFramesInWindow: List<RectF> = emptyList()
     private var lastToolbarTouchUptimeMs: Long? = null
+    private var editorFocusedForOutsideTapOverrideForTesting: Boolean? = null
     private var pendingOutsideTapBlur: Runnable? = null
     private var pendingKeyboardDismiss: Runnable? = null
     private var pendingToolbarRefocus: Runnable? = null
@@ -456,6 +660,12 @@ class NativeEditorExpoView(
     private var pendingEditorUpdateEditorId: Long? = null
     private var pendingEditorUpdateRevision = 0
     private var appliedEditorUpdateRevision = 0
+    private var pendingEditorResetUpdateJson: String? = null
+    private var pendingEditorResetUpdateEditorId: Long? = null
+    private var pendingEditorResetUpdateRevision = 0
+    private var appliedEditorResetUpdateRevision = 0
+    private var lastEditorResetUpdateJsonProp: String? = null
+    private var lastEditorResetUpdateEditorIdProp: Long? = null
     private var pendingEditorUpdateRetryScheduled = false
     private var pendingEditorUpdateRetryEditorId: Long? = null
     private var pendingEditorUpdateRetryGeneration = 0
@@ -512,9 +722,10 @@ class NativeEditorExpoView(
             if (hasFocus) {
                 cancelPendingToolbarRefocus()
                 installOutsideTapBlurHandlerIfNeeded()
+                scheduleOutsideTapBlurHandlerInstallRetry()
                 refreshMentionQuery()
             } else {
-                if (shouldPreserveFocusAfterToolbarTouch()) {
+                if (consumeToolbarFocusPreservationForBlur()) {
                     scheduleToolbarRefocus()
                     return@setOnFocusChangeListener
                 }
@@ -543,6 +754,7 @@ class NativeEditorExpoView(
                     handleEditorDestroyed(id)
                     return
                 }
+                applyPendingEditorResetUpdateIfNeeded()
                 applyPendingEditorUpdateIfNeeded()
                 applyPendingThemeIfNeeded()
                 refreshReadyStateIfSettled()
@@ -564,7 +776,11 @@ class NativeEditorExpoView(
             if (pendingEditorUpdateEditorId != null && pendingEditorUpdateEditorId != id) {
                 clearPendingEditorUpdateState()
             }
+            if (pendingEditorResetUpdateEditorId != null && pendingEditorResetUpdateEditorId != id) {
+                clearPendingEditorResetUpdateState()
+            }
             appliedEditorUpdateRevision = 0
+            appliedEditorResetUpdateRevision = 0
             clearPendingViewCommandUpdateRetry()
             cancelPendingThemeRetry()
             if (hasPendingTheme) {
@@ -590,7 +806,7 @@ class NativeEditorExpoView(
             return
         }
 
-        if (hasPendingEditorUpdateForEditor(id)) {
+        if (hasPendingEditorResetUpdateForEditor(id) || hasPendingEditorUpdateForEditor(id)) {
             richTextView.setEditorIdWhileDetached(id)
             richTextView.rebindEditorIfNeeded(notifyListener = false)
         } else {
@@ -605,6 +821,7 @@ class NativeEditorExpoView(
             toolbarState = NativeToolbarState.empty
             keyboardToolbarView.applyState(toolbarState)
         }
+        applyPendingEditorResetUpdateIfNeeded()
         applyPendingEditorUpdateIfNeeded()
         applyPendingThemeIfNeeded()
         refreshReadyStateIfSettled()
@@ -807,14 +1024,47 @@ class NativeEditorExpoView(
         pendingEditorUpdateRevision = editorUpdateRevision
     }
 
+    fun setPendingEditorResetUpdateJson(editorResetUpdateJson: String?) {
+        lastEditorResetUpdateJsonProp = editorResetUpdateJson
+        pendingEditorResetUpdateJson = editorResetUpdateJson
+    }
+
+    fun setPendingEditorResetUpdateEditorId(editorResetUpdateEditorId: Long?) {
+        lastEditorResetUpdateEditorIdProp = editorResetUpdateEditorId
+        pendingEditorResetUpdateEditorId = editorResetUpdateEditorId
+    }
+
+    fun setPendingEditorResetUpdateRevision(editorResetUpdateRevision: Int) {
+        if (pendingEditorResetUpdateRevision != editorResetUpdateRevision) {
+            pendingEditorUpdateRetryAttempts = 0
+            pendingEditorUpdateForcedRecoveryAttempted = false
+        }
+        if (editorResetUpdateRevision != 0 && pendingEditorResetUpdateJson == null) {
+            pendingEditorResetUpdateJson = lastEditorResetUpdateJsonProp
+        }
+        if (editorResetUpdateRevision != 0 && pendingEditorResetUpdateEditorId == null) {
+            pendingEditorResetUpdateEditorId = lastEditorResetUpdateEditorIdProp
+        }
+        pendingEditorResetUpdateRevision = editorResetUpdateRevision
+    }
+
     private fun hasPendingEditorUpdateForEditor(editorId: Long): Boolean =
         pendingEditorUpdateJson != null &&
             pendingEditorUpdateRevision != 0 &&
             pendingEditorUpdateRevision != appliedEditorUpdateRevision &&
             pendingEditorUpdateEditorId == editorId
 
+    private fun hasPendingEditorResetUpdateForEditor(editorId: Long): Boolean =
+        pendingEditorResetUpdateJson != null &&
+            pendingEditorResetUpdateRevision != 0 &&
+            pendingEditorResetUpdateRevision != appliedEditorResetUpdateRevision &&
+            pendingEditorResetUpdateEditorId == editorId
+
     private fun hasPendingEditorUpdateForCurrentEditor(): Boolean =
         hasPendingEditorUpdateForEditor(richTextView.editorId)
+
+    private fun hasPendingEditorResetUpdateForCurrentEditor(): Boolean =
+        hasPendingEditorResetUpdateForEditor(richTextView.editorId)
 
     private fun pendingEditorUpdateCommandPreparationJSON(): String =
         NativeEditorViewRegistry.commandPreparationJSON(
@@ -823,16 +1073,65 @@ class NativeEditorExpoView(
         )
 
     private fun shouldBlockEditorCommandForPendingUpdate(): Boolean =
-        hasPendingEditorUpdateForCurrentEditor()
+        hasPendingEditorResetUpdateForCurrentEditor() || hasPendingEditorUpdateForCurrentEditor()
 
     private fun refreshReadyStateIfSettled() {
         if (handleDestroyedCurrentEditorIfNeeded()) return
+        if (hasPendingEditorResetUpdateForCurrentEditor()) return
         if (hasPendingEditorUpdateForCurrentEditor()) return
         if (!isAttachedToNativeWindow) return
         if (richTextView.editorEditText.editorId != richTextView.editorId) return
         refreshToolbarStateFromEditorSelection()
         refreshMentionQuery()
         emitEditorReadyIfNeeded()
+    }
+
+    fun applyPendingEditorResetUpdateIfNeeded() {
+        if (handleDestroyedCurrentEditorIfNeeded()) return
+        if (pendingEditorResetUpdateRevision == 0) return
+        val revision = pendingEditorResetUpdateRevision
+        val editorId = richTextView.editorId
+        val expectedEditorId = pendingEditorResetUpdateEditorId
+        if (expectedEditorId == null) return
+        if (expectedEditorId != editorId) return
+        if (pendingEditorResetUpdateJson == null) {
+            clearPendingEditorResetUpdateState(resetAppliedRevision = false)
+            refreshReadyStateIfSettled()
+            return
+        }
+        val updateJson = pendingEditorResetUpdateJson ?: return
+        if (revision == appliedEditorResetUpdateRevision) {
+            clearPendingEditorResetUpdateState(resetAppliedRevision = false)
+            emitEditorReady(editorUpdateRevision = revision)
+            refreshReadyStateIfSettled()
+            return
+        }
+        if (editorId != 0L && !isAttachedToNativeWindow) return
+        val apply = Runnable {
+            if (editorId != richTextView.editorId) return@Runnable
+            if (expectedEditorId != richTextView.editorId) return@Runnable
+            if (editorId != 0L && !isAttachedToNativeWindow) return@Runnable
+            if (revision != pendingEditorResetUpdateRevision) return@Runnable
+            if (revision == appliedEditorResetUpdateRevision) {
+                clearPendingEditorResetUpdateState(resetAppliedRevision = false)
+                emitEditorReady(editorUpdateRevision = revision)
+                refreshReadyStateIfSettled()
+                return@Runnable
+            }
+            if (applyEditorResetUpdate(updateJson)) {
+                appliedEditorResetUpdateRevision = revision
+                clearPendingEditorResetUpdateState(resetAppliedRevision = false)
+                emitEditorReady(editorUpdateRevision = revision)
+                refreshReadyStateIfSettled()
+            } else {
+                schedulePendingEditorUpdateRetry()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            apply.run()
+        } else if (!post(apply)) {
+            richTextView.post(apply)
+        }
     }
 
     fun applyPendingEditorUpdateIfNeeded() {
@@ -898,6 +1197,15 @@ class NativeEditorExpoView(
         cancelPendingEditorUpdateRetry()
     }
 
+    private fun clearPendingEditorResetUpdateState(resetAppliedRevision: Boolean = true) {
+        pendingEditorResetUpdateJson = null
+        pendingEditorResetUpdateEditorId = null
+        pendingEditorResetUpdateRevision = 0
+        if (resetAppliedRevision) {
+            appliedEditorResetUpdateRevision = 0
+        }
+    }
+
     private fun cancelPendingEditorUpdateRetry() {
         pendingEditorUpdateRetryScheduled = false
         pendingEditorUpdateRetryEditorId = null
@@ -939,6 +1247,7 @@ class NativeEditorExpoView(
             }
             pendingEditorUpdateRetryScheduled = false
             pendingEditorUpdateRetryEditorId = null
+            applyPendingEditorResetUpdateIfNeeded()
             applyPendingEditorUpdateIfNeeded()
         }
         mainHandler.postDelayed(retry, delayMs)
@@ -1065,6 +1374,9 @@ class NativeEditorExpoView(
             return
         }
         if (handleDestroyedCurrentEditorIfNeeded()) return
+        if (pendingEditorResetUpdateJson != null) {
+            applyPendingEditorResetUpdateIfNeeded()
+        }
         if (pendingEditorUpdateJson != null) {
             pendingEditorUpdateRetryAttempts = 0
             pendingEditorUpdateForcedRecoveryAttempted = false
@@ -1277,8 +1589,14 @@ class NativeEditorExpoView(
     }
 
     fun focus() {
+        focusInternal(cancelPendingOutsideTapBlur = true)
+    }
+
+    private fun focusInternal(cancelPendingOutsideTapBlur: Boolean) {
         if (!canFocusCurrentEditor()) return
-        cancelPendingOutsideTapBlur()
+        if (cancelPendingOutsideTapBlur) {
+            cancelPendingOutsideTapBlur()
+        }
         cancelPendingKeyboardDismiss()
         cancelPendingBlurRetry()
         richTextView.editorEditText.requestFocus()
@@ -1292,6 +1610,7 @@ class NativeEditorExpoView(
     fun blur() {
         cancelPendingOutsideTapBlur()
         cancelPendingKeyboardDismiss()
+        cancelPendingToolbarRefocus()
         clearRecentToolbarTouch()
         performBlur(deferKeyboardDismiss = false, allowRetry = true)
     }
@@ -1311,7 +1630,11 @@ class NativeEditorExpoView(
 
     private fun completeBlur(deferKeyboardDismiss: Boolean) {
         cancelPendingBlurRetry()
+        traceOutsideTap(
+            "complete blur deferKeyboardDismiss=$deferKeyboardDismiss focusedBefore=${richTextView.editorEditText.hasFocus()}"
+        )
         richTextView.editorEditText.clearFocus()
+        traceOutsideTap("complete blur focusedAfter=${richTextView.editorEditText.hasFocus()}")
         if (deferKeyboardDismiss) {
             val dismiss = Runnable {
                 pendingKeyboardDismiss = null
@@ -1355,6 +1678,7 @@ class NativeEditorExpoView(
 
     private fun blurWithDeferredKeyboardDismiss() {
         cancelPendingKeyboardDismiss()
+        cancelPendingToolbarRefocus()
         clearRecentToolbarTouch()
         performBlur(deferKeyboardDismiss = true, allowRetry = true)
     }
@@ -1370,7 +1694,7 @@ class NativeEditorExpoView(
             if (refocusGeneration != pendingToolbarRefocusGeneration) return@Runnable
             if (pendingToolbarRefocusEditorId != richTextView.editorId) return@Runnable
             pendingToolbarRefocusEditorId = null
-            focus()
+            focusInternal(cancelPendingOutsideTapBlur = false)
         }
         pendingToolbarRefocus = refocus
         richTextView.editorEditText.post(refocus)
@@ -1387,8 +1711,10 @@ class NativeEditorExpoView(
 
     private fun scheduleOutsideTapBlur() {
         cancelPendingOutsideTapBlur()
+        traceOutsideTap("schedule outside blur focused=${richTextView.editorEditText.hasFocus()}")
         val blur = Runnable {
             pendingOutsideTapBlur = null
+            traceOutsideTap("run outside blur focused=${richTextView.editorEditText.hasFocus()}")
             if (richTextView.editorEditText.hasFocus()) {
                 blurWithDeferredKeyboardDismiss()
             }
@@ -1399,6 +1725,7 @@ class NativeEditorExpoView(
 
     private fun cancelPendingOutsideTapBlur() {
         pendingOutsideTapBlur?.let {
+            traceOutsideTap("cancel outside blur")
             richTextView.editorEditText.removeCallbacks(it)
             pendingOutsideTapBlur = null
         }
@@ -1469,6 +1796,12 @@ class NativeEditorExpoView(
         pendingEditorUpdateEditorId = null
         pendingEditorUpdateRevision = 0
         appliedEditorUpdateRevision = 0
+        pendingEditorResetUpdateJson = null
+        pendingEditorResetUpdateEditorId = null
+        pendingEditorResetUpdateRevision = 0
+        appliedEditorResetUpdateRevision = 0
+        lastEditorResetUpdateJsonProp = null
+        lastEditorResetUpdateEditorIdProp = null
         lastDocumentVersion = null
         lastReadyEditorId = null
         toolbarState = NativeToolbarState.empty
@@ -1501,11 +1834,13 @@ class NativeEditorExpoView(
             return
         }
         richTextView.rebindEditorIfNeeded(
-            notifyListener = !hasPendingEditorUpdateForEditor(editorId)
+            notifyListener = !hasPendingEditorResetUpdateForEditor(editorId) &&
+                !hasPendingEditorUpdateForEditor(editorId)
         )
         if (hasPendingTheme) {
             pendingThemeRetryEditorId = editorId
         }
+        applyPendingEditorResetUpdateIfNeeded()
         applyPendingEditorUpdateIfNeeded()
         applyPendingThemeIfNeeded()
         refreshReadyStateIfSettled()
@@ -1517,6 +1852,7 @@ class NativeEditorExpoView(
         if (editorId == 0L) return false
         if (!isAttachedToNativeWindow) return false
         if (richTextView.editorEditText.editorId != editorId) return false
+        if (hasPendingEditorResetUpdateForCurrentEditor()) return false
         if (hasPendingEditorUpdateForCurrentEditor()) return false
         lastReadyEditorId = editorId
         val payload = mutableMapOf<String, Any>("editorId" to editorId)
@@ -1688,17 +2024,57 @@ class NativeEditorExpoView(
         if (contentHeight <= 0) return
         if (!force && contentHeight == lastEmittedContentHeight) return
         lastEmittedContentHeight = contentHeight
-        onContentHeightChange(
-            mapOf(
-                "contentHeight" to contentHeight,
-                "editorId" to richTextView.editorId
-            )
+        val event = mapOf(
+            "contentHeight" to contentHeight,
+            "editorId" to richTextView.editorId
         )
+        onContentHeightChangeForTesting?.invoke(event) ?: onContentHeightChange(event)
     }
 
     /** Applies an editor update from JS without echoing it back through events. */
     fun applyEditorUpdate(updateJson: String): Boolean =
         applyEditorUpdate(updateJson, scheduleViewCommandRetry = true)
+
+    /** Applies a reset-style update from JS, discarding pending native composition. */
+    fun applyEditorResetUpdate(updateJson: String): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            val postedEditorId = richTextView.editorId
+            val apply = Runnable {
+                if (postedEditorId != richTextView.editorId) return@Runnable
+                applyEditorResetUpdate(updateJson)
+            }
+            if (!post(apply)) {
+                richTextView.post(apply)
+            }
+            return false
+        }
+        if (handleDestroyedCurrentEditorIfNeeded()) {
+            return false
+        }
+        if (!isEditorReadyForNativeUpdate()) {
+            return false
+        }
+        clearPendingEditorUpdateState(resetAppliedRevision = false)
+        clearPendingViewCommandUpdateRetry()
+        isApplyingJSUpdate = true
+        val applied = try {
+            richTextView.editorEditText.applyUpdateJSON(
+                updateJson,
+                refreshInputConnectionForExternalUpdate = true
+            )
+            clearPendingEditorUpdateDispatchQueue("jsResetUpdate")
+            true
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "Failed to apply JS editor reset update", error)
+            false
+        } finally {
+            isApplyingJSUpdate = false
+        }
+        if (applied) {
+            refreshReadyStateIfSettled()
+        }
+        return applied
+    }
 
     private fun isEditorReadyForNativeUpdate(): Boolean {
         val editorId = richTextView.editorId
@@ -1820,7 +2196,7 @@ class NativeEditorExpoView(
         if (stateJson != null) {
             event["stateJson"] = stateJson
         }
-        onSelectionChange(event)
+        onSelectionChangeForTesting?.invoke(event) ?: onSelectionChange(event)
     }
 
     override fun onEditorUpdate(updateJSON: String) {
@@ -1925,7 +2301,7 @@ class NativeEditorExpoView(
                 "updateJson" to updateJSON,
                 "editorId" to event.editorId
             )
-            onEditorUpdate(payload)
+            onEditorUpdateForTesting?.invoke(payload) ?: onEditorUpdate(payload)
         }
         val totalNanos = System.nanoTime() - startedAt
         richTextView.editorEditText.recordImeTraceForTesting(
@@ -1936,23 +2312,81 @@ class NativeEditorExpoView(
 
     private fun installOutsideTapBlurHandlerIfNeeded() {
         val window = resolveActivity(context)?.window ?: return
-        if (outsideTapWindow === window) return
-        uninstallOutsideTapBlurHandler()
-        NativeEditorOutsideTapDispatcher.register(window, this)
-        outsideTapWindow = window
+        if (outsideTapWindow !== window) {
+            uninstallOutsideTapBlurHandler()
+        }
+        if (NativeEditorOutsideTapDispatcher.register(window, this)) {
+            outsideTapWindow = window
+        } else if (outsideTapWindow === window) {
+            outsideTapWindow = null
+        }
+    }
+
+    private fun scheduleOutsideTapBlurHandlerInstallRetry() {
+        cancelPendingOutsideTapBlurHandlerInstallRetry()
+        val retry = Runnable {
+            pendingOutsideTapHandlerInstallRetry = null
+            if (richTextView.editorEditText.hasFocus()) {
+                installOutsideTapBlurHandlerIfNeeded()
+            }
+        }
+        pendingOutsideTapHandlerInstallRetry = retry
+        richTextView.editorEditText.postDelayed(retry, OUTSIDE_TAP_HANDLER_INSTALL_RETRY_DELAY_MS)
+    }
+
+    private fun cancelPendingOutsideTapBlurHandlerInstallRetry() {
+        pendingOutsideTapHandlerInstallRetry?.let {
+            richTextView.editorEditText.removeCallbacks(it)
+            pendingOutsideTapHandlerInstallRetry = null
+        }
     }
 
     private fun uninstallOutsideTapBlurHandler() {
+        cancelPendingOutsideTapBlurHandlerInstallRetry()
         val window = outsideTapWindow ?: return
         NativeEditorOutsideTapDispatcher.unregister(window, this)
         outsideTapWindow = null
     }
 
-    internal fun shouldScheduleOutsideTapBlurForWindowEvent(event: MotionEvent): Boolean =
-        isAttachedToNativeWindow &&
-            event.action == MotionEvent.ACTION_DOWN &&
-            richTextView.editorEditText.hasFocus() &&
-            isTouchOutsideEditor(event)
+    internal fun prepareOutsideTapDecisionForWindowEvent(event: MotionEvent): NativeEditorOutsideTapDecision {
+        if (!isAttachedToNativeWindow) {
+            traceOutsideTap("decision ignored detached")
+            return NativeEditorOutsideTapDecision.IGNORE
+        }
+        if (event.action != MotionEvent.ACTION_DOWN) {
+            traceOutsideTap("decision ignored action=${event.action}")
+            return NativeEditorOutsideTapDecision.IGNORE
+        }
+        if (!isEditorFocusedForOutsideTapDecision()) {
+            traceOutsideTap("decision ignored not focused")
+            return NativeEditorOutsideTapDecision.IGNORE
+        }
+
+        val decision = if (isTouchOutsideEditor(event)) {
+            NativeEditorOutsideTapDecision.OUTSIDE_EDITOR
+        } else {
+            NativeEditorOutsideTapDecision.PRESERVE_FOCUS
+        }
+        traceOutsideTap("decision raw=${event.rawX.toInt()},${event.rawY.toInt()} value=$decision")
+        return decision
+    }
+
+    internal fun handleOutsideTapDecisionFromWindowDispatcher(decision: NativeEditorOutsideTapDecision) {
+        traceOutsideTap("handle decision=$decision")
+        when (decision) {
+            NativeEditorOutsideTapDecision.IGNORE -> {
+                if (!richTextView.editorEditText.hasFocus()) {
+                    cancelPendingOutsideTapBlur()
+                }
+            }
+            NativeEditorOutsideTapDecision.PRESERVE_FOCUS -> cancelPendingOutsideTapBlur()
+            NativeEditorOutsideTapDecision.OUTSIDE_EDITOR -> {
+                clearRecentToolbarTouch()
+                cancelPendingToolbarRefocus()
+                scheduleOutsideTapBlur()
+            }
+        }
+    }
 
     internal fun scheduleOutsideTapBlurFromWindowDispatcher() {
         scheduleOutsideTapBlur()
@@ -1961,6 +2395,9 @@ class NativeEditorExpoView(
     internal fun cancelOutsideTapBlurFromWindowDispatcher() {
         cancelPendingOutsideTapBlur()
     }
+
+    private fun isEditorFocusedForOutsideTapDecision(): Boolean =
+        editorFocusedForOutsideTapOverrideForTesting ?: richTextView.editorEditText.hasFocus()
 
     private fun isTouchOutsideEditor(event: MotionEvent): Boolean {
         if (isTouchInsideKeyboardToolbar(event)) {
@@ -1973,7 +2410,11 @@ class NativeEditorExpoView(
         }
         val rect = Rect()
         richTextView.editorEditText.getGlobalVisibleRect(rect)
-        return !rect.contains(event.rawX.toInt(), event.rawY.toInt())
+        val isOutside = !rect.contains(event.rawX.toInt(), event.rawY.toInt())
+        if (isOutside) {
+            clearRecentToolbarTouch()
+        }
+        return isOutside
     }
 
     private fun markRecentToolbarTouch() {
@@ -1990,6 +2431,14 @@ class NativeEditorExpoView(
         return elapsedMs in 0L..TOOLBAR_FOCUS_PRESERVE_MS
     }
 
+    private fun consumeToolbarFocusPreservationForBlur(): Boolean {
+        if (!shouldPreserveFocusAfterToolbarTouch()) {
+            return false
+        }
+        clearRecentToolbarTouch()
+        return true
+    }
+
     internal fun markRecentToolbarTouchForTesting() {
         markRecentToolbarTouch()
     }
@@ -1997,12 +2446,20 @@ class NativeEditorExpoView(
     internal fun shouldPreserveFocusAfterToolbarTouchForTesting(): Boolean =
         shouldPreserveFocusAfterToolbarTouch()
 
+    internal fun setEditorFocusedForOutsideTapDecisionForTesting(isFocused: Boolean?) {
+        editorFocusedForOutsideTapOverrideForTesting = isFocused
+    }
+
     internal fun setAttachedToNativeWindowForTesting(isAttached: Boolean) {
         isAttachedToNativeWindow = isAttached
     }
 
     internal fun handleAttachedToWindowForTesting() {
         handleAttachedToWindow()
+    }
+
+    internal fun traceOutsideTap(message: String) {
+        onOutsideTapTraceForTesting?.invoke(message)
     }
 
     internal fun handleDetachedFromWindowForTesting() {
@@ -2020,6 +2477,8 @@ class NativeEditorExpoView(
         pendingDetachPreflightRetryAttempts
 
     internal fun hasPendingOutsideTapBlurForTesting(): Boolean = pendingOutsideTapBlur != null
+
+    internal fun isOutsideTapBlurHandlerInstalledForTesting(): Boolean = outsideTapWindow != null
 
     internal fun hasPendingKeyboardDismissForTesting(): Boolean = pendingKeyboardDismiss != null
 
@@ -2041,6 +2500,10 @@ class NativeEditorExpoView(
 
     internal fun scheduleToolbarRefocusForTesting() {
         scheduleToolbarRefocus()
+    }
+
+    internal fun focusFromToolbarPreserveForTesting() {
+        focusInternal(cancelPendingOutsideTapBlur = false)
     }
 
     internal fun applyAutoFocusForTesting() {
@@ -2091,11 +2554,19 @@ class NativeEditorExpoView(
 
     internal fun pendingEditorUpdateRevisionForTesting(): Int = pendingEditorUpdateRevision
 
+    internal fun pendingEditorResetUpdateJsonForTesting(): String? = pendingEditorResetUpdateJson
+
+    internal fun pendingEditorResetUpdateRevisionForTesting(): Int =
+        pendingEditorResetUpdateRevision
+
     internal fun setAppliedEditorUpdateRevisionForTesting(editorUpdateRevision: Int) {
         appliedEditorUpdateRevision = editorUpdateRevision
     }
 
     internal fun pendingEditorUpdateEditorIdForTesting(): Long? = pendingEditorUpdateEditorId
+
+    internal fun pendingEditorResetUpdateEditorIdForTesting(): Long? =
+        pendingEditorResetUpdateEditorId
 
     internal fun pendingViewCommandUpdateJsonForTesting(): String? = pendingViewCommandUpdateJson
 
@@ -2136,10 +2607,10 @@ class NativeEditorExpoView(
         if (toolbarFramesInWindow.isEmpty()) {
             return false
         }
-        // toolbarFrame is in DP from React Native's measureInWindow. On Android
-        // that is window-relative after visible-window insets are subtracted,
-        // while rawX/rawY are screen pixels. Fabric/newer implementations may
-        // differ here, so accept both window-relative and raw-screen comparisons.
+        // toolbarFrame is in DP from React Native's measureInWindow, while
+        // rawX/rawY are screen pixels. Normalize the event into the visible
+        // window before comparing so shifted fallback rectangles cannot
+        // preserve focus for unrelated outside taps.
         val density = resources.displayMetrics.density
         val hitSlopPx = TOOLBAR_HIT_SLOP_DP * density
         val eventX = rawX - visibleWindowFrame.left
@@ -2153,14 +2624,7 @@ class NativeEditorExpoView(
             ).apply {
                 inset(-hitSlopPx, -hitSlopPx)
             }
-            val screenFrameInPx = RectF(windowFrameInPx).apply {
-                offset(visibleWindowFrame.left.toFloat(), visibleWindowFrame.top.toFloat())
-            }
-            if (
-                windowFrameInPx.contains(rawX, rawY) ||
-                windowFrameInPx.contains(eventX, eventY) ||
-                screenFrameInPx.contains(rawX, rawY)
-            ) {
+            if (windowFrameInPx.contains(eventX, eventY)) {
                 return true
             }
         }
@@ -2180,6 +2644,7 @@ class NativeEditorExpoView(
         private const val TOOLBAR_HIT_SLOP_DP = 8f
         private const val TOOLBAR_FOCUS_PRESERVE_MS = 750L
         private const val OUTSIDE_TAP_BLUR_DELAY_MS = 100L
+        private const val OUTSIDE_TAP_HANDLER_INSTALL_RETRY_DELAY_MS = 64L
         private const val NATIVE_ACTION_RETRY_DELAY_MS = 16L
         private const val EDITOR_UPDATE_EVENT_DEBOUNCE_MS = 64L
         private const val PENDING_UPDATE_RECOVERY_RETRY_DELAY_MS = 250L
@@ -2191,6 +2656,7 @@ class NativeEditorExpoView(
     }
 
     private fun resolveActivity(context: Context): Activity? {
+        appContext.currentActivity?.let { return it }
         var current: Context? = context
         while (current is ContextWrapper) {
             if (current is Activity) return current

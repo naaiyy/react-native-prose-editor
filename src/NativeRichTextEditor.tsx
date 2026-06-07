@@ -34,7 +34,7 @@ import {
 import {
     DEFAULT_EDITOR_TOOLBAR_ITEMS,
     EditorToolbar,
-    isEditorToolbarFocusPreservationActive,
+    setActiveEditorToolbarFrameOwnerForEditor,
     setEditorToolbarMentionState,
     useEditorToolbarFrames,
     type EditorToolbarCommand,
@@ -70,6 +70,7 @@ interface NativeEditorViewHandle {
     blur?: () => void;
     getCaretRect?: () => Promise<string | null> | string | null;
     applyEditorUpdate: (updateJson: string) => boolean | void | Promise<boolean | void>;
+    applyEditorResetUpdate?: (updateJson: string) => boolean | void | Promise<boolean | void>;
 }
 
 interface NativeEditorViewProps {
@@ -93,6 +94,9 @@ interface NativeEditorViewProps {
     editorUpdateJson?: string;
     editorUpdateEditorId?: number;
     editorUpdateRevision?: number;
+    editorResetUpdateJson?: string;
+    editorResetUpdateEditorId?: number;
+    editorResetUpdateRevision?: number;
     onEditorUpdate: (event: NativeSyntheticEvent<NativeUpdateEvent>) => void;
     onSelectionChange: (event: NativeSyntheticEvent<NativeSelectionEvent>) => void;
     onFocusChange: (event: NativeSyntheticEvent<NativeFocusEvent>) => void;
@@ -183,6 +187,28 @@ function isImageDataUrl(value: string): boolean {
 
 function isRetryableNativeCommandBlock(reason: CommandBlockedInfo['reason']): boolean {
     return reason === 'composition' || (Platform.OS === 'android' && reason === 'pendingUpdate');
+}
+
+function restoreSelectionInBridge(bridge: NativeEditorBridge, selection: Selection): boolean {
+    if (selection.type === 'text') {
+        const { anchor, head } = selection;
+        if (anchor == null || head == null) {
+            return false;
+        }
+        bridge.setSelection(anchor, head);
+        return true;
+    }
+
+    if (selection.type === 'node') {
+        const { pos } = selection;
+        if (pos == null) {
+            return false;
+        }
+        bridge.setSelection(pos, pos);
+        return true;
+    }
+
+    return false;
 }
 
 function isPromiseLike(value: unknown): value is Promise<unknown> {
@@ -844,6 +870,7 @@ function useSerializedValue<T>(
 
 export type NativeRichTextEditorHeightBehavior = 'fixed' | 'autoGrow';
 export type NativeRichTextEditorToolbarPlacement = 'keyboard' | 'inline';
+export type NativeRichTextEditorValueJSONUpdateMode = 'replace' | 'reset';
 export type NativeRichTextEditorAutoCapitalize = 'none' | 'sentences' | 'words' | 'characters';
 export type NativeRichTextEditorKeyboardType =
     | 'default'
@@ -896,6 +923,12 @@ export interface NativeRichTextEditorProps {
     valueJSON?: DocumentJSON;
     /** Optional stable revision hint for `valueJSON` to avoid reserializing equal docs on rerender. */
     valueJSONRevision?: string | number;
+    /** Controls how external `valueJSON` changes are applied. Defaults to preserving undo history. */
+    valueJSONUpdateMode?: NativeRichTextEditorValueJSONUpdateMode;
+    /** When using reset-mode `valueJSON`, preserve the current local text selection after applying the reset. */
+    preserveSelectionOnValueJSONReset?: boolean;
+    /** Preferred selection to restore when applying reset-mode `valueJSON`; falls back to the live selection. */
+    selectionOnValueJSONReset?: Selection;
     /** Schema definition. Defaults to tiptapSchema if not provided. */
     schema?: SchemaDefinition;
     /** Placeholder text shown when editor is empty. */
@@ -993,6 +1026,8 @@ export interface NativeRichTextEditorRef {
     setContent(html: string): void;
     /** Replace entire document with JSON (preserves undo history). */
     setContentJson(doc: DocumentJSON): void;
+    /** Clear the document to the active schema's empty text block. */
+    clearContent(): void;
     /** Get the current HTML content. */
     getContent(): string;
     /** Get the current content as ProseMirror JSON. */
@@ -1094,6 +1129,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             value,
             valueJSON,
             valueJSONRevision,
+            valueJSONUpdateMode = 'replace',
+            preserveSelectionOnValueJSONReset = false,
+            selectionOnValueJSONReset,
             schema,
             placeholder,
             editable = true,
@@ -1131,12 +1169,14 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const nativeViewRef = useRef<NativeEditorViewHandle | null>(null);
         const [isReady, setIsReady] = useState(false);
         const [editorInstanceId, setEditorInstanceId] = useState(0);
+        const editorInstanceIdRef = useRef(0);
+        editorInstanceIdRef.current = editorInstanceId;
         const [isFocused, setIsFocused] = useState(false);
         const isFocusedRef = useRef(false);
         const [inlineToolbarFrame, setInlineToolbarFrame] = useState<EditorToolbarFrame | null>(
             null
         );
-        const registeredToolbarFrames = useEditorToolbarFrames();
+        const registeredToolbarFrames = useEditorToolbarFrames(editorInstanceId);
         const [pendingNativeUpdate, setPendingNativeUpdate] = useState<{
             json?: string;
             editorId?: number;
@@ -1146,12 +1186,29 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             editorId: undefined,
             revision: 0,
         });
-        const pendingNativeUpdateRef = useRef(pendingNativeUpdate);
-        pendingNativeUpdateRef.current = pendingNativeUpdate;
+        const [pendingNativeResetUpdate, setPendingNativeResetUpdate] = useState<{
+            json?: string;
+            editorId?: number;
+            revision: number;
+        }>({
+            json: undefined,
+            editorId: undefined,
+            revision: 0,
+        });
         const pendingNativeUpdateInFlightRef = useRef<{
             editorId?: number;
             revision: number;
         } | null>(null);
+        const pendingNativeResetUpdateInFlightRef = useRef<{
+            editorId?: number;
+            revision: number;
+        } | null>(null);
+        const nativeUpdateRevisionRef = useRef(0);
+        const nextNativeUpdateRevision = useCallback((): number => {
+            const revision = nativeUpdateRevisionRef.current + 1;
+            nativeUpdateRevisionRef.current = revision;
+            return revision;
+        }, []);
         const [blockedNativeCommandRetry, setBlockedNativeCommandRetry] = useState(0);
         const [detachedControlledSyncRetry, setDetachedControlledSyncRetry] = useState(0);
         const [controlledNativeUpdateRetry, setControlledNativeUpdateRetry] = useState(0);
@@ -1410,40 +1467,50 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             if (inFlight != null && inFlight.editorId === editorId) {
                 pendingNativeUpdateInFlightRef.current = null;
             }
-            setPendingNativeUpdate((current) => {
-                if (current.json == null && current.editorId === editorId) {
-                    return current;
-                }
-                const next = {
-                    json: undefined,
-                    editorId,
-                    revision: current.revision + 1,
-                };
-                pendingNativeUpdateRef.current = next;
-                return next;
-            });
-        }, []);
+            const next = {
+                json: undefined,
+                editorId,
+                revision: nextNativeUpdateRevision(),
+            };
+            setPendingNativeUpdate(next);
+        }, [nextNativeUpdateRevision]);
 
-        const consumeBlockedCommandInfoForRetry = useCallback((bridge: NativeEditorBridge): CommandBlockedInfo => {
-            const blockedInfo = bridge.consumeLastCommandBlockedInfo();
-            if (!blockedInfo.blocked) return blockedInfo;
-            if (blockedInfo.reason === 'detached') {
-                pendingDetachedControlledSyncRef.current = true;
-            } else if (blockedInfo.reason === 'destroyed') {
-                pendingDetachedControlledSyncRef.current = false;
-                pendingBlockedNativeCommandRetryRef.current = false;
-                pendingNativeCommandRetryRef.current = null;
-                clearBlockedNativeCommandRetryTimer();
-                clearPendingNativeUpdateForCurrentEditor();
-            } else {
-                scheduleBlockedNativeCommandRetry();
-            }
-            return blockedInfo;
-        }, [
-            clearBlockedNativeCommandRetryTimer,
-            clearPendingNativeUpdateForCurrentEditor,
-            scheduleBlockedNativeCommandRetry,
-        ]);
+        const queuePendingNativeResetUpdate = useCallback((updateJson: string) => {
+            if (Platform.OS !== 'android') return;
+            const editorId = bridgeRef.current?.editorId;
+            const revision = nextNativeUpdateRevision();
+            const next = {
+                json: updateJson,
+                editorId,
+                revision,
+            };
+            pendingNativeResetUpdateInFlightRef.current = { editorId, revision };
+            setPendingNativeResetUpdate(next);
+        }, [nextNativeUpdateRevision]);
+
+        const consumeBlockedCommandInfoForRetry = useCallback(
+            (bridge: NativeEditorBridge): CommandBlockedInfo => {
+                const blockedInfo = bridge.consumeLastCommandBlockedInfo();
+                if (!blockedInfo.blocked) return blockedInfo;
+                if (blockedInfo.reason === 'detached') {
+                    pendingDetachedControlledSyncRef.current = true;
+                } else if (blockedInfo.reason === 'destroyed') {
+                    pendingDetachedControlledSyncRef.current = false;
+                    pendingBlockedNativeCommandRetryRef.current = false;
+                    pendingNativeCommandRetryRef.current = null;
+                    clearBlockedNativeCommandRetryTimer();
+                    clearPendingNativeUpdateForCurrentEditor();
+                } else {
+                    scheduleBlockedNativeCommandRetry();
+                }
+                return blockedInfo;
+            },
+            [
+                clearBlockedNativeCommandRetryTimer,
+                clearPendingNativeUpdateForCurrentEditor,
+                scheduleBlockedNativeCommandRetry,
+            ]
+        );
 
         const consumeBlockedCommandForRetry = useCallback(
             (bridge: NativeEditorBridge): boolean =>
@@ -1485,17 +1552,14 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     const updateJson = JSON.stringify(update);
                     if (Platform.OS === 'android') {
                         const editorId = bridgeRef.current?.editorId;
-                        setPendingNativeUpdate((current) => {
-                            const revision = current.revision + 1;
-                            const next = {
-                                json: updateJson,
-                                editorId,
-                                revision,
-                            };
-                            pendingNativeUpdateRef.current = next;
-                            pendingNativeUpdateInFlightRef.current = { editorId, revision };
-                            return next;
-                        });
+                        const revision = nextNativeUpdateRevision();
+                        const next = {
+                            json: updateJson,
+                            editorId,
+                            revision,
+                        };
+                        pendingNativeUpdateInFlightRef.current = { editorId, revision };
+                        setPendingNativeUpdate(next);
                     } else {
                         try {
                             const applyResult =
@@ -1519,7 +1583,38 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
 
                 return true;
             },
-            []
+            [nextNativeUpdateRevision]
+        );
+
+        const applyResetUpdateToNativeView = useCallback(
+            (update: EditorUpdate, previousDocumentVersion: number | null): void => {
+                const updateJson = JSON.stringify(update);
+                if (Platform.OS === 'android') {
+                    clearPendingNativeUpdateForCurrentEditor();
+                    queuePendingNativeResetUpdate(updateJson);
+                    const applyResetUpdate = nativeViewRef.current?.applyEditorResetUpdate;
+                    if (applyResetUpdate) {
+                        try {
+                            const applyResult = applyResetUpdate(updateJson);
+                            if (isPromiseLike(applyResult)) {
+                                void applyResult.catch(() => {
+                                    // The native view may already be torn down during navigation.
+                                });
+                            }
+                            return;
+                        } catch {
+                            // Fall through to the regular prop-based apply path.
+                        }
+                    }
+                    return;
+                }
+                applyUpdateToNativeView(update, previousDocumentVersion);
+            },
+            [
+                applyUpdateToNativeView,
+                clearPendingNativeUpdateForCurrentEditor,
+                queuePendingNativeResetUpdate,
+            ]
         );
 
         const maybeApplyAutoDetectedLink = useCallback(
@@ -1624,11 +1719,10 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 onActiveStateChangeRef.current?.(update.activeState);
                 onHistoryStateChangeRef.current?.(update.historyState);
 
+                onSelectionChangeRef.current?.(update.selection);
                 if (!options?.suppressContentCallbacks) {
                     emitContentCallbacksForUpdate(update, previousDocumentVersion);
                 }
-
-                onSelectionChangeRef.current?.(update.selection);
                 return update;
             },
             [
@@ -1719,11 +1813,10 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 onActiveStateChangeRef.current?.(update.activeState);
                 onHistoryStateChangeRef.current?.(update.historyState);
 
+                onSelectionChangeRef.current?.(update.selection);
                 if (!options?.suppressContentCallbacks) {
                     emitContentCallbacksForUpdate(update, previousDocumentVersion);
                 }
-
-                onSelectionChangeRef.current?.(update.selection);
 
                 return update;
             },
@@ -1761,6 +1854,55 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 );
             },
             [consumeBlockedCommandForRetry, syncNativeUpdateFromBridge]
+        );
+
+        const resetContentJsonString = useCallback(
+            (
+                jsonString: string,
+                options?: Pick<
+                    RunAndApplyOptions,
+                    'suppressContentCallbacks' | 'preserveLiveTextSelection'
+                > & {
+                    selection?: Selection;
+                }
+            ): EditorUpdate | null => {
+                const bridge = bridgeRef.current;
+                if (!bridge || bridge.isDestroyed) return null;
+                const previousDocumentVersion = documentVersionRef.current;
+                const preservedSelection =
+                    options?.preserveLiveTextSelection === true
+                        ? (options.selection ?? selectionRef.current)
+                        : null;
+                bridge.setJsonString(jsonString);
+                const update = bridge.getCurrentState();
+                if (!update) return null;
+                if (
+                    preservedSelection != null &&
+                    restoreSelectionInBridge(bridge, preservedSelection)
+                ) {
+                    const selectionState = bridge.getSelectionState();
+                    if (selectionState) {
+                        update.selection = selectionState.selection;
+                        update.activeState = selectionState.activeState;
+                        update.historyState = selectionState.historyState;
+                        if (typeof selectionState.documentVersion === 'number') {
+                            update.documentVersion = selectionState.documentVersion;
+                        }
+                    }
+                }
+
+                applyResetUpdateToNativeView(update, previousDocumentVersion);
+                syncStateFromUpdate(update);
+                onActiveStateChangeRef.current?.(update.activeState);
+                onHistoryStateChangeRef.current?.(update.historyState);
+                onSelectionChangeRef.current?.(update.selection);
+                if (!options?.suppressContentCallbacks) {
+                    emitContentCallbacksForUpdate(update, previousDocumentVersion);
+                }
+
+                return update;
+            },
+            [applyResetUpdateToNativeView, emitContentCallbacksForUpdate, syncStateFromUpdate]
         );
 
         const syncPreflightUpdateFromNativeEvent = useCallback(
@@ -1860,6 +2002,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     bridgeRef.current = null;
                 }
                 pendingNativeUpdateInFlightRef.current = null;
+                pendingNativeResetUpdateInFlightRef.current = null;
                 pendingDetachedControlledSyncRef.current = false;
                 pendingControlledSyncAfterNativeUpdateRef.current = false;
                 pendingBlockedNativeCommandRetryRef.current = false;
@@ -1869,15 +2012,18 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 mentionQueryEditorIdRef.current = null;
                 clearBlockedNativeCommandRetryTimer();
                 setMentionQueryEvent(null);
-                setPendingNativeUpdate((current) => {
-                    const next = {
-                        json: undefined,
-                        editorId: undefined,
-                        revision: current.revision + 1,
-                    };
-                    pendingNativeUpdateRef.current = next;
-                    return next;
-                });
+                const clearedNativeUpdate = {
+                    json: undefined,
+                    editorId: undefined,
+                    revision: nextNativeUpdateRevision(),
+                };
+                setPendingNativeUpdate(clearedNativeUpdate);
+                const clearedNativeResetUpdate = {
+                    json: undefined,
+                    editorId: undefined,
+                    revision: nextNativeUpdateRevision(),
+                };
+                setPendingNativeResetUpdate(clearedNativeResetUpdate);
                 setEditorInstanceId(0);
                 setIsReady(false);
             };
@@ -1888,6 +2034,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             allowBase64Images,
             serializedSchemaJson,
             clearBlockedNativeCommandRetryTimer,
+            nextNativeUpdateRevision,
         ]);
 
         useEffect(() => {
@@ -1964,6 +2111,28 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             const didDocumentAdvanceForSameValue =
                 !didControlledValueChange &&
                 previousSync.documentVersion !== documentVersionRef.current;
+            if (valueJSONUpdateMode === 'reset') {
+                const currentJson = bridgeRef.current.getJsonString();
+                if (currentJson === serializedValueJson) {
+                    clearPendingNativeUpdateForCurrentEditor();
+                    controlledJsonSyncRef.current = {
+                        value: serializedValueJson,
+                        documentVersion: documentVersionRef.current,
+                    };
+                    return;
+                }
+
+                resetContentJsonString(serializedValueJson, {
+                    suppressContentCallbacks: true,
+                    preserveLiveTextSelection: preserveSelectionOnValueJSONReset,
+                    selection: selectionOnValueJSONReset,
+                });
+                controlledJsonSyncRef.current = {
+                    value: serializedValueJson,
+                    documentVersion: documentVersionRef.current,
+                };
+                return;
+            }
             if (
                 !prepareBridgeForExternalContentRead({
                     skipWhenContentChanged: !didControlledValueChange,
@@ -2017,6 +2186,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         }, [
             serializedValueJson,
             value,
+            valueJSONUpdateMode,
+            preserveSelectionOnValueJSONReset,
+            selectionOnValueJSONReset,
             runAndApply,
             blockedNativeCommandRetry,
             controlledNativeUpdateRetry,
@@ -2024,6 +2196,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             prepareBridgeForExternalContentRead,
             clearPendingNativeUpdateForCurrentEditor,
             hasPendingNativeUpdateInFlightForCurrentEditor,
+            resetContentJsonString,
         ]);
 
         const updateToolbarFrame = useCallback(() => {
@@ -2184,33 +2357,14 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             [syncSelectionStateFromUpdate]
         );
 
-        const refocusAfterToolbarInteraction = useCallback(() => {
-            nativeViewRef.current?.focus?.();
-            requestAnimationFrame(() => {
-                nativeViewRef.current?.focus?.();
-            });
-            setTimeout(() => {
-                nativeViewRef.current?.focus?.();
-            }, 50);
-        }, []);
-
         const handleFocusChange = useCallback(
             (event: NativeSyntheticEvent<NativeFocusEvent>) => {
                 if (!isCurrentNativeEditorEvent(event.nativeEvent, bridgeRef.current)) return;
                 const { isFocused: focused } = event.nativeEvent;
-                if (
-                    !focused &&
-                    editable &&
-                    isFocusedRef.current &&
-                    isEditorToolbarFocusPreservationActive()
-                ) {
-                    setIsFocused(true);
-                    refocusAfterToolbarInteraction();
-                    return;
-                }
 
                 const wasFocused = isFocusedRef.current;
                 isFocusedRef.current = focused;
+                setActiveEditorToolbarFrameOwnerForEditor(editorInstanceIdRef.current, focused);
                 setIsFocused(focused);
                 if (!focused) {
                     setMentionQueryEventState(null);
@@ -2223,7 +2377,14 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     onBlurRef.current?.();
                 }
             },
-            [editable, refocusAfterToolbarInteraction, setMentionQueryEventState]
+            [setMentionQueryEventState]
+        );
+
+        useEffect(
+            () => () => {
+                setActiveEditorToolbarFrameOwnerForEditor(editorInstanceId, false);
+            },
+            [editorInstanceId]
         );
 
         useEffect(() => {
@@ -2251,33 +2412,63 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 const editorId = bridgeRef.current?.editorId;
                 const acknowledgedRevision = event.nativeEvent.editorUpdateRevision;
                 const inFlight = pendingNativeUpdateInFlightRef.current;
+                const resetInFlight = pendingNativeResetUpdateInFlightRef.current;
                 let didClearInFlight = false;
+                let didMatchInFlight = false;
                 if (inFlight != null) {
                     const matchesRevision =
                         typeof acknowledgedRevision === 'number' &&
                         inFlight.editorId === editorId &&
                         inFlight.revision === acknowledgedRevision;
-                    if (!matchesRevision) {
-                        return;
+                    if (matchesRevision) {
+                        didMatchInFlight = true;
+                        pendingNativeUpdateInFlightRef.current = null;
+                        didClearInFlight = true;
+                        setPendingNativeUpdate((current) => {
+                            if (
+                                current.editorId !== editorId ||
+                                current.revision !== acknowledgedRevision ||
+                                current.json == null
+                            ) {
+                                return current;
+                            }
+                            const next = {
+                                json: undefined,
+                                editorId,
+                                revision: current.revision,
+                            };
+                            return next;
+                        });
                     }
-                    pendingNativeUpdateInFlightRef.current = null;
-                    didClearInFlight = true;
-                    setPendingNativeUpdate((current) => {
-                        if (
-                            current.editorId !== editorId ||
-                            current.revision !== acknowledgedRevision ||
-                            current.json == null
-                        ) {
-                            return current;
-                        }
-                        const next = {
-                            json: undefined,
-                            editorId,
-                            revision: current.revision,
-                        };
-                        pendingNativeUpdateRef.current = next;
-                        return next;
-                    });
+                }
+                if (resetInFlight != null) {
+                    const matchesRevision =
+                        typeof acknowledgedRevision === 'number' &&
+                        resetInFlight.editorId === editorId &&
+                        resetInFlight.revision === acknowledgedRevision;
+                    if (matchesRevision) {
+                        didMatchInFlight = true;
+                        pendingNativeResetUpdateInFlightRef.current = null;
+                        didClearInFlight = true;
+                        setPendingNativeResetUpdate((current) => {
+                            if (
+                                current.editorId !== editorId ||
+                                current.revision !== acknowledgedRevision ||
+                                current.json == null
+                            ) {
+                                return current;
+                            }
+                            const next = {
+                                json: undefined,
+                                editorId,
+                                revision: current.revision,
+                            };
+                            return next;
+                        });
+                    }
+                }
+                if ((inFlight != null || resetInFlight != null) && !didMatchInFlight) {
+                    return;
                 }
                 flushBlockedNativeCommandRetry();
                 if (didClearInFlight && pendingControlledSyncAfterNativeUpdateRef.current) {
@@ -2484,6 +2675,37 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                 return { update, queued: didQueueRetry };
             },
             [isCommandRetryScopeCurrent, runAndApply]
+        );
+
+        const runPersistentContentCommand = useCallback(
+            (
+                mutate: () => EditorUpdate | null,
+                options?: Omit<
+                    RunAndApplyOptions,
+                    'retryBlockedCommand' | 'onBlockedCommandRetryQueued'
+                >
+            ): EditorUpdate | null => {
+                const requestedEditorId = bridgeRef.current?.editorId;
+                let run: (() => EditorUpdate | null) | null = null;
+                const retry = (): boolean => {
+                    const bridge = bridgeRef.current;
+                    if (
+                        bridge == null ||
+                        bridge.isDestroyed ||
+                        bridge.editorId !== requestedEditorId
+                    ) {
+                        return false;
+                    }
+                    return run?.() != null;
+                };
+                run = () =>
+                    runAndApply(mutate, {
+                        ...options,
+                        retryBlockedCommand: retry,
+                    });
+                return run();
+            },
+            [runAndApply]
         );
 
         const insertImage = useCallback(
@@ -3033,10 +3255,23 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     runAndApply(() => bridgeRef.current?.insertContentJson(doc) ?? null);
                 },
                 setContent(html: string) {
-                    runAndApply(() => bridgeRef.current?.replaceHtml(html) ?? null);
+                    runPersistentContentCommand(
+                        () => bridgeRef.current?.replaceHtml(html) ?? null
+                    );
                 },
                 setContentJson(doc: DocumentJSON) {
-                    runAndApply(() => bridgeRef.current?.replaceJson(doc) ?? null);
+                    const jsonString = stringifyCachedJson(
+                        normalizeDocumentJson(doc, documentSchema)
+                    );
+                    runPersistentContentCommand(
+                        () => bridgeRef.current?.replaceJsonString(jsonString) ?? null
+                    );
+                },
+                clearContent() {
+                    const jsonString = stringifyCachedJson(
+                        normalizeDocumentJson({ type: 'doc', content: [] }, documentSchema)
+                    );
+                    resetContentJsonString(jsonString);
                 },
                 getContent(): string {
                     if (!bridgeRef.current || bridgeRef.current.isDestroyed) return '';
@@ -3080,7 +3315,14 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     return bridgeRef.current.canRedo();
                 },
             }),
-            [insertImage, prepareBridgeForExternalContentRead, runAndApply]
+            [
+                documentSchema,
+                insertImage,
+                prepareBridgeForExternalContentRead,
+                runAndApply,
+                runPersistentContentCommand,
+                resetContentJsonString,
+            ]
         );
 
         const activeMentionTrigger = mentionQueryEvent?.trigger || resolveMentionTrigger(addons);
@@ -3266,7 +3508,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         const nativeViewStyle =
             nativeViewStyleParts.length <= 1 ? nativeViewStyleParts[0] : nativeViewStyleParts;
         const toolbarFrameJson = serializeToolbarFrames(
-            editable
+            editable && isFocused
                 ? [
                       ...(toolbarPlacement === 'inline' && inlineToolbarFrame != null
                           ? [inlineToolbarFrame]
@@ -3498,6 +3740,9 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     editorUpdateJson={pendingNativeUpdate.json}
                     editorUpdateEditorId={pendingNativeUpdate.editorId}
                     editorUpdateRevision={pendingNativeUpdate.revision}
+                    editorResetUpdateJson={pendingNativeResetUpdate.json}
+                    editorResetUpdateEditorId={pendingNativeResetUpdate.editorId}
+                    editorResetUpdateRevision={pendingNativeResetUpdate.revision}
                     onEditorUpdate={handleUpdate}
                     onSelectionChange={handleSelectionChange}
                     onFocusChange={handleFocusChange}

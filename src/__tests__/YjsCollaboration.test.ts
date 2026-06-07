@@ -328,6 +328,79 @@ describe('YjsCollaboration', () => {
                 name: 'Bob',
             },
         ]);
+        expect(latest?.editorBindings.valueJSONUpdateMode).toBe('reset');
+        expect(latest?.editorBindings.preserveSelectionOnValueJSONReset).toBe(true);
+    });
+
+    it('passes mapped local peer selection to reset-mode editor bindings', () => {
+        const sockets: MockWebSocket[] = [];
+        let latest: ReturnType<typeof useYjsCollaboration> | null = null;
+
+        mockNativeModule.collaborationSessionHandleMessage.mockReturnValueOnce(
+            JSON.stringify({
+                messages: [],
+                documentChanged: true,
+                documentJson: REMOTE_DOC,
+                peersChanged: true,
+                peers: [
+                    {
+                        clientId: 1,
+                        isLocal: true,
+                        state: {
+                            user: { userId: '1', name: 'Alice', color: '#f00' },
+                            selection: { anchor: 6, head: 6 },
+                            focused: true,
+                        },
+                    },
+                    ...REMOTE_PEERS,
+                ],
+            })
+        );
+
+        function Harness() {
+            latest = useYjsCollaboration({
+                documentId: 'doc-local-selection',
+                connect: false,
+                createWebSocket: () => {
+                    const socket = new MockWebSocket();
+                    sockets.push(socket);
+                    return socket as unknown as WebSocket;
+                },
+                initialDocumentJson: INITIAL_DOC,
+                localAwareness: {
+                    userId: '1',
+                    name: 'Alice',
+                    color: '#f00',
+                },
+            });
+            return null;
+        }
+
+        render(React.createElement(Harness));
+
+        act(() => {
+            latest?.connect();
+        });
+        act(() => {
+            sockets[0].open();
+            sockets[0].receive([9, 9, 9]);
+        });
+
+        expect(latest?.editorBindings.selectionOnValueJSONReset).toEqual({
+            type: 'text',
+            anchor: 6,
+            head: 6,
+        });
+        expect(latest?.editorBindings.remoteSelections).toEqual([
+            {
+                clientId: 2,
+                anchor: 4,
+                head: 9,
+                color: '#00f',
+                isFocused: true,
+                name: 'Bob',
+            },
+        ]);
     });
 
     it('treats remote selections as focused unless awareness explicitly says otherwise', () => {
@@ -426,6 +499,121 @@ describe('YjsCollaboration', () => {
                 selection: { anchor: 3, head: 5 },
             })
         );
+
+        controller.destroy();
+    });
+
+    it('flushes pending local selection awareness before handling remote document messages', () => {
+        const sockets: MockWebSocket[] = [];
+        const controller = createYjsCollaborationController({
+            documentId: 'doc-selection-before-remote',
+            connect: false,
+            createWebSocket: () => {
+                const socket = new MockWebSocket();
+                sockets.push(socket);
+                return socket as unknown as WebSocket;
+            },
+            initialDocumentJson: INITIAL_DOC,
+            localAwareness: {
+                userId: '1',
+                name: 'Alice',
+                color: '#f00',
+            },
+        });
+
+        controller.connect();
+        sockets[0].open();
+        sockets[0].send.mockClear();
+        mockNativeModule.collaborationSessionSetLocalAwareness.mockClear();
+        mockNativeModule.collaborationSessionHandleMessage.mockClear();
+
+        controller.handleSelectionChange({ type: 'text', anchor: 3, head: 5 });
+        expect(mockNativeModule.collaborationSessionSetLocalAwareness).not.toHaveBeenCalled();
+
+        sockets[0].receive([9, 9, 9]);
+
+        expect(mockNativeModule.collaborationSessionSetLocalAwareness).toHaveBeenCalledWith(
+            1,
+            JSON.stringify({
+                user: {
+                    userId: '1',
+                    name: 'Alice',
+                    color: '#f00',
+                },
+                focused: true,
+                selection: { anchor: 3, head: 5 },
+            })
+        );
+        expect(mockNativeModule.collaborationSessionHandleMessage).toHaveBeenCalledWith(
+            1,
+            JSON.stringify([9, 9, 9])
+        );
+        expect(
+            mockNativeModule.collaborationSessionSetLocalAwareness.mock.invocationCallOrder[0]
+        ).toBeLessThan(
+            mockNativeModule.collaborationSessionHandleMessage.mock.invocationCallOrder[0]
+        );
+
+        controller.destroy();
+    });
+
+    it('commits pending local selection awareness after applying local document changes', () => {
+        const sockets: MockWebSocket[] = [];
+        const controller = createYjsCollaborationController({
+            documentId: 'doc-selection-after-local-change',
+            connect: false,
+            createWebSocket: () => {
+                const socket = new MockWebSocket();
+                sockets.push(socket);
+                return socket as unknown as WebSocket;
+            },
+            initialDocumentJson: INITIAL_DOC,
+            localAwareness: {
+                userId: '1',
+                name: 'Alice',
+                color: '#f00',
+            },
+        });
+
+        controller.connect();
+        sockets[0].open();
+        sockets[0].send.mockClear();
+        mockNativeModule.collaborationSessionApplyLocalDocumentJson.mockClear();
+        mockNativeModule.collaborationSessionSetLocalAwareness.mockClear();
+
+        controller.handleSelectionChange({ type: 'text', anchor: 6, head: 6 });
+        controller.handleLocalDocumentChange(LOCAL_DOC);
+
+        expect(mockNativeModule.collaborationSessionApplyLocalDocumentJson).toHaveBeenCalledWith(
+            1,
+            JSON.stringify(LOCAL_DOC)
+        );
+        expect(mockNativeModule.collaborationSessionSetLocalAwareness).toHaveBeenCalledWith(
+            1,
+            JSON.stringify({
+                user: {
+                    userId: '1',
+                    name: 'Alice',
+                    color: '#f00',
+                },
+                focused: true,
+                selection: { anchor: 6, head: 6 },
+            })
+        );
+        expect(
+            mockNativeModule.collaborationSessionApplyLocalDocumentJson.mock.invocationCallOrder[0]
+        ).toBeLessThan(
+            mockNativeModule.collaborationSessionSetLocalAwareness.mock.invocationCallOrder[0]
+        );
+        expect(Array.from(new Uint8Array(sockets[0].send.mock.calls[0][0] as ArrayBuffer))).toEqual(
+            [0, 2, 8, 8, 8]
+        );
+        expect(Array.from(new Uint8Array(sockets[0].send.mock.calls[1][0] as ArrayBuffer))).toEqual(
+            [1, 6, 6, 6]
+        );
+
+        jest.advanceTimersByTime(40);
+        expect(mockNativeModule.collaborationSessionSetLocalAwareness).toHaveBeenCalledTimes(1);
 
         controller.destroy();
     });

@@ -10,10 +10,15 @@
 // ────────────────────────────────────────────────────────────────
 
 import React from 'react';
-import { Keyboard, StyleSheet } from 'react-native';
-import { render, fireEvent } from '@testing-library/react-native';
+import { Keyboard, ScrollView, StyleSheet } from 'react-native';
+import { render, fireEvent, act } from '@testing-library/react-native';
 
-import { EditorToolbar, type EditorToolbarProps } from '../EditorToolbar';
+import {
+    EditorToolbar,
+    _resetEditorToolbarFrameRegistryForTests,
+    setEditorToolbarMentionState,
+    type EditorToolbarProps,
+} from '../EditorToolbar';
 import type { ActiveState, HistoryState } from '../NativeEditorBridge';
 
 // ─── Helpers ────────────────────────────────────────────────────
@@ -96,6 +101,12 @@ function renderToolbar(
 // ─── Tests ──────────────────────────────────────────────────────
 
 describe('EditorToolbar', () => {
+    afterEach(() => {
+        act(() => {
+            _resetEditorToolbarFrameRegistryForTests();
+        });
+    });
+
     // ── Rendering ───────────────────────────────────────────────
 
     describe('rendering', () => {
@@ -1140,6 +1151,27 @@ describe('EditorToolbar', () => {
     // ── Focus Preservation ─────────────────────────────────────
 
     describe('focus preservation', () => {
+        it('keeps keyboard taps persistent on toolbar scroll views', () => {
+            const { UNSAFE_getByType, unmount } = renderToolbar();
+
+            expect(UNSAFE_getByType(ScrollView).props.keyboardShouldPersistTaps).toBe('always');
+            unmount();
+
+            act(() => {
+                setEditorToolbarMentionState(1, {
+                    trigger: '@',
+                    suggestions: [{ key: 'u1', title: 'Alice', label: '@Alice' }],
+                    onSelectSuggestion: jest.fn(),
+                });
+            });
+            const mentionToolbar = renderToolbar();
+
+            expect(
+                mentionToolbar.getByTestId('editor-toolbar-mention-suggestions').props
+                    .keyboardShouldPersistTaps
+            ).toBe('always');
+        });
+
         it('subscribes to keyboard layout changes while preserving editor focus', () => {
             const keyboardListeners = new Map<string, () => void>();
             const removers: jest.Mock[] = [];

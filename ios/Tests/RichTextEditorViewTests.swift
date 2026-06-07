@@ -692,6 +692,36 @@ final class RichTextEditorViewTests: XCTestCase {
         XCTAssertNil(view.inputAccessoryViewForTesting())
     }
 
+    func testNativeEditorToolbarFrameTapPreservesNextBlurOnce() {
+        let view = NativeEditorExpoView()
+        view.setToolbarFrameJson(#"{"x":20,"y":40,"width":100,"height":32}"#)
+
+        XCTAssertFalse(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+        XCTAssertFalse(
+            view.prepareOutsideTapForFocusHandlingForTesting(
+                locationInWindow: CGPoint(x: 30, y: 50)
+            )
+        )
+        XCTAssertTrue(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+        XCTAssertTrue(view.consumeToolbarFocusPreservationForTesting())
+        XCTAssertFalse(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+        XCTAssertFalse(view.consumeToolbarFocusPreservationForTesting())
+    }
+
+    func testNativeEditorOutsideTapClearsToolbarPreservation() {
+        let view = NativeEditorExpoView()
+
+        view.markRecentToolbarTouchForTesting()
+        XCTAssertTrue(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+
+        XCTAssertTrue(
+            view.prepareOutsideTapForFocusHandlingForTesting(
+                locationInWindow: CGPoint(x: 240, y: 260)
+            )
+        )
+        XCTAssertFalse(view.shouldPreserveFocusAfterToolbarTouchForTesting())
+    }
+
     func testInlineAccessoryPlaceholderRemainsAttachedAfterNativeEdit() {
         let editorId = editorCreate(configJson: "{}")
         defer { editorDestroy(id: editorId) }

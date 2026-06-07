@@ -2566,6 +2566,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     func blur() {
+        clearRecentToolbarTouch()
         richTextView.textView.resignFirstResponder()
     }
 
@@ -2603,7 +2604,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     @objc private func textViewDidEndEditing(_ notification: Notification) {
-        if shouldPreserveFocusAfterToolbarTouch() {
+        if consumeToolbarFocusPreservationForBlur() {
             DispatchQueue.main.async { [weak self] in
                 _ = self?.richTextView.textView.becomeFirstResponder()
             }
@@ -2624,6 +2625,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         guard shouldHandleOutsideTap(locationInWindow: locationInWindow, touchedView: nil) else {
             return
         }
+        clearRecentToolbarTouch()
         blur()
     }
 
@@ -2648,13 +2650,26 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         guard gestureRecognizer === outsideTapGestureRecognizer else { return true }
         guard let tapWindow = gestureWindow ?? window else { return true }
         let locationInWindow = touch.location(in: tapWindow)
+        return prepareOutsideTapForFocusHandling(
+            locationInWindow: locationInWindow,
+            touchedView: touch.view
+        )
+    }
+
+    private func prepareOutsideTapForFocusHandling(
+        locationInWindow: CGPoint,
+        touchedView: UIView?
+    ) -> Bool {
         if isLocationInStandaloneToolbarFrame(locationInWindow) {
             markRecentToolbarTouch()
         }
         let result = shouldHandleOutsideTap(
             locationInWindow: locationInWindow,
-            touchedView: touch.view
+            touchedView: touchedView
         )
+        if result {
+            clearRecentToolbarTouch()
+        }
         return result
     }
 
@@ -2662,8 +2677,18 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         lastToolbarTouchUptime = ProcessInfo.processInfo.systemUptime
     }
 
+    private func clearRecentToolbarTouch() {
+        lastToolbarTouchUptime = -Double.infinity
+    }
+
     private func shouldPreserveFocusAfterToolbarTouch() -> Bool {
         ProcessInfo.processInfo.systemUptime - lastToolbarTouchUptime <= 0.75
+    }
+
+    private func consumeToolbarFocusPreservationForBlur() -> Bool {
+        guard shouldPreserveFocusAfterToolbarTouch() else { return false }
+        clearRecentToolbarTouch()
+        return true
     }
 
     private func isLocationInStandaloneToolbarFrame(_ locationInWindow: CGPoint) -> Bool {
@@ -3315,6 +3340,28 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
 
     func isUsingAccessoryPlaceholderForTesting() -> Bool {
         richTextView.textView.inputAccessoryView === accessoryPlaceholder
+    }
+
+    func markRecentToolbarTouchForTesting() {
+        markRecentToolbarTouch()
+    }
+
+    func shouldPreserveFocusAfterToolbarTouchForTesting() -> Bool {
+        shouldPreserveFocusAfterToolbarTouch()
+    }
+
+    func consumeToolbarFocusPreservationForTesting() -> Bool {
+        consumeToolbarFocusPreservationForBlur()
+    }
+
+    func prepareOutsideTapForFocusHandlingForTesting(
+        locationInWindow: CGPoint,
+        touchedView: UIView? = nil
+    ) -> Bool {
+        prepareOutsideTapForFocusHandling(
+            locationInWindow: locationInWindow,
+            touchedView: touchedView
+        )
     }
 
     private func updateAccessoryToolbarVisibility() {

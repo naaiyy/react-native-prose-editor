@@ -60,6 +60,28 @@ Install the package:
 npm install @apollohg/react-native-prose-editor@0.5.1
 ```
 
+Expo prebuild apps should add the package config plugin so Android excludes
+obsolete JNA ABI copies that modern NDKs cannot strip:
+
+```ts
+export default {
+  expo: {
+    plugins: ['@apollohg/react-native-prose-editor'],
+  },
+};
+```
+
+For bare React Native apps or existing generated Android projects, add the same
+packaging exclude to `android/gradle.properties` when your template applies
+`android.packagingOptions.*` properties:
+
+```properties
+android.packagingOptions.excludes=**/armeabi/libjnidispatch.so,**/mips/libjnidispatch.so,**/mips64/libjnidispatch.so
+```
+
+If your Android project does not read those Gradle properties, add the patterns
+directly under the app module's `android.packagingOptions.jniLibs.excludes`.
+
 For local package development in this repo:
 
 ```sh
@@ -111,7 +133,7 @@ For setup and customization details, start with the [Documentation Index](https:
 
 For realtime collaboration, including the correct `useYjsCollaboration()` wiring, encoded-state persistence, remote cursors, and automatic reconnect behavior, see the [Collaboration Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Collaboration).
 
-For whole-document JSON loads, `initialJSON`, controlled `valueJSON`, and `setContentJson()` will normalize an empty root document like `{ type: 'doc', content: [] }` to the active schema's empty text block so block-constrained schemas still load a valid empty document.
+For whole-document JSON loads, `initialJSON`, controlled `valueJSON`, and `setContentJson()` will normalize an empty root document like `{ type: 'doc', content: [] }` to the active schema's empty text block so block-constrained schemas still load a valid empty document. For chat composer or draft-reset flows, prefer the ref method `clearContent()`.
 
 ## Development
 

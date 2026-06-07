@@ -506,10 +506,8 @@ impl CollaborationSession {
             other => return other,
         };
 
-        if !object.contains_key("selection") {
-            if let Some(selection) = self.selection_from_cursor_value(object.get("cursor")) {
-                object.insert("selection".to_string(), selection);
-            }
+        if let Some(selection) = self.selection_from_cursor_value(object.get("cursor")) {
+            object.insert("selection".to_string(), selection);
         }
 
         if !object.contains_key("cursor") {
@@ -1918,6 +1916,159 @@ mod tests {
                 .and_then(|value| value.get("assoc"))
                 .and_then(Value::as_i64),
             Some(-1)
+        );
+    }
+
+    #[test]
+    fn collaboration_session_remaps_local_selection_from_cursor_after_remote_document_update() {
+        let mut session = CollaborationSession::new(
+            &json!({
+                "clientId": 1,
+                "fragmentName": "default"
+            })
+            .to_string(),
+        );
+        let mut peer = Awareness::new(Doc::with_client_id(2));
+
+        let initial_update = {
+            let mut txn = peer.doc_mut().transact_mut();
+            let fragment = txn.get_or_insert_xml_fragment("default");
+            insert_json_node(
+                &fragment,
+                &mut txn,
+                0,
+                &json!({
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "hello" }]
+                }),
+            );
+            txn.encode_update_v1()
+        };
+        session
+            .handle_message(encode_message(Message::Sync(SyncMessage::Update(
+                initial_update,
+            ))))
+            .expect("session should accept peer document");
+
+        session.set_local_awareness(json!({
+            "user": {
+                "name": "Session"
+            },
+            "selection": {
+                "anchor": 4,
+                "head": 4
+            },
+            "focused": true
+        }));
+
+        let remote_insert_update = {
+            let mut txn = peer.doc_mut().transact_mut();
+            let text = {
+                let fragment = txn
+                    .get_xml_fragment("default")
+                    .expect("peer fragment should exist");
+                let XmlOut::Element(paragraph) =
+                    fragment.get(&txn, 0).expect("paragraph should exist")
+                else {
+                    panic!("expected paragraph element");
+                };
+                let XmlOut::Text(text) = paragraph.get(&txn, 0).expect("text node should exist")
+                else {
+                    panic!("expected paragraph text");
+                };
+                text
+            };
+            text.insert(&mut txn, 0, "X");
+            txn.encode_update_v1()
+        };
+
+        let result = session
+            .handle_message(encode_message(Message::Sync(SyncMessage::Update(
+                remote_insert_update,
+            ))))
+            .expect("session should accept peer edit before local cursor");
+
+        assert!(result.document_changed);
+        assert!(result.peers_changed);
+        let local_peer = result
+            .peers
+            .expect("document update should include remapped peers")
+            .into_iter()
+            .find(|peer| peer.is_local)
+            .expect("local peer should be present");
+        assert_eq!(
+            local_peer.state.get("selection"),
+            Some(&json!({
+                "anchor": 5,
+                "head": 5
+            }))
+        );
+    }
+
+    #[test]
+    fn collaboration_session_remaps_local_selection_after_multibyte_replacement_before_cursor() {
+        let mut session = CollaborationSession::new(
+            &json!({
+                "clientId": 1,
+                "fragmentName": "default",
+                "initialDocumentJson": {
+                    "type": "doc",
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{ "type": "text", "text": "héllo" }]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        );
+
+        session.set_local_awareness(json!({
+            "user": {
+                "name": "Session"
+            },
+            "selection": {
+                "anchor": 5,
+                "head": 5
+            },
+            "focused": true
+        }));
+
+        let result = session.apply_local_document(json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "hXYllo" }]
+                }
+            ]
+        }));
+
+        assert_eq!(
+            result.document_json,
+            Some(json!({
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": "hXYllo" }]
+                    }
+                ]
+            }))
+        );
+        let local_peer = result
+            .peers
+            .expect("local replacement should include remapped peers")
+            .into_iter()
+            .find(|peer| peer.is_local)
+            .expect("local peer should be present");
+        assert_eq!(
+            local_peer.state.get("selection"),
+            Some(&json!({
+                "anchor": 6,
+                "head": 6
+            }))
         );
     }
 

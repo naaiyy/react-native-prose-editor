@@ -47,6 +47,8 @@ export interface YjsCollaborationState {
     status: YjsTransportStatus;
     isConnected: boolean;
     documentJson: DocumentJSON;
+    /** Local selection remapped through the latest collaboration document update. */
+    selectionOnValueJSONReset?: Selection;
     lastError?: Error;
 }
 
@@ -96,6 +98,9 @@ export interface UseYjsCollaborationResult {
     updateLocalAwareness(partial: Partial<LocalAwarenessState>): void;
     editorBindings: {
         valueJSON: DocumentJSON;
+        valueJSONUpdateMode: 'reset';
+        preserveSelectionOnValueJSONReset: true;
+        selectionOnValueJSONReset?: Selection;
         remoteSelections: RemoteSelectionDecoration[];
         onContentChangeJSON: (doc: DocumentJSON) => void;
         onSelectionChange: (selection: Selection) => void;
@@ -312,6 +317,23 @@ function selectionToAwarenessRange(
     };
 }
 
+function selectionFromPeerState(state: Record<string, unknown> | null): Selection | undefined {
+    if (!state || typeof state !== 'object') return undefined;
+    const selection = state.selection;
+    if (!selection || typeof selection !== 'object') return undefined;
+
+    const anchor = Number((selection as Record<string, unknown>).anchor);
+    const head = Number((selection as Record<string, unknown>).head);
+    if (!Number.isFinite(anchor) || !Number.isFinite(head)) return undefined;
+
+    return { type: 'text', anchor, head };
+}
+
+function localSelectionFromPeers(peers: readonly CollaborationPeer[]): Selection | undefined {
+    const localPeer = peers.find((peer) => peer.isLocal);
+    return localPeer ? selectionFromPeerState(localPeer.state) : undefined;
+}
+
 function peersToRemoteSelections(peers: readonly CollaborationPeer[]): RemoteSelectionDecoration[] {
     return peers.flatMap((peer) => {
         if (peer.isLocal || !peer.state || typeof peer.state !== 'object') {
@@ -390,18 +412,22 @@ class YjsCollaborationControllerImpl implements YjsCollaborationController {
             localAwareness: awarenessToRecord(this.localAwarenessState),
         });
         const nativeDocumentJson = this.bridge.getDocumentJson();
+        this._peers = this.bridge.getPeers();
+        let initialDocumentJson: DocumentJSON;
+        if (options.initialDocumentJson != null) {
+            initialDocumentJson = cloneJsonValue(options.initialDocumentJson);
+        } else if (shouldUseFallbackForNativeDocument(nativeDocumentJson, options)) {
+            initialDocumentJson = defaultEmptyDocument(options.schema);
+        } else {
+            initialDocumentJson = nativeDocumentJson;
+        }
         this._state = {
             documentId: options.documentId,
             status: 'idle',
             isConnected: false,
-            documentJson:
-                options.initialDocumentJson != null
-                    ? cloneJsonValue(options.initialDocumentJson)
-                    : shouldUseFallbackForNativeDocument(nativeDocumentJson, options)
-                      ? defaultEmptyDocument(options.schema)
-                      : nativeDocumentJson,
+            documentJson: initialDocumentJson,
+            selectionOnValueJSONReset: localSelectionFromPeers(this._peers),
         };
-        this._peers = this.bridge.getPeers();
         if (options.connect !== false) {
             this.connect();
         }
@@ -490,6 +516,9 @@ class YjsCollaborationControllerImpl implements YjsCollaborationController {
                 return;
             }
             try {
+                if (this.pendingAwarenessTimer != null) {
+                    this.commitLocalAwareness();
+                }
                 const result = this.bridge.handleMessage(bytes);
                 this.applyResult(result);
                 sendBinaryMessages(socket, result.messages);
@@ -603,6 +632,9 @@ class YjsCollaborationControllerImpl implements YjsCollaborationController {
         const result = this.bridge.applyLocalDocumentJson(doc);
         this.applyResult(result);
         sendBinaryMessages(this.socket, result.messages);
+        if (this.pendingAwarenessTimer != null) {
+            this.commitLocalAwareness();
+        }
     }
 
     handleSelectionChange(selection: Selection): void {
@@ -632,13 +664,18 @@ class YjsCollaborationControllerImpl implements YjsCollaborationController {
     }
 
     private applyResult(result: CollaborationResult): void {
+        const didPeersChange = result.peersChanged && result.peers != null;
+        if (didPeersChange) {
+            this._peers = result.peers!;
+        }
+
         if (result.documentChanged && result.documentJson) {
             this.setState({
                 documentJson: result.documentJson,
+                selectionOnValueJSONReset: localSelectionFromPeers(this._peers),
             });
         }
-        if (result.peersChanged && result.peers) {
-            this._peers = result.peers;
+        if (didPeersChange) {
             this.callbacks.onPeersChange?.(this._peers);
         }
     }
@@ -886,6 +923,9 @@ export function useYjsCollaboration(options: YjsCollaborationOptions): UseYjsCol
         updateLocalAwareness: (partial) => controllerRef.current?.updateLocalAwareness(partial),
         editorBindings: {
             valueJSON: state.documentJson,
+            valueJSONUpdateMode: 'reset',
+            preserveSelectionOnValueJSONReset: true,
+            selectionOnValueJSONReset: state.selectionOnValueJSONReset,
             remoteSelections: peersToRemoteSelections(peers),
             onContentChangeJSON: (doc) => controllerRef.current?.handleLocalDocumentChange(doc),
             onSelectionChange: (selection) =>
