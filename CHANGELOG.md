@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.22] - 2026-06-12
+
+### Fixed
+
+- iOS no longer crashes with a stack overflow when a delegate-proxying keyboard library (e.g. react-native-keyboard-controller) wraps the focused editor's delegate. The editor now uses a dedicated internal `UITextViewDelegate` object instead of acting as its own delegate, so proxies can't forward private UITextView selectors back into the text view.
+
+### Tests
+
+- Added iOS regression coverage for keyboard-controller-style delegate proxies forwarding `keyboardInputChangedSelection:` back to the editor.
+
 ## [0.5.21] - 2026-06-06
 
 ### Added
@@ -352,6 +362,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.22]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.21...0.5.22
 [0.5.21]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.20...0.5.21
 [0.5.20]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.19...0.5.20
 [0.5.19]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.18...0.5.19

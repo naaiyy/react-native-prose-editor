@@ -687,6 +687,49 @@ private final class ImageResizeOverlayView: UIView {
 
 // MARK: - EditorTextView
 
+/// Dedicated `UITextViewDelegate` for `EditorTextView`.
+///
+/// The editor must not be its own `UITextViewDelegate`. Delegate-proxy
+/// keyboard integrations (e.g. react-native-keyboard-controller's
+/// `KCTextInputCompositeDelegate`) wrap the current delegate and forward
+/// every selector they do not implement to the wrapped delegate via
+/// `forwardingTarget(for:)`. UIKit relays the private
+/// `keyboardInputChangedSelection:` from the text view to its delegate, so a
+/// text view that is its own delegate bounces that selector text view ->
+/// proxy -> text view until the stack overflows (APOLLO-REACT-56). A plain
+/// NSObject delegate does not respond to UITextView's private selectors,
+/// which keeps proxies from forwarding them back.
+final class EditorTextViewInternalDelegate: NSObject, UITextViewDelegate {
+    private weak var editor: EditorTextView?
+
+    init(editor: EditorTextView) {
+        self.editor = editor
+    }
+
+    func textViewDidChangeSelection(_ textView: UITextView) {
+        editor?.textViewDidChangeSelection(textView)
+    }
+
+    func textView(
+        _ textView: UITextView,
+        shouldInteractWith URL: URL,
+        in characterRange: NSRange,
+        interaction: UITextItemInteraction
+    ) -> Bool {
+        editor?.textView(textView, shouldInteractWith: URL, in: characterRange, interaction: interaction) ?? false
+    }
+
+    func textView(
+        _ textView: UITextView,
+        shouldInteractWith textAttachment: NSTextAttachment,
+        in characterRange: NSRange,
+        interaction: UITextItemInteraction
+    ) -> Bool {
+        editor?.textView(textView, shouldInteractWith: textAttachment, in: characterRange, interaction: interaction)
+            ?? false
+    }
+}
+
 /// UITextView subclass that intercepts all text input and routes it through
 /// the Rust editor-core engine via UniFFI bindings.
 ///
@@ -713,8 +756,10 @@ private final class ImageResizeOverlayView: UIView {
 /// (`editor_insert_text`, `editor_delete_range`, etc.) are synchronous and
 /// fast enough for main-thread use. If profiling shows otherwise, we can
 /// dispatch to a serial queue and batch updates.
-final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerDelegate {
+final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
     private static let emptyBlockPlaceholderScalar = UnicodeScalar(0x200B)!
+
+    private lazy var internalTextViewDelegate = EditorTextViewInternalDelegate(editor: self)
 
     override var undoManager: UndoManager? { nil }
 
@@ -1640,7 +1685,7 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
     }
 
     func isUsingInternalTextViewDelegateForTesting() -> Bool {
-        (delegate as AnyObject?) === (self as AnyObject)
+        (delegate as AnyObject?) === internalTextViewDelegate
     }
 
     func blockquoteStripeRectsForTesting() -> [CGRect] {
@@ -2590,8 +2635,10 @@ final class EditorTextView: UITextView, UITextViewDelegate, UIGestureRecognizerD
         // Some keyboard integrations replace UITextView's private delegate ivar
         // directly. The editor must own delegate callbacks so external observers
         // cannot inspect transient TextKit state during Rust-driven edits.
-        guard (delegate as AnyObject?) !== (self as AnyObject) else { return }
-        delegate = self
+        // The delegate is a dedicated object rather than the text view itself;
+        // see EditorTextViewInternalDelegate for why (APOLLO-REACT-56).
+        guard (delegate as AnyObject?) !== internalTextViewDelegate else { return }
+        delegate = internalTextViewDelegate
     }
 
     private func performInterceptedInput(

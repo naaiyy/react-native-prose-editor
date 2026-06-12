@@ -212,7 +212,7 @@ final class RichTextEditorViewTests: XCTestCase {
         editorSetSelectionScalar(id: editorId, scalarAnchor: 5, scalarHead: 5)
         textView.applyUpdateJSON(editorGetCurrentState(id: editorId), notifyDelegate: false)
 
-        let delegateSpy = KeyboardProviderTextViewDelegateSpy(textViewDelegate: textView)
+        let delegateSpy = KeyboardProviderTextViewDelegateSpy(textViewDelegate: textView.delegate)
         textView.delegate = delegateSpy
         XCTAssertFalse(textView.isUsingInternalTextViewDelegateForTesting())
 
@@ -226,6 +226,36 @@ final class RichTextEditorViewTests: XCTestCase {
         )
         XCTAssertEqual(delegateSpy.textChangeCount, 0)
         XCTAssertTrue(textView.isUsingInternalTextViewDelegateForTesting())
+    }
+
+    func testInternalTextViewDelegateDoesNotEchoPrivateUITextViewSelectorsThroughDelegateProxies() {
+        // APOLLO-REACT-56: react-native-keyboard-controller wraps the focused
+        // text view's delegate in a composite that forwards unhandled selectors
+        // to the wrapped delegate. UIKit invokes the private
+        // `keyboardInputChangedSelection:` on UITextView, which relays it to the
+        // delegate when `respondsToSelector:` says yes. If the wrapped delegate
+        // is the text view itself, the relay bounces text view -> proxy -> text
+        // view until the stack overflows (EXC_BAD_ACCESS).
+        let textView = EditorTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+
+        let keyboardInputChangedSelection = NSSelectorFromString("keyboardInputChangedSelection:")
+        XCTAssertTrue(
+            textView.responds(to: keyboardInputChangedSelection),
+            "expected UITextView to implement the private keyboardInputChangedSelection: selector; if UIKit removed it, this regression test needs a new recursion-prone selector"
+        )
+
+        XCTAssertNotNil(textView.delegate, "EditorTextView should install its internal delegate on init")
+        XCTAssertFalse(
+            (textView.delegate as AnyObject?) === (textView as AnyObject),
+            "EditorTextView must not be its own UITextViewDelegate: delegate-proxy keyboard integrations forward UITextView's private selectors back to the wrapped delegate, recursing forever when that delegate is the text view itself"
+        )
+
+        let composite = ForwardingCompositeTextViewDelegateSpy(wrappedDelegate: textView.delegate)
+        textView.delegate = composite
+        XCTAssertFalse(
+            composite.responds(to: keyboardInputChangedSelection),
+            "a KCTextInputCompositeDelegate-style proxy wrapping the editor's delegate must not claim to handle keyboardInputChangedSelection:, otherwise UIKit forwards it and the call recurses back into the text view"
+        )
     }
 
     func testParagraphSplitAppliesTopLevelRenderPatch() {
@@ -6444,6 +6474,32 @@ final class RichTextEditorViewTests: XCTestCase {
 
         let data = try! JSONSerialization.data(withJSONObject: config)
         return String(data: data, encoding: .utf8)!
+    }
+}
+
+/// Mirrors react-native-keyboard-controller's `KCTextInputCompositeDelegate`
+/// call forwarding: the composite wraps the text view's current delegate and
+/// forwards every selector it does not implement itself to that delegate via
+/// `responds(to:)` / `forwardingTarget(for:)`.
+private final class ForwardingCompositeTextViewDelegateSpy: NSObject, UITextViewDelegate {
+    weak var wrappedDelegate: UITextViewDelegate?
+
+    init(wrappedDelegate: UITextViewDelegate?) {
+        self.wrappedDelegate = wrappedDelegate
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) {
+            return true
+        }
+        return wrappedDelegate?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if wrappedDelegate?.responds(to: aSelector) ?? false {
+            return wrappedDelegate
+        }
+        return super.forwardingTarget(for: aSelector)
     }
 }
 
