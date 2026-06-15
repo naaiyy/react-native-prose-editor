@@ -2214,6 +2214,52 @@ class NativeEditorExpoViewTest {
     }
 
     @Test
+    fun `auto grow content height re-emits when editor id changes`() {
+        val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
+        val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)
+        val editText = view.richTextView.editorEditText
+        val events = mutableListOf<Map<String, Any>>()
+
+        view.onContentHeightChangeForTesting = { event ->
+            events.add(event)
+        }
+        view.setHeightBehavior("autoGrow")
+        editText.applyUpdateJSON(
+            renderUpdateJson("Line one\nLine two\nLine three"),
+            notifyListener = false
+        )
+
+        val widthSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+            360,
+            android.view.View.MeasureSpec.EXACTLY
+        )
+        val heightSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+            0,
+            android.view.View.MeasureSpec.UNSPECIFIED
+        )
+        view.measure(widthSpec, heightSpec)
+        view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+
+        assertTrue(events.isNotEmpty())
+        val initialEvent = events.last()
+        val contentHeight = initialEvent["contentHeight"] as Int
+        assertEquals(0L, initialEvent["editorId"])
+
+        events.clear()
+        val editorId = 779902L
+
+        view.setEditorId(editorId)
+        view.measure(widthSpec, heightSpec)
+        view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+
+        assertEquals(1, events.size)
+        assertEquals(contentHeight, events.single()["contentHeight"])
+        assertEquals(editorId, events.single()["editorId"])
+
+        NativeEditorViewRegistry.unregister(editorId, view)
+    }
+
+    @Test
     fun `detach preflight flushes pending composition before unregistering`() {
         val expoContext = testExpoContext(RuntimeEnvironment.getApplication())
         val view = NativeEditorExpoView(expoContext.context, expoContext.appContext)

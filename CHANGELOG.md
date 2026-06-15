@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.23] - 2026-06-15
+
+### Fixed
+
+- Android auto-grow updates after editor recreation.
+
 ## [0.5.22] - 2026-06-12
 
 ### Fixed
@@ -362,6 +368,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.23]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.22...0.5.23
 [0.5.22]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.21...0.5.22
 [0.5.21]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.20...0.5.21
 [0.5.20]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.19...0.5.20

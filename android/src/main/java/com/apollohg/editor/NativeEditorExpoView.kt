@@ -625,6 +625,7 @@ class NativeEditorExpoView(
     private var didApplyAutoFocus = false
     private var heightBehavior = EditorHeightBehavior.FIXED
     private var lastEmittedContentHeight = 0
+    private var lastEmittedContentHeightEditorId: Long? = null
     private var outsideTapWindow: Window? = null
     private var pendingOutsideTapHandlerInstallRetry: Runnable? = null
     private var toolbarFramesInWindow: List<RectF> = emptyList()
@@ -748,6 +749,9 @@ class NativeEditorExpoView(
             return
         }
         val previousEditorId = richTextView.editorId
+        if (previousEditorId != id) {
+            invalidateAutoGrowContentHeightEmission()
+        }
         if (previousEditorId == id && richTextView.editorEditText.editorId == id) {
             if (id != 0L && isAttachedToNativeWindow) {
                 if (!NativeEditorViewRegistry.register(id, this)) {
@@ -859,6 +863,7 @@ class NativeEditorExpoView(
         heightBehavior = nextBehavior
         if (nextBehavior != EditorHeightBehavior.AUTO_GROW) {
             lastEmittedContentHeight = 0
+            lastEmittedContentHeightEditorId = null
         }
         richTextView.setHeightBehavior(nextBehavior)
         val params = richTextView.layoutParams as LayoutParams
@@ -874,6 +879,13 @@ class NativeEditorExpoView(
             post { emitContentHeightIfNeeded(force = true) }
         }
         updateEditorViewportInset()
+    }
+
+    private fun invalidateAutoGrowContentHeightEmission() {
+        if (heightBehavior != EditorHeightBehavior.AUTO_GROW) return
+        lastEmittedContentHeight = 0
+        lastEmittedContentHeightEditorId = null
+        requestLayout()
     }
 
     fun setAddonsJson(addonsJson: String?) {
@@ -2022,11 +2034,19 @@ class NativeEditorExpoView(
             }
         ).coerceAtLeast(0)
         if (contentHeight <= 0) return
-        if (!force && contentHeight == lastEmittedContentHeight) return
+        val editorId = richTextView.editorId
+        if (
+            !force &&
+            contentHeight == lastEmittedContentHeight &&
+            editorId == lastEmittedContentHeightEditorId
+        ) {
+            return
+        }
         lastEmittedContentHeight = contentHeight
+        lastEmittedContentHeightEditorId = editorId
         val event = mapOf(
             "contentHeight" to contentHeight,
-            "editorId" to richTextView.editorId
+            "editorId" to editorId
         )
         onContentHeightChangeForTesting?.invoke(event) ?: onContentHeightChange(event)
     }
