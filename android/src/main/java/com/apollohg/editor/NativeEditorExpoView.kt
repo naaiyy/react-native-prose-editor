@@ -326,6 +326,7 @@ private object NativeEditorOutsideTapDispatcher {
             cancelPendingOutsideTapCandidates("scroll")
         }
         private var scrollListenerTreeObserver: ViewTreeObserver? = null
+        private var attachmentGeneration = 0
         private val observerView = View(host.context).apply {
             isClickable = false
             isFocusable = false
@@ -525,13 +526,27 @@ private object NativeEditorOutsideTapDispatcher {
         fun isAttached(): Boolean = observerView.parent === host
 
         fun detach() {
+            attachmentGeneration += 1
+            val generation = attachmentGeneration
             cancelPendingOutsideTapCandidates("detach")
-            (observerView.parent as? ViewGroup)?.removeView(observerView)
+            val parent = observerView.parent as? ViewGroup ?: return
+            observerView.visibility = View.GONE
+            parent.post {
+                if (generation != attachmentGeneration) return@post
+                if (observerView.parent === parent) {
+                    parent.removeView(observerView)
+                }
+            }
         }
 
         private fun attach() {
-            if (observerView.parent !== host) {
-                detach()
+            attachmentGeneration += 1
+            observerView.visibility = View.VISIBLE
+            val parent = observerView.parent as? ViewGroup
+            if (parent !== host) {
+                if (parent != null) {
+                    parent.removeView(observerView)
+                }
                 host.addView(
                     observerView,
                     ViewGroup.LayoutParams(
@@ -539,8 +554,17 @@ private object NativeEditorOutsideTapDispatcher {
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                 )
+                return
             }
-            observerView.bringToFront()
+            if (host.indexOfChild(observerView) != host.childCount - 1) {
+                val generation = attachmentGeneration
+                host.post {
+                    if (generation != attachmentGeneration) return@post
+                    if (observerView.parent === host && host.indexOfChild(observerView) != host.childCount - 1) {
+                        observerView.bringToFront()
+                    }
+                }
+            }
         }
 
         private fun prune() {
@@ -636,6 +660,7 @@ class NativeEditorExpoView(
     private var pendingToolbarRefocus: Runnable? = null
     private var pendingToolbarRefocusEditorId: Long? = null
     private var pendingToolbarRefocusGeneration = 0
+    private var pendingKeyboardToolbarDetachGeneration = 0
     private var autoFocusRequested = false
     private var addons = NativeEditorAddons(null)
     private var mentionQueryState: MentionQueryState? = null
@@ -2931,11 +2956,12 @@ class NativeEditorExpoView(
 
     private fun ensureKeyboardToolbarAttached() {
         val host = resolveActivity(context)?.findViewById<ViewGroup>(android.R.id.content) ?: return
+        pendingKeyboardToolbarDetachGeneration += 1
         if (keyboardToolbarView.parent === host) {
             updateKeyboardToolbarLayout()
             return
         }
-        detachKeyboardToolbarIfNeeded()
+        (keyboardToolbarView.parent as? ViewGroup)?.removeView(keyboardToolbarView)
         host.addView(
             keyboardToolbarView,
             FrameLayout.LayoutParams(
@@ -2949,7 +2975,16 @@ class NativeEditorExpoView(
     }
 
     private fun detachKeyboardToolbarIfNeeded() {
-        (keyboardToolbarView.parent as? ViewGroup)?.removeView(keyboardToolbarView)
+        pendingKeyboardToolbarDetachGeneration += 1
+        val generation = pendingKeyboardToolbarDetachGeneration
+        val parent = keyboardToolbarView.parent as? ViewGroup ?: return
+        keyboardToolbarView.visibility = View.GONE
+        parent.post {
+            if (generation != pendingKeyboardToolbarDetachGeneration) return@post
+            if (keyboardToolbarView.parent === parent) {
+                parent.removeView(keyboardToolbarView)
+            }
+        }
     }
 
     private fun updateKeyboardToolbarLayout() {

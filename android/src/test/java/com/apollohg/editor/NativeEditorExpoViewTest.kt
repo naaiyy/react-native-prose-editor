@@ -2053,6 +2053,7 @@ class NativeEditorExpoViewTest {
         assertSame(observer, host.getChildAt(host.childCount - 1))
 
         secondView.uninstallOutsideTapBlurHandlerForTesting()
+        shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(originalChildCount, host.childCount)
     }

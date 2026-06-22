@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.24] - 2026-06-22
+
+### Fixed
+
+- Android now defers host-level outside-tap observer and keyboard toolbar view removals, avoiding framework `ViewGroup.dispatchGetDisplayList` crashes during focused editor teardown and rapid re-entry.
+- Android release builds now preserve native editor `View` class names in crash reports, making framework ViewGroup crashes actionable after minification.
+
+### Tests
+
+- Updated Android native view lifecycle coverage for deferred outside-tap observer cleanup.
+
 ## [0.5.23] - 2026-06-15
 
 ### Fixed
@@ -368,6 +379,7 @@
 - Controlled and uncontrolled content modes (HTML and JSON).
 - Undo/redo history.
 
+[0.5.24]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.23...0.5.24
 [0.5.23]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.22...0.5.23
 [0.5.22]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.21...0.5.22
 [0.5.21]: https://github.com/apollohg/react-native-prose-editor/compare/0.5.20...0.5.21
