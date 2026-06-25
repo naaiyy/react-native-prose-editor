@@ -403,7 +403,7 @@ final class RenderBridge {
                 let depth = jsonUInt8(element["depth"])
                 let listContext = element["listContext"] as? [String: Any]
                 let isListItemContainer = isListItemNodeType(nodeType) && listContext != nil
-                let isTransparentContainer = nodeType == "blockquote"
+                let isTransparentContainer = isTransparentContainer(nodeType)
                 let ctx = BlockContext(
                     nodeType: nodeType,
                     depth: depth,
@@ -941,8 +941,10 @@ final class RenderBridge {
         let listBaseIndentAdjustment = context.listContext != nil
             ? ((listBaseIndentMultiplier - 1) * indentPerDepth)
             : 0
+        let columnsDepth = CGFloat(columnContainerDepth(in: blockStack))
         let baseIndent = (CGFloat(context.depth) * indentPerDepth)
             - (quoteDepth * indentPerDepth)
+            - (columnsDepth * indentPerDepth)
             + listBaseIndentAdjustment
             + (quoteDepth * quoteIndent)
 
@@ -1466,6 +1468,18 @@ final class RenderBridge {
                 count += 1
             }
         }
+    }
+
+    private static func columnContainerDepth(in blockStack: [BlockContext]) -> Int {
+        blockStack.reduce(into: 0) { count, context in
+            if context.nodeType == "columns" || context.nodeType == "column" {
+                count += 1
+            }
+        }
+    }
+
+    private static func isTransparentContainer(_ nodeType: String) -> Bool {
+        nodeType == "blockquote" || nodeType == "columns" || nodeType == "column"
     }
 
     private static func resolvedFont(

@@ -76,6 +76,7 @@ object LayoutConstants {
 
     /** Background color for inline code spans (light gray). */
     const val CODE_BACKGROUND_COLOR: Int = 0x1A000000  // 10% black
+
 }
 
 data class BlockContext(
@@ -1077,7 +1078,7 @@ object RenderBridge {
                     val depth = element.optInt("depth", 0)
                     val listContext = element.optJSONObject("listContext")
                     val isListItemContainer = isListItemNodeType(nodeType) && listContext != null
-                    val isTransparentContainer = nodeType == "blockquote"
+                    val isTransparentContainer = isTransparentContainer(nodeType)
                     val nestedListItemContainer =
                         isListItemContainer &&
                             state.blockStack.any {
@@ -1855,6 +1856,7 @@ object RenderBridge {
     ): Float {
         val indentPerDepth = (theme?.list?.indent ?: LayoutConstants.INDENT_PER_DEPTH) * density
         val quoteDepth = blockquoteDepth(blockStack)
+        val columnsDepth = columnContainerDepth(blockStack)
         val quoteIndent = maxOf(
             theme?.blockquote?.indent ?: LayoutConstants.BLOCKQUOTE_INDENT,
             (theme?.blockquote?.markerGap ?: LayoutConstants.BLOCKQUOTE_MARKER_GAP) +
@@ -1863,6 +1865,7 @@ object RenderBridge {
         val listBaseIndentAdjustment = calculateListBaseIndentAdjustment(context, theme, density)
         return (context.depth * indentPerDepth) -
             (quoteDepth * indentPerDepth) +
+            -(columnsDepth * indentPerDepth) +
             listBaseIndentAdjustment +
             (quoteDepth * quoteIndent)
     }
@@ -1947,6 +1950,14 @@ object RenderBridge {
 
     private fun blockquoteDepth(blockStack: List<BlockContext>): Float {
         return blockStack.count { it.nodeType == "blockquote" }.toFloat()
+    }
+
+    private fun columnContainerDepth(blockStack: List<BlockContext>): Float {
+        return blockStack.count { it.nodeType == "columns" || it.nodeType == "column" }.toFloat()
+    }
+
+    private fun isTransparentContainer(nodeType: String): Boolean {
+        return nodeType == "blockquote" || nodeType == "columns" || nodeType == "column"
     }
 
     private fun resolveTextStyle(
