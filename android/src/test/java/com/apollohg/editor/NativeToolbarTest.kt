@@ -280,13 +280,15 @@ class NativeToolbarTest {
             org.json.JSONObject(
                 """
                 {
-                  "appearance": "native"
+                  "appearance": "native",
+                  "height": 44
                 }
                 """.trimIndent()
             )
         )
 
         assertEquals(EditorToolbarAppearance.NATIVE, theme?.appearance)
+        assertEquals(44f, theme?.height)
         assertEquals(8f, theme?.resolvedKeyboardOffset())
         assertEquals(0f, theme?.resolvedHorizontalInset())
     }

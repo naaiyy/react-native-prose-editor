@@ -522,6 +522,7 @@ const BUTTON_HIT = 44;
 const BUTTON_VISIBLE = 32;
 const TOOLBAR_PADDING_H = 12;
 const TOOLBAR_PADDING_V = 4;
+const MIN_TOOLBAR_HEIGHT = 40;
 const MENU_MARGIN = 8;
 const MENU_WIDTH = 192;
 const KEYBOARD_FRAME_REMEASURE_DELAYS_MS = [50, 150, 300] as const;
@@ -1100,6 +1101,19 @@ export function EditorToolbar({
 
     const menuGroup = menuState != null ? (groupsByKey.get(menuState.groupKey) ?? null) : null;
     const menuHeight = menuGroup ? menuGroup.children.length * 40 + 16 : 0;
+    const resolvedToolbarHeight = Math.max(
+        theme?.height ?? BUTTON_VISIBLE + TOOLBAR_PADDING_V * 2,
+        MIN_TOOLBAR_HEIGHT
+    );
+    const resolvedButtonHeight =
+        theme?.height == null
+            ? BUTTON_VISIBLE
+            : Math.max(28, Math.min(40, resolvedToolbarHeight - TOOLBAR_PADDING_V * 2));
+    const resolvedToolbarPaddingV =
+        theme?.height == null
+            ? TOOLBAR_PADDING_V
+            : Math.max(4, (resolvedToolbarHeight - resolvedButtonHeight) / 2);
+    const resolvedSeparatorHeight = Math.max(16, resolvedButtonHeight - 12);
     const menuTop =
         menuState == null
             ? 0
@@ -1164,6 +1178,7 @@ export function EditorToolbar({
                     style={[
                         styles.button,
                         {
+                            height: resolvedButtonHeight,
                             borderRadius: theme?.buttonBorderRadius ?? BUTTON_RADIUS,
                         },
                         button.isActive && {
@@ -1194,6 +1209,7 @@ export function EditorToolbar({
             key={key}
             style={[
                 styles.separator,
+                { height: resolvedSeparatorHeight },
                 theme?.separatorColor != null ? { backgroundColor: theme.separatorColor } : null,
             ]}
         />
@@ -1207,6 +1223,10 @@ export function EditorToolbar({
             style={[
                 styles.container,
                 !resolvedShowTopBorder && styles.containerWithoutTopBorder,
+                {
+                    minHeight: resolvedToolbarHeight,
+                    paddingVertical: resolvedToolbarPaddingV,
+                },
                 theme?.backgroundColor != null ? { backgroundColor: theme.backgroundColor } : null,
                 theme?.borderColor != null
                     ? resolvedShowTopBorder

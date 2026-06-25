@@ -226,6 +226,7 @@ enum class EditorToolbarAppearance {
 
 data class EditorToolbarTheme(
     val appearance: EditorToolbarAppearance? = null,
+    val height: Float? = null,
     val backgroundColor: Int? = null,
     val borderColor: Int? = null,
     val borderWidth: Float? = null,
@@ -256,6 +257,7 @@ data class EditorToolbarTheme(
             json ?: return null
             return EditorToolbarTheme(
                 appearance = EditorToolbarAppearance.fromRaw(json.optNullableString("appearance")),
+                height = json.optNullableFloat("height"),
                 backgroundColor = parseColor(json.optNullableString("backgroundColor")),
                 borderColor = parseColor(json.optNullableString("borderColor")),
                 borderWidth = json.optNullableFloat("borderWidth"),

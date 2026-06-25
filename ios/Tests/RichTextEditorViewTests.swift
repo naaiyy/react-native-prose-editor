@@ -774,10 +774,12 @@ final class RichTextEditorViewTests: XCTestCase {
         let theme = EditorTheme(dictionary: [
             "toolbar": [
                 "appearance": "native",
+                "height": 44,
             ],
         ])
 
         XCTAssertEqual(theme.toolbar?.appearance, .native)
+        XCTAssertEqual(theme.toolbar?.height ?? 0, 44, accuracy: 0.1)
         XCTAssertEqual(theme.toolbar?.resolvedKeyboardOffset ?? 0, 6, accuracy: 0.1)
         XCTAssertEqual(theme.toolbar?.resolvedHorizontalInset ?? 0, 10, accuracy: 0.1)
     }
@@ -787,6 +789,7 @@ final class RichTextEditorViewTests: XCTestCase {
 
         toolbar.apply(theme: EditorToolbarTheme(dictionary: [
             "appearance": "native",
+            "height": 44,
         ]))
 
         XCTAssertTrue(toolbar.usesNativeAppearanceForTesting)
@@ -800,7 +803,7 @@ final class RichTextEditorViewTests: XCTestCase {
         } else {
             XCTAssertEqual(toolbar.chromeBorderWidthForTesting, 1 / UIScreen.main.scale, accuracy: 0.1)
         }
-        XCTAssertEqual(toolbar.intrinsicContentSize.height, 56, accuracy: 0.1)
+        XCTAssertEqual(toolbar.intrinsicContentSize.height, 50, accuracy: 0.1)
     }
 
     func testAccessoryToolbarAppliesSelectedStateForActiveNativeButton() {

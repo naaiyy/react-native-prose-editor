@@ -697,6 +697,8 @@ final class EditorAccessoryToolbarView: UIInputView {
     private struct ButtonBinding {
         let item: NativeToolbarItem
         let button: UIButton
+        let widthConstraint: NSLayoutConstraint
+        let heightConstraint: NSLayoutConstraint
     }
 
     private struct BarButtonBinding {
@@ -719,6 +721,8 @@ final class EditorAccessoryToolbarView: UIInputView {
     private var chromeBottomConstraint: NSLayoutConstraint?
     private var nativeToolbarWidthConstraint: NSLayoutConstraint?
     private var mentionRowHeightConstraint: NSLayoutConstraint?
+    private var nativeToolbarMinHeightConstraint: NSLayoutConstraint?
+    private var scrollViewHeightConstraint: NSLayoutConstraint?
     private var nativeToolbarDidInitializeScrollPosition = false
     private var buttonBindings: [ButtonBinding] = []
     private var barButtonBindings: [BarButtonBinding] = []
@@ -799,7 +803,7 @@ final class EditorAccessoryToolbarView: UIInputView {
     }
 
     override var intrinsicContentSize: CGSize {
-        let contentHeight = mentionButtons.isEmpty ? Self.baseHeight : Self.mentionRowHeight
+        let contentHeight = mentionButtons.isEmpty ? resolvedToolbarHeight : Self.mentionRowHeight
         return CGSize(
             width: UIView.noIntrinsicMetric,
             height: contentHeight + resolvedKeyboardOffset
@@ -984,6 +988,9 @@ final class EditorAccessoryToolbarView: UIInputView {
         chromeLeadingConstraint?.constant = resolvedHorizontalInset
         chromeTrailingConstraint?.constant = -resolvedHorizontalInset
         chromeBottomConstraint?.constant = -resolvedKeyboardOffset
+        nativeToolbarWidthConstraint?.constant = resolvedToolbarHeight
+        nativeToolbarMinHeightConstraint?.constant = resolvedToolbarHeight
+        scrollViewHeightConstraint?.constant = resolvedToolbarHeight
         nativeToolbarScrollView.isHidden = !(usesBarToolbar && mentionButtons.isEmpty)
         nativeToolbarView.isHidden = !(usesBarToolbar && mentionButtons.isEmpty)
         nativeToolbarView.tintColor = usesNativeAppearance
@@ -999,6 +1006,8 @@ final class EditorAccessoryToolbarView: UIInputView {
         }
         for binding in buttonBindings {
             binding.button.layer.cornerRadius = resolvedButtonBorderRadius
+            binding.widthConstraint.constant = resolvedButtonSize
+            binding.heightConstraint.constant = resolvedButtonSize
         }
         for button in mentionButtons {
             button.apply(theme: mentionTheme, toolbarAppearance: resolvedAppearance)
@@ -1175,8 +1184,12 @@ final class EditorAccessoryToolbarView: UIInputView {
         chromeBottomConstraint = bottom
         let mentionHeight = mentionScrollView.heightAnchor.constraint(equalToConstant: 0)
         mentionRowHeightConstraint = mentionHeight
-        let nativeToolbarWidth = nativeToolbarView.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.baseHeight)
+        let nativeToolbarWidth = nativeToolbarView.widthAnchor.constraint(greaterThanOrEqualToConstant: resolvedToolbarHeight)
         nativeToolbarWidthConstraint = nativeToolbarWidth
+        let nativeToolbarMinHeight = nativeToolbarView.heightAnchor.constraint(greaterThanOrEqualToConstant: resolvedToolbarHeight)
+        nativeToolbarMinHeightConstraint = nativeToolbarMinHeight
+        let scrollViewHeight = scrollView.heightAnchor.constraint(equalToConstant: resolvedToolbarHeight)
+        scrollViewHeightConstraint = scrollViewHeight
 
         NSLayoutConstraint.activate([
             chromeView.topAnchor.constraint(equalTo: topAnchor),
@@ -1204,7 +1217,7 @@ final class EditorAccessoryToolbarView: UIInputView {
             nativeToolbarView.trailingAnchor.constraint(equalTo: nativeToolbarScrollView.contentLayoutGuide.trailingAnchor),
             nativeToolbarView.bottomAnchor.constraint(equalTo: nativeToolbarScrollView.contentLayoutGuide.bottomAnchor),
             nativeToolbarView.heightAnchor.constraint(equalTo: nativeToolbarScrollView.frameLayoutGuide.heightAnchor),
-            nativeToolbarView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.baseHeight),
+            nativeToolbarMinHeight,
             nativeToolbarWidth,
 
             contentStackView.topAnchor.constraint(equalTo: chromeView.topAnchor, constant: 6),
@@ -1225,7 +1238,7 @@ final class EditorAccessoryToolbarView: UIInputView {
             stackView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -12),
             stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -6),
             stackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor, constant: -12),
-            scrollView.heightAnchor.constraint(equalToConstant: Self.baseHeight),
+            scrollViewHeight,
         ])
 
     }
@@ -1246,9 +1259,7 @@ final class EditorAccessoryToolbarView: UIInputView {
                 continue
             }
 
-            let button = makeButton(item: item)
-            buttonBindings.append(ButtonBinding(item: item, button: button))
-            stackView.addArrangedSubview(button)
+            stackView.addArrangedSubview(makeButton(item: item))
         }
 
         #if compiler(>=6.2)
@@ -1338,13 +1349,13 @@ final class EditorAccessoryToolbarView: UIInputView {
     private func updateNativeToolbarMetricsIfNeeded() {
 #if compiler(>=6.2)
         guard #available(iOS 26.0, *), usesNativeBarToolbar else {
-            nativeToolbarWidthConstraint?.constant = Self.baseHeight
+            nativeToolbarWidthConstraint?.constant = resolvedToolbarHeight
             nativeToolbarDidInitializeScrollPosition = false
             return
         }
 
         let availableWidth = max(chromeView.bounds.width, bounds.width, 1)
-        let targetHeight = max(chromeView.bounds.height, Self.baseHeight)
+        let targetHeight = max(chromeView.bounds.height, resolvedToolbarHeight)
         nativeToolbarView.layoutIfNeeded()
         let fittingSize = nativeToolbarView.sizeThatFits(
             CGSize(width: CGFloat.greatestFiniteMagnitude, height: targetHeight)
@@ -1389,7 +1400,7 @@ final class EditorAccessoryToolbarView: UIInputView {
             )
         }
 #else
-        nativeToolbarWidthConstraint?.constant = Self.baseHeight
+        nativeToolbarWidthConstraint?.constant = resolvedToolbarHeight
         nativeToolbarDidInitializeScrollPosition = false
 #endif
     }
@@ -1487,8 +1498,11 @@ final class EditorAccessoryToolbarView: UIInputView {
             button.setImage(nil, for: .normal)
             button.setTitle(item.icon?.resolvedGlyphText() ?? "?", for: .normal)
         }
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        let buttonSize = resolvedButtonSize
+        let widthConstraint = button.widthAnchor.constraint(greaterThanOrEqualToConstant: buttonSize)
+        let heightConstraint = button.heightAnchor.constraint(equalToConstant: buttonSize)
+        widthConstraint.isActive = true
+        heightConstraint.isActive = true
         if item.type == .group,
            (item.presentation ?? .expand) == .menu,
            #available(iOS 14.0, *)
@@ -1501,6 +1515,14 @@ final class EditorAccessoryToolbarView: UIInputView {
             }, for: .touchUpInside)
         }
         updateButtonAppearance(button, item: item, enabled: true, active: false)
+        buttonBindings.append(
+            ButtonBinding(
+                item: item,
+                button: button,
+                widthConstraint: widthConstraint,
+                heightConstraint: heightConstraint
+            )
+        )
         return button
     }
 
@@ -1685,6 +1707,17 @@ final class EditorAccessoryToolbarView: UIInputView {
 
     private var resolvedBorderWidth: CGFloat {
         theme?.resolvedBorderWidth ?? 0.5
+    }
+
+    private var resolvedToolbarHeight: CGFloat {
+        max(theme?.height ?? Self.baseHeight, 1)
+    }
+
+    private var resolvedButtonSize: CGFloat {
+        if theme?.height == nil {
+            return 36
+        }
+        return max(1, min(40, resolvedToolbarHeight - 4))
     }
 
     private var resolvedButtonBorderRadius: CGFloat {

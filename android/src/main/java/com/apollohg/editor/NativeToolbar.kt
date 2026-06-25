@@ -980,6 +980,8 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
 
     private fun updateContainerLayout(appearance: EditorToolbarAppearance) {
         val isNative = appearance == EditorToolbarAppearance.NATIVE
+        val toolbarHeightDp = resolvedToolbarHeightDp(isNative)
+        val buttonSizeDp = resolvedButtonSizeDp(isNative, toolbarHeightDp)
         val horizontalPadding = dp(
             if (isNative) {
                 NATIVE_CONTAINER_HORIZONTAL_PADDING_DP
@@ -987,31 +989,20 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
                 12
             }
         )
-        val verticalPadding = dp(
-            if (isNative) {
-                NATIVE_CONTAINER_VERTICAL_PADDING_DP
-            } else {
-                12
-            }
-        )
+        val verticalPadding = dp(resolvedVerticalPaddingDp(isNative, toolbarHeightDp, buttonSizeDp).roundToInt())
         contentRow.setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding)
         contentRow.gravity = if (isNative) {
             Gravity.START or Gravity.CENTER_VERTICAL
         } else {
             Gravity.CENTER_VERTICAL
         }
-        contentRow.minimumHeight = dp(
-            if (isNative) {
-                NATIVE_CONTAINER_HEIGHT_DP
-            } else {
-                0
-            }
-        )
+        contentRow.minimumHeight = dp(toolbarHeightDp.roundToInt())
     }
 
     private fun applyButtonLayout(button: AppCompatButton, appearance: EditorToolbarAppearance) {
         val isNative = appearance == EditorToolbarAppearance.NATIVE
-        val sizePx = dp(if (isNative) NATIVE_BUTTON_SIZE_DP else 36)
+        val toolbarHeightDp = resolvedToolbarHeightDp(isNative)
+        val sizePx = dp(resolvedButtonSizeDp(isNative, toolbarHeightDp).roundToInt())
         button.textSize = if (isNative) NATIVE_BUTTON_ICON_SIZE_SP else 16f
         button.minWidth = sizePx
         button.minimumWidth = sizePx
@@ -1050,6 +1041,36 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
                 resolveSeparatorColor()
             }
         )
+    }
+
+    private fun resolvedToolbarHeightDp(isNative: Boolean): Float =
+        theme?.height ?: if (isNative) {
+            NATIVE_CONTAINER_HEIGHT_DP.toFloat()
+        } else {
+            60f
+        }
+
+    private fun resolvedButtonSizeDp(isNative: Boolean, toolbarHeightDp: Float): Float {
+        val defaultSizeDp = if (isNative) NATIVE_BUTTON_SIZE_DP.toFloat() else 36f
+        if (theme?.height == null) {
+            return defaultSizeDp
+        }
+        return maxOf(1f, minOf(defaultSizeDp, toolbarHeightDp - 4f))
+    }
+
+    private fun resolvedVerticalPaddingDp(
+        isNative: Boolean,
+        toolbarHeightDp: Float,
+        buttonSizeDp: Float
+    ): Float {
+        if (theme?.height == null) {
+            return if (isNative) {
+                NATIVE_CONTAINER_VERTICAL_PADDING_DP.toFloat()
+            } else {
+                12f
+            }
+        }
+        return maxOf(0f, (toolbarHeightDp - buttonSizeDp) / 2f)
     }
 }
 

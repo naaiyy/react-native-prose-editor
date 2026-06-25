@@ -86,6 +86,7 @@ export type EditorToolbarAppearance = 'custom' | 'native';
 
 export interface EditorToolbarTheme {
     appearance?: EditorToolbarAppearance;
+    height?: number;
     backgroundColor?: string;
     borderColor?: string;
     borderWidth?: number;

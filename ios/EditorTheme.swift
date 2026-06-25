@@ -221,6 +221,7 @@ enum EditorToolbarAppearance: String {
 
 struct EditorToolbarTheme {
     var appearance: EditorToolbarAppearance?
+    var height: CGFloat?
     var backgroundColor: UIColor?
     var borderColor: UIColor?
     var borderWidth: CGFloat?
@@ -238,6 +239,7 @@ struct EditorToolbarTheme {
 
     init(dictionary: [String: Any]) {
         appearance = (dictionary["appearance"] as? String).flatMap(EditorToolbarAppearance.init(rawValue:))
+        height = EditorTheme.cgFloat(dictionary["height"])
         backgroundColor = EditorTheme.color(from: dictionary["backgroundColor"])
         borderColor = EditorTheme.color(from: dictionary["borderColor"])
         borderWidth = EditorTheme.cgFloat(dictionary["borderWidth"])
