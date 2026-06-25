@@ -1315,6 +1315,12 @@ final class RenderBridgeTests: XCTestCase {
         XCTAssertEqual(marker, "\u{2022} ", "Unordered list should produce bullet + space")
     }
 
+    func testListMarker_taskUnchecked() {
+        let ctx: [String: Any] = ["kind": "task", "checked": false]
+        let marker = RenderBridge.listMarkerString(listContext: ctx)
+        XCTAssertEqual(marker, "\u{2610} ", "Unchecked task list should produce ballot box + space")
+    }
+
     // MARK: - Opaque Atoms
 
     func testRender_opaqueInlineAtom() {

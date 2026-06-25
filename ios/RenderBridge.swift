@@ -230,6 +230,7 @@ final class RenderBridge {
             case "textRun":
                 let text = element["text"] as? String ?? ""
                 let marks = element["marks"] as? [Any] ?? []
+                let isCodeBlock = blockStack.last?.nodeType == "codeBlock"
                 let blockFont = resolvedFont(
                     for: blockStack,
                     baseFont: baseFont,
@@ -240,12 +241,19 @@ final class RenderBridge {
                     textColor: textColor,
                     theme: theme
                 )
-                let baseAttrs = attributesForMarks(
+                var baseAttrs = attributesForMarks(
                     marks,
                     baseFont: blockFont,
                     textColor: blockColor,
                     theme: theme
                 )
+                if isCodeBlock {
+                    baseAttrs[.font] = UIFont.monospacedSystemFont(
+                        ofSize: blockFont.pointSize,
+                        weight: .regular
+                    )
+                    baseAttrs[.backgroundColor] = UIColor.secondarySystemBackground
+                }
                 let attrs = applyBlockStyle(
                     to: baseAttrs,
                     blockStack: blockStack,
@@ -389,7 +397,7 @@ final class RenderBridge {
                 let nodeType = element["nodeType"] as? String ?? ""
                 let depth = jsonUInt8(element["depth"])
                 let listContext = element["listContext"] as? [String: Any]
-                let isListItemContainer = nodeType == "listItem" && listContext != nil
+                let isListItemContainer = isListItemNodeType(nodeType) && listContext != nil
                 let isTransparentContainer = nodeType == "blockquote"
                 let ctx = BlockContext(
                     nodeType: nodeType,
@@ -400,7 +408,9 @@ final class RenderBridge {
                 )
                 let nestedListItemContainer =
                     isListItemContainer && (theme?.list?.itemSpacing != nil)
-                    && blockStack.contains(where: { $0.nodeType == "listItem" && $0.listContext != nil })
+                    && blockStack.contains(where: {
+                        isListItemNodeType($0.nodeType) && $0.listContext != nil
+                    })
 
                 if !isListItemContainer && !isTransparentContainer {
                     // Add inter-block newline before non-first rendered blocks.
@@ -949,6 +959,10 @@ final class RenderBridge {
 
     /// Generate the list marker string (bullet or number) from a list context.
     static func listMarkerString(listContext: [String: Any]) -> String {
+        if (listContext["kind"] as? String) == "task" {
+            let checked = (listContext["checked"] as? NSNumber)?.boolValue ?? false
+            return checked ? "\u{2611} " : "\u{2610} "
+        }
         let ordered = (listContext["ordered"] as? NSNumber)?.boolValue ?? false
 
         if ordered {
@@ -1197,6 +1211,10 @@ final class RenderBridge {
             return blockStack[idx].listContext
         }
         return nil
+    }
+
+    private static func isListItemNodeType(_ nodeType: String) -> Bool {
+        nodeType == "listItem" || nodeType == "taskItem"
     }
 
     private static func overrideTrailingParagraphSpacing(

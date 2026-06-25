@@ -77,6 +77,46 @@ fn title_first_editor() -> Editor {
     Editor::new(title_first_schema(), InterceptorPipeline::new(), false)
 }
 
+fn openeditor_native_schema() -> Schema {
+    Schema::from_json(&serde_json::json!({
+        "nodes": [
+            { "name": "doc", "content": "block+", "role": "doc" },
+            { "name": "paragraph", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "p" },
+            { "name": "heading", "content": "inline*", "group": "block", "attrs": { "level": { "default": 2 } }, "role": "textBlock" },
+            { "name": "h1", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "h1" },
+            { "name": "h2", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "h2" },
+            { "name": "h3", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "h3" },
+            { "name": "h4", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "h4" },
+            { "name": "h5", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "h5" },
+            { "name": "h6", "content": "inline*", "group": "block", "role": "textBlock", "htmlTag": "h6" },
+            { "name": "blockquote", "content": "block+", "group": "block", "role": "block", "htmlTag": "blockquote" },
+            { "name": "bulletList", "content": "listItem+", "group": "block", "role": "list", "htmlTag": "ul" },
+            { "name": "orderedList", "content": "listItem+", "group": "block", "attrs": { "start": { "default": 1 } }, "role": "list", "htmlTag": "ol" },
+            { "name": "taskList", "content": "taskItem+", "group": "block", "role": "list", "htmlTag": "ul" },
+            { "name": "listItem", "content": "paragraph block*", "role": "listItem", "htmlTag": "li" },
+            { "name": "taskItem", "content": "paragraph block*", "role": "listItem", "htmlTag": "li", "attrs": { "checked": { "default": false } } },
+            { "name": "codeBlock", "content": "text*", "group": "block", "role": "textBlock", "htmlTag": "pre" },
+            { "name": "horizontalRule", "content": "", "group": "block", "role": "block", "htmlTag": "hr", "isVoid": true },
+            { "name": "image", "content": "", "group": "block", "attrs": { "src": {}, "alt": { "default": null }, "title": { "default": null }, "width": { "default": null }, "height": { "default": null } }, "role": "block", "htmlTag": "img", "isVoid": true },
+            { "name": "hardBreak", "content": "", "group": "inline", "role": "hardBreak", "htmlTag": "br", "isVoid": true },
+            { "name": "text", "content": "", "group": "inline", "role": "text" }
+        ],
+        "marks": [
+            { "name": "bold" },
+            { "name": "italic" },
+            { "name": "underline" },
+            { "name": "strike" },
+            { "name": "code" },
+            { "name": "link", "attrs": { "href": {} } }
+        ]
+    }))
+    .expect("OpenEditor native schema should parse")
+}
+
+fn openeditor_native_editor() -> Editor {
+    Editor::new(openeditor_native_schema(), InterceptorPipeline::new(), false)
+}
+
 /// Create an editor with a max-length interceptor.
 fn editor_with_max_length(max: u32) -> Editor {
     let mut pipeline = InterceptorPipeline::new();
@@ -1957,6 +1997,83 @@ fn test_apply_list_type_inside_blockquote_wraps_paragraph() {
 }
 
 #[test]
+fn test_apply_task_list_type_uses_task_items() {
+    let mut editor = openeditor_native_editor();
+    editor
+        .set_html("<p>Hello</p>")
+        .expect("set_html should succeed");
+
+    editor
+        .apply_list_type("taskList")
+        .expect("applying taskList should wrap the paragraph in taskItem nodes");
+
+    let json = editor.get_json();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "taskList",
+                    "content": [
+                        {
+                            "type": "taskItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{ "type": "text", "text": "Hello" }]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+    );
+}
+
+#[test]
+fn test_task_list_json_roundtrip_preserves_checked_attrs_in_html() {
+    let mut editor = openeditor_native_editor();
+    editor
+        .set_json(&serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "taskList",
+                    "content": [
+                        {
+                            "type": "taskItem",
+                            "attrs": { "checked": true },
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{ "type": "text", "text": "Done" }]
+                                }
+                            ]
+                        },
+                        {
+                            "type": "taskItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{ "type": "text", "text": "Todo" }]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }))
+        .expect("task list json should parse");
+
+    assert_eq!(
+        editor.get_html(),
+        "<ul><li checked=\"true\"><p>Done</p></li><li checked=\"false\"><p>Todo</p></li></ul>"
+    );
+}
+
+#[test]
 fn test_insert_node_at_selection_replaces_selected_text_with_hard_break() {
     let mut editor = default_editor();
     editor.set_html("<p>Hello</p>").expect("set_html");
@@ -2662,4 +2779,48 @@ fn test_split_block_scalar_empty_blockquote_paragraph_exits_quote() {
         "<blockquote><p>Hello</p></blockquote><p></p>",
         "split_block_scalar on empty quoted paragraph should exit the quote"
     );
+}
+
+#[test]
+fn test_split_block_scalar_inside_code_block_inserts_newline() {
+    let mut editor = openeditor_native_editor();
+    editor
+        .set_json(&serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "codeBlock",
+                    "content": [{ "type": "text", "text": "ab" }]
+                }
+            ]
+        }))
+        .expect("set_json should succeed");
+
+    editor
+        .split_block_scalar(1)
+        .expect("enter inside a code block should insert a newline");
+
+    assert_eq!(editor.get_html(), "<pre>a\nb</pre>");
+}
+
+#[test]
+fn test_backspace_from_empty_code_block_reverts_to_paragraph() {
+    let mut editor = openeditor_native_editor();
+    editor
+        .set_json(&serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "codeBlock",
+                    "content": []
+                }
+            ]
+        }))
+        .expect("set_json should succeed");
+
+    editor
+        .delete_backward_at_selection_scalar(0, 0)
+        .expect("backspace from an empty code block should succeed");
+
+    assert_eq!(editor.get_html(), "<p></p>");
 }

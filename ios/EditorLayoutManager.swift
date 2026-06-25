@@ -151,11 +151,12 @@ final class EditorLayoutManager: NSLayoutManager {
             .map { CGFloat(truncating: $0) }
             ?? LayoutConstants.listMarkerWidth
         let ordered = (listContext["ordered"] as? NSNumber)?.boolValue ?? false
+        let isTask = (listContext["kind"] as? String) == "task"
 
         let glyphLocation = location(forGlyphAt: glyphIndex)
         let baselineY = lineFragmentRect.minY + glyphLocation.y
 
-        if ordered {
+        if ordered || isTask {
             let markerFont = markerFont(
                 for: listContext,
                 baseFont: baseFont,
@@ -459,7 +460,8 @@ final class EditorLayoutManager: NSLayoutManager {
         markerScale: CGFloat
     ) -> UIFont {
         let ordered = (listContext["ordered"] as? NSNumber)?.boolValue ?? false
-        if ordered {
+        let isTask = (listContext["kind"] as? String) == "task"
+        if ordered || isTask {
             return baseFont
         }
         return baseFont.withSize(baseFont.pointSize * markerScale)

@@ -1009,10 +1009,13 @@ object RenderBridge {
                     val nodeType = element.optString("nodeType", "")
                     val depth = element.optInt("depth", 0)
                     val listContext = element.optJSONObject("listContext")
-                    val isListItemContainer = nodeType == "listItem" && listContext != null
+                    val isListItemContainer = isListItemNodeType(nodeType) && listContext != null
                     val isTransparentContainer = nodeType == "blockquote"
                     val nestedListItemContainer =
-                        isListItemContainer && state.blockStack.any { it.nodeType == "listItem" && it.listContext != null }
+                        isListItemContainer &&
+                            state.blockStack.any {
+                                isListItemNodeType(it.nodeType) && it.listContext != null
+                            }
                     val blockSpacing = if (isListItemContainer) {
                         null
                     } else {
@@ -1066,6 +1069,7 @@ object RenderBridge {
 
                     if (markerListContext != null) {
                         val ordered = markerListContext.optBoolean("ordered", false)
+                        val isTask = markerListContext.optString("kind", "") == "task"
                         val marker = listMarkerString(markerListContext)
                         val markerBaseSize =
                             resolveTextStyle(
@@ -1093,7 +1097,7 @@ object RenderBridge {
                         val markerStart = state.result.length - marker.length
                         val markerEnd = state.result.length
                         annotateTopLevelChild(state.result, markerStart, markerEnd, topLevelChildIndex)
-                        if (!ordered) {
+                        if (!ordered && !isTask) {
                             val markerScale =
                                 theme?.list?.markerScale ?: LayoutConstants.UNORDERED_LIST_MARKER_FONT_SCALE
                             val markerWidth = calculateMarkerWidth(density)
@@ -1134,7 +1138,7 @@ object RenderBridge {
                             density = density,
                             pendingLeadingMargins = state.pendingLeadingMargins
                         )
-                        if (endedBlock.nodeType == "listItem" && endedBlock.listContext != null) {
+                        if (isListItemNodeType(endedBlock.nodeType) && endedBlock.listContext != null) {
                             state.nextBlockSpacingBefore = theme?.list?.itemSpacing
                         }
                     }
@@ -1175,6 +1179,7 @@ object RenderBridge {
         if (start == end) return
 
         val currentBlock = effectiveBlockContext(blockStack)
+        val isCodeBlock = currentBlock?.nodeType == "codeBlock"
         val textStyle = currentBlock?.let {
             resolveTextStyle(
                 it.nodeType,
@@ -1270,7 +1275,7 @@ object RenderBridge {
         }
 
         val fontFamily = effectiveTextStyle?.fontFamily
-        if (!hasCode && !fontFamily.isNullOrBlank()) {
+        if (!hasCode && !isCodeBlock && !fontFamily.isNullOrBlank()) {
             builder.setSpan(
                 TypefaceSpan(fontFamily),
                 start,
@@ -1287,7 +1292,7 @@ object RenderBridge {
             builder.setSpan(StrikethroughSpan(), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
 
-        if (hasCode) {
+        if (hasCode || isCodeBlock) {
             builder.setSpan(
                 TypefaceSpan("monospace"), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
             )
@@ -1842,6 +1847,9 @@ object RenderBridge {
     }
 
     fun listMarkerString(listContext: JSONObject): String {
+        if (listContext.optString("kind", "") == "task") {
+            return if (listContext.optBoolean("checked", false)) "\u2611 " else "\u2610 "
+        }
         val ordered = listContext.optBoolean("ordered", false)
         return if (ordered) {
             val index = listContext.optInt("index", 1)
@@ -1849,6 +1857,10 @@ object RenderBridge {
         } else {
             LayoutConstants.UNORDERED_LIST_BULLET
         }
+    }
+
+    private fun isListItemNodeType(nodeType: String): Boolean {
+        return nodeType == "listItem" || nodeType == "taskItem"
     }
 
     /**
@@ -1924,7 +1936,7 @@ object RenderBridge {
         pendingLeadingMargins: MutableMap<Int, PendingLeadingMargin>
     ) {
         if (builder.isEmpty()) return
-        if (endedBlock.nodeType == "listItem") return
+        if (isListItemNodeType(endedBlock.nodeType)) return
         if (!lastCharacterIsHardBreak(builder)) return
 
         val start = builder.length

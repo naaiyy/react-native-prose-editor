@@ -387,6 +387,10 @@ impl Editor {
 
     /// Split a block at the given position (e.g. pressing Enter).
     pub fn split_block(&mut self, pos: u32) -> Result<EditorUpdate, EditorError> {
+        if self.is_code_block_at_pos(pos) {
+            return self.insert_text(pos, "\n");
+        }
+
         if let Some(action) = self.empty_split_action(pos) {
             return self.apply_empty_split_action(action);
         }
@@ -415,12 +419,7 @@ impl Editor {
         to: u32,
         list_type: &str,
     ) -> Result<EditorUpdate, EditorError> {
-        // Determine the list item type from the schema.
-        let item_type = self
-            .schema
-            .all_nodes()
-            .find(|n| matches!(n.role, crate::schema::NodeRole::ListItem))
-            .map(|n| n.name.clone())
+        let item_type = list_item_type_for_list(&self.schema, list_type)
             .unwrap_or_else(|| "listItem".to_string());
 
         let mut tx = Transaction::new(Source::Input);
@@ -1130,6 +1129,9 @@ impl Editor {
     /// Split a block at a scalar offset.
     pub fn split_block_scalar(&mut self, scalar_pos: u32) -> Result<EditorUpdate, EditorError> {
         let doc_pos = self.scalar_to_doc(scalar_pos);
+        if self.is_code_block_at_pos(doc_pos) {
+            return self.insert_text(doc_pos, "\n");
+        }
         self.split_block(doc_pos)
     }
 
@@ -1144,6 +1146,10 @@ impl Editor {
     ) -> Result<EditorUpdate, EditorError> {
         let doc_from = self.scalar_to_doc(scalar_from);
         let doc_to = self.scalar_to_doc(scalar_to);
+
+        if doc_from == doc_to && self.is_code_block_at_pos(doc_from) {
+            return self.insert_text(doc_from, "\n");
+        }
 
         // Apply the delete as a separate transaction first.
         if doc_from < doc_to {
@@ -1806,6 +1812,15 @@ impl Editor {
         matches!(parent_spec.role, NodeRole::TextBlock)
     }
 
+    fn is_code_block_at_pos(&self, pos: u32) -> bool {
+        let doc = self.backend.document();
+        let resolved = match doc.resolve(pos) {
+            Ok(resolved) => resolved,
+            Err(_) => return false,
+        };
+        resolved.parent(doc).node_type() == "codeBlock"
+    }
+
     fn is_horizontal_rule_node(node_type: &str) -> bool {
         matches!(node_type, "horizontalRule" | "horizontal_rule")
     }
@@ -2150,11 +2165,7 @@ impl Editor {
             return Ok(Some(self.build_update_from_current()));
         }
 
-        let item_type = self
-            .schema
-            .all_nodes()
-            .find(|n| matches!(n.role, crate::schema::NodeRole::ListItem))
-            .map(|n| n.name.clone())
+        let item_type = list_item_type_for_list(&self.schema, list_type)
             .unwrap_or_else(|| "listItem".to_string());
 
         let list_items = range
@@ -3697,6 +3708,18 @@ fn list_attrs_for_type(
     } else {
         HashMap::new()
     }
+}
+
+fn list_item_type_for_list(schema: &Schema, list_type: &str) -> Option<String> {
+    let list_spec = schema.node(list_type)?;
+    list_spec.content.parts.first().and_then(|part| {
+        let direct = schema.node(&part.group)?;
+        if matches!(direct.role, NodeRole::ListItem) {
+            Some(direct.name.clone())
+        } else {
+            None
+        }
+    })
 }
 
 struct ListItemContext {

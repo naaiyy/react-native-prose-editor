@@ -179,6 +179,34 @@ final class PositionBridgeTests: XCTestCase {
         )
     }
 
+    func testUtf16ToScalar_taskListParagraphContributesVirtualCheckboxMarker() {
+        let json = """
+        [
+            {"type": "blockStart", "nodeType": "taskItem", "depth": 1,
+             "listContext": {"ordered": false, "index": 1, "total": 1, "start": 1, "isFirst": true, "isLast": true, "kind": "task", "checked": false}},
+            {"type": "blockStart", "nodeType": "paragraph", "depth": 2},
+            {"type": "textRun", "text": "A", "marks": []},
+            {"type": "blockEnd"},
+            {"type": "blockEnd"}
+        ]
+        """
+        let attributed = RenderBridge.renderElements(
+            fromJSON: json,
+            baseFont: .systemFont(ofSize: 16),
+            textColor: .label
+        )
+        let textView = makeTextView(with: attributed)
+
+        XCTAssertEqual(
+            PositionBridge.utf16OffsetToScalar(0, in: textView), 2,
+            "A task item paragraph should contribute its checkbox marker as virtual scalar prefix"
+        )
+        XCTAssertEqual(
+            PositionBridge.utf16OffsetToScalar(1, in: textView), 3,
+            "Text inside a task item should be offset by the checkbox marker length"
+        )
+    }
+
     func testUtf16ToScalar_trailingHardBreakPlaceholderDoesNotCountAsScalar() {
         let json = """
         [

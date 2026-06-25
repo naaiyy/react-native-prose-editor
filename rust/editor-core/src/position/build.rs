@@ -172,7 +172,7 @@ fn walk_node(
         pending_prefix_len = 0;
 
         if is_list_node(node) && is_list_item_node(child) {
-            child_prefix_len += list_marker_len(node, child_idx);
+            child_prefix_len += list_marker_len(node, child, child_idx);
         }
 
         if child.is_element() {
@@ -258,7 +258,7 @@ fn compute_inline_scalars(node: &Node) -> u32 {
 fn is_list_node(node: &Node) -> bool {
     matches!(
         node.node_type(),
-        "bulletList" | "bullet_list" | "orderedList" | "ordered_list"
+        "bulletList" | "bullet_list" | "orderedList" | "ordered_list" | "taskList" | "task_list"
     )
 }
 
@@ -266,11 +266,27 @@ fn is_ordered_list_node(node: &Node) -> bool {
     matches!(node.node_type(), "orderedList" | "ordered_list")
 }
 
-fn is_list_item_node(node: &Node) -> bool {
-    matches!(node.node_type(), "listItem" | "list_item")
+fn is_task_list_node(node: &Node) -> bool {
+    matches!(node.node_type(), "taskList" | "task_list")
 }
 
-fn list_marker_len(list_node: &Node, child_index: usize) -> u32 {
+fn is_list_item_node(node: &Node) -> bool {
+    matches!(
+        node.node_type(),
+        "listItem" | "list_item" | "taskItem" | "task_item"
+    )
+}
+
+fn list_marker_len(list_node: &Node, child: &Node, child_index: usize) -> u32 {
+    if is_task_list_node(list_node) {
+        let checked = child
+            .attrs()
+            .get("checked")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        return render::task_list_marker_string(checked).chars().count() as u32;
+    }
+
     let ordered = is_ordered_list_node(list_node);
     let start = list_node
         .attrs()

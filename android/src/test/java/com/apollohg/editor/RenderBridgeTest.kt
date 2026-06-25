@@ -890,6 +890,33 @@ class RenderBridgeTest {
         )
     }
 
+    @Test
+    fun `list marker - task unchecked`() {
+        val ctx = org.json.JSONObject("""{"kind": "task", "checked": false}""")
+        val marker = RenderBridge.listMarkerString(ctx)
+        assertEquals(
+            "Unchecked task list should produce ballot box + space",
+            "\u2610 ", marker
+        )
+    }
+
+    @Test
+    fun `render - task item includes checkbox marker and text`() {
+        val json = """
+        [
+            {"type": "blockStart", "nodeType": "taskItem", "depth": 1,
+             "listContext": {"ordered": false, "index": 1, "total": 1, "start": 1, "isFirst": true, "isLast": true, "kind": "task", "checked": false}},
+            {"type": "blockStart", "nodeType": "paragraph", "depth": 2},
+            {"type": "textRun", "text": "A", "marks": []},
+            {"type": "blockEnd"},
+            {"type": "blockEnd"}
+        ]
+        """.trimIndent()
+
+        val result = RenderBridge.buildSpannable(json, baseFontSize, textColor)
+        assertEquals("\u2610 A", result.toString())
+    }
+
     // ── Link Mark ───────────────────────────────────────────────────────
 
     @Test

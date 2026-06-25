@@ -972,6 +972,8 @@ fn serialize_render_elements(elements: &[render::RenderElement]) -> serde_json::
                         "start": ctx.start,
                         "isFirst": ctx.is_first,
                         "isLast": ctx.is_last,
+                        "kind": ctx.kind,
+                        "checked": ctx.checked,
                     });
                 }
                 obj
