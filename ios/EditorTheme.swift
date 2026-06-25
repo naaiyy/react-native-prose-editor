@@ -124,6 +124,24 @@ struct EditorBlockquoteTheme {
     }
 }
 
+struct EditorCodeBlockTheme {
+    var text: EditorTextStyle?
+    var backgroundColor: UIColor?
+    var borderRadius: CGFloat?
+    var paddingHorizontal: CGFloat?
+    var paddingVertical: CGFloat?
+
+    init(dictionary: [String: Any]) {
+        if let text = dictionary["text"] as? [String: Any] {
+            self.text = EditorTextStyle(dictionary: text)
+        }
+        backgroundColor = EditorTheme.color(from: dictionary["backgroundColor"])
+        borderRadius = EditorTheme.cgFloat(dictionary["borderRadius"])
+        paddingHorizontal = EditorTheme.cgFloat(dictionary["paddingHorizontal"])
+        paddingVertical = EditorTheme.cgFloat(dictionary["paddingVertical"])
+    }
+}
+
 struct EditorLinkTheme {
     var fontFamily: String?
     var fontSize: CGFloat?
@@ -295,6 +313,7 @@ struct EditorTheme {
     var text: EditorTextStyle?
     var paragraph: EditorTextStyle?
     var blockquote: EditorBlockquoteTheme?
+    var codeBlock: EditorCodeBlockTheme?
     var headings: [String: EditorTextStyle] = [:]
     var list: EditorListTheme?
     var horizontalRule: EditorHorizontalRuleTheme?
@@ -325,6 +344,9 @@ struct EditorTheme {
         }
         if let blockquote = dictionary["blockquote"] as? [String: Any] {
             self.blockquote = EditorBlockquoteTheme(dictionary: blockquote)
+        }
+        if let codeBlock = dictionary["codeBlock"] as? [String: Any] {
+            self.codeBlock = EditorCodeBlockTheme(dictionary: codeBlock)
         }
         if let headings = dictionary["headings"] as? [String: Any] {
             for level in ["h1", "h2", "h3", "h4", "h5", "h6"] {
@@ -364,6 +386,9 @@ struct EditorTheme {
             if paragraph?.lineHeight == nil {
                 style.lineHeight = nil
             }
+        }
+        if nodeType == "codeBlock" {
+            style = style.merged(with: codeBlock?.text)
         }
         style = style.merged(with: headings[nodeType])
         return style

@@ -2074,6 +2074,61 @@ fn test_task_list_json_roundtrip_preserves_checked_attrs_in_html() {
 }
 
 #[test]
+fn test_toggle_task_item_checked_at_selection_scalar_updates_checked_attr() {
+    let mut editor = openeditor_native_editor();
+    editor
+        .set_json(&serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "taskList",
+                    "content": [
+                        {
+                            "type": "taskItem",
+                            "attrs": { "checked": false },
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{ "type": "text", "text": "Todo" }]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }))
+        .expect("task list json should parse");
+
+    editor
+        .toggle_task_item_checked_at_selection_scalar(0, 0)
+        .expect("task item toggle should succeed");
+
+    assert_eq!(
+        editor.get_json(),
+        serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "taskList",
+                    "content": [
+                        {
+                            "type": "taskItem",
+                            "attrs": { "checked": true },
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{ "type": "text", "text": "Todo" }]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+    );
+}
+
+#[test]
 fn test_insert_node_at_selection_replaces_selected_text_with_hard_break() {
     let mut editor = default_editor();
     editor.set_html("<p>Hello</p>").expect("set_html");

@@ -654,6 +654,40 @@ impl Editor {
         self.apply_transaction_with_selection_remap(tx, selection_remap)
     }
 
+    /// Toggle the checked state of the current task item.
+    pub fn toggle_task_item_checked(&mut self) -> Result<EditorUpdate, EditorError> {
+        let doc = self.backend.document();
+        let pos = self.selection.from(doc);
+        let Some(task_item_path) = self.task_item_path_at(pos) else {
+            return Ok(self.build_update_from_current());
+        };
+        let Some(task_item_node) = doc.node_at(&task_item_path) else {
+            return Ok(self.build_update_from_current());
+        };
+
+        let mut attrs = task_item_node.attrs().clone();
+        let checked = attrs
+            .get("checked")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        attrs.insert("checked".to_string(), serde_json::Value::Bool(!checked));
+
+        let Some(task_item_pos) = Self::node_delete_start_pos(doc, &task_item_path) else {
+            return Ok(self.build_update_from_current());
+        };
+
+        let mut tx = Transaction::new(Source::Input);
+        tx.add_step(Step::UpdateNodeAttrs {
+            pos: task_item_pos,
+            attrs,
+        });
+        match self.apply_transaction(tx) {
+            Ok(update) => Ok(update),
+            Err(EditorError::Transform(_)) => Ok(self.build_update_from_current()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Insert a node at a position.
     ///
     /// Block nodes (for example horizontal rules) are resolved to the nearest
@@ -1259,6 +1293,16 @@ impl Editor {
     ) -> Result<EditorUpdate, EditorError> {
         self.set_selection_scalar(scalar_anchor, scalar_head);
         self.outdent_list_item()
+    }
+
+    /// Toggle the checked state of the task item at an explicit scalar selection.
+    pub fn toggle_task_item_checked_at_selection_scalar(
+        &mut self,
+        scalar_anchor: u32,
+        scalar_head: u32,
+    ) -> Result<EditorUpdate, EditorError> {
+        self.set_selection_scalar(scalar_anchor, scalar_head);
+        self.toggle_task_item_checked()
     }
 
     /// Insert a node at an explicit scalar selection supplied by the caller.
@@ -2811,6 +2855,20 @@ impl Editor {
         })
     }
 
+    fn task_item_path_at(&self, pos: u32) -> Option<Vec<u16>> {
+        let context = self.list_item_context_at(pos)?;
+        let mut path = context.list_path.clone();
+        path.push(context.list_item_idx as u16);
+        let node = self.backend.document().node_at(&path)?;
+        if matches!(node.node_type(), "taskItem" | "task_item")
+            || node.attrs().contains_key("checked")
+        {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     fn list_item_context_at(&self, pos: u32) -> Option<ListItemContext> {
         let doc = self.backend.document();
         let resolved = doc.resolve(pos).ok()?;
@@ -2837,7 +2895,8 @@ impl Editor {
         let parent_is_list_item = li_depth > 0
             && doc
                 .node_at(&path[..li_depth - 1])
-                .map(|node| node.node_type() == "listItem")
+                .and_then(|node| self.schema.node(node.node_type()))
+                .map(|spec| matches!(spec.role, NodeRole::ListItem))
                 .unwrap_or(false);
 
         Some(ListItemContext {

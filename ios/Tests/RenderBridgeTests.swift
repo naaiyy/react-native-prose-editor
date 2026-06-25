@@ -1469,7 +1469,7 @@ final class RenderBridgeTests: XCTestCase {
             {"type": "blockStart", "nodeType": "paragraph", "depth": 0},
             {"type": "textRun", "text": "Above", "marks": []},
             {"type": "blockEnd"},
-            {"type": "opaqueBlockAtom", "label": "codeBlock", "docPos": 7}
+            {"type": "opaqueBlockAtom", "label": "widgetBlock", "docPos": 7}
         ]
         """
         let result = RenderBridge.renderElements(
@@ -1479,8 +1479,8 @@ final class RenderBridgeTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            result.string.contains("[codeBlock]"),
-            "Opaque block atom should render as '[codeBlock]'. Got: '\(result.string)'"
+            result.string.contains("[widgetBlock]"),
+            "Opaque block atom should render as '[widgetBlock]'. Got: '\(result.string)'"
         )
     }
 

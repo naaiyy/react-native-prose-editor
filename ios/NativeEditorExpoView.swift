@@ -19,7 +19,7 @@ final class NativeEditorViewRegistry {
 
     func markEditorCreated(editorId: UInt64) {
         guard editorId != 0 else { return }
-        performOnMain {
+        _ = performOnMain {
             destroyedEditorIds.remove(editorId)
         }
     }
@@ -2166,7 +2166,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         clearPendingAccessoryRetry()
         clearPendingMentionSuggestionRetry()
         lastMentionEventJSON = nil
-        richTextView.textView.resignFirstResponder()
+        _ = richTextView.textView.resignFirstResponder()
         richTextView.editorId = 0
         mentionQueryState = nil
         _ = accessoryToolbar.setMentionSuggestions([])
@@ -2713,7 +2713,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
 
     func blur() {
         clearRecentToolbarTouch()
-        richTextView.textView.resignFirstResponder()
+        _ = richTextView.textView.resignFirstResponder()
     }
 
     func getCaretRectJson() -> String? {

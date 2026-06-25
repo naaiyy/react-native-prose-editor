@@ -839,15 +839,15 @@ class RenderBridgeTest {
             {"type": "blockStart", "nodeType": "paragraph", "depth": 0},
             {"type": "textRun", "text": "Above", "marks": []},
             {"type": "blockEnd"},
-            {"type": "opaqueBlockAtom", "label": "codeBlock", "docPos": 7}
+            {"type": "opaqueBlockAtom", "label": "widgetBlock", "docPos": 7}
         ]
         """.trimIndent()
 
         val result = RenderBridge.buildSpannable(json, baseFontSize, textColor)
 
         assertTrue(
-            "Opaque block atom should render as '[codeBlock]'. Got: '${result}'",
-            result.toString().contains("[codeBlock]")
+            "Opaque block atom should render as '[widgetBlock]'. Got: '${result}'",
+            result.toString().contains("[widgetBlock]")
         )
     }
 

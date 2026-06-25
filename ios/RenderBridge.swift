@@ -104,6 +104,12 @@ enum RenderBridgeAttributes {
     /// Stores the rendered blockquote gap between border and text.
     static let blockquoteMarkerGap = NSAttributedString.Key("com.apollohg.editor.blockquoteMarkerGap")
 
+    /// Marks code-block paragraphs for custom background drawing.
+    static let codeBlockBackgroundColor = NSAttributedString.Key("com.apollohg.editor.codeBlockBackgroundColor")
+    static let codeBlockBorderRadius = NSAttributedString.Key("com.apollohg.editor.codeBlockBorderRadius")
+    static let codeBlockPaddingHorizontal = NSAttributedString.Key("com.apollohg.editor.codeBlockPaddingHorizontal")
+    static let codeBlockPaddingVertical = NSAttributedString.Key("com.apollohg.editor.codeBlockPaddingVertical")
+
     /// Marks synthetic zero-width placeholders used only for UIKit layout.
     static let syntheticPlaceholder = NSAttributedString.Key("com.apollohg.editor.syntheticPlaceholder")
 
@@ -123,7 +129,7 @@ enum LayoutConstants {
     static let indentPerDepth: CGFloat = 24.0
 
     /// Width reserved for the list bullet/number (points).
-    static let listMarkerWidth: CGFloat = 20.0
+    static let listMarkerWidth: CGFloat = 36.0
 
     /// Gap between the list marker and the text that follows (points).
     static let listMarkerTextGap: CGFloat = 8.0
@@ -252,7 +258,6 @@ final class RenderBridge {
                         ofSize: blockFont.pointSize,
                         weight: .regular
                     )
-                    baseAttrs[.backgroundColor] = UIColor.secondarySystemBackground
                 }
                 let attrs = applyBlockStyle(
                     to: baseAttrs,
@@ -420,8 +425,12 @@ final class RenderBridge {
                             pendingParagraphSpacing: &pendingTrailingParagraphSpacing
                         )
                         let newlineBlockStack: [BlockContext]
-                        if blockquoteDepth(in: blockStack + [ctx]) > 0,
-                           !trailingRenderedContentHasBlockquote(in: result)
+                        if ctx.nodeType == "codeBlock" {
+                            // The separator before a code block should stay neutral so
+                            // the preceding paragraph is never grouped into the code block.
+                            newlineBlockStack = []
+                        } else if blockquoteDepth(in: blockStack + [ctx]) > 0,
+                                  !trailingRenderedContentHasBlockquote(in: result)
                         {
                             newlineBlockStack = []
                         } else {
@@ -947,6 +956,13 @@ final class RenderBridge {
             style.headIndent = baseIndent
         }
 
+        if context.nodeType == "codeBlock" {
+            let horizontalPadding = theme?.codeBlock?.paddingHorizontal ?? 12
+            style.firstLineHeadIndent += horizontalPadding
+            style.headIndent += horizontalPadding
+            style.tailIndent = -horizontalPadding
+        }
+
         if let lineHeight = blockStyle?.lineHeight {
             style.minimumLineHeight = lineHeight
             style.maximumLineHeight = lineHeight
@@ -1060,6 +1076,16 @@ final class RenderBridge {
                 theme: theme,
                 baseFont: paragraphBaseFont
             )
+        }
+        if currentBlock.nodeType == "codeBlock" {
+            mutableAttrs[RenderBridgeAttributes.codeBlockBackgroundColor] =
+                theme?.codeBlock?.backgroundColor ?? UIColor.secondarySystemBackground
+            mutableAttrs[RenderBridgeAttributes.codeBlockBorderRadius] =
+                theme?.codeBlock?.borderRadius ?? 8
+            mutableAttrs[RenderBridgeAttributes.codeBlockPaddingHorizontal] =
+                theme?.codeBlock?.paddingHorizontal ?? 12
+            mutableAttrs[RenderBridgeAttributes.codeBlockPaddingVertical] =
+                theme?.codeBlock?.paddingVertical ?? 8
         }
         if blockquoteDepth(in: blockStack) > 0 {
             let foreground = mutableAttrs[.foregroundColor] as? UIColor ?? .separator

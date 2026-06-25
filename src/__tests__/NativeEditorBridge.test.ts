@@ -1713,8 +1713,8 @@ describe('NativeEditorBridge', () => {
                 },
                 {
                     type: 'opaqueBlockAtom',
-                    nodeType: 'codeBlock',
-                    label: 'codeBlock',
+                    nodeType: 'widgetBlock',
+                    label: 'widgetBlock',
                     docPos: 20,
                 },
                 { type: 'blockEnd' },
@@ -1763,8 +1763,8 @@ describe('NativeEditorBridge', () => {
             // opaqueBlockAtom
             expect(elements[7]).toEqual({
                 type: 'opaqueBlockAtom',
-                nodeType: 'codeBlock',
-                label: 'codeBlock',
+                nodeType: 'widgetBlock',
+                label: 'widgetBlock',
                 docPos: 20,
             });
 

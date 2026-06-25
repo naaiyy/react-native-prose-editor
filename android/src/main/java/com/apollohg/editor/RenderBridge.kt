@@ -18,6 +18,7 @@ import android.text.style.AbsoluteSizeSpan
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.LeadingMarginSpan
+import android.text.style.LineBackgroundSpan
 import android.text.style.LineHeightSpan
 import android.text.style.ReplacementSpan
 import android.text.style.StrikethroughSpan
@@ -38,7 +39,7 @@ object LayoutConstants {
     const val INDENT_PER_DEPTH: Float = 24f
 
     /** Width reserved for the list bullet/number (pixels at base scale). */
-    const val LIST_MARKER_WIDTH: Float = 20f
+    const val LIST_MARKER_WIDTH: Float = 36f
 
     /** Gap between the list marker and the text that follows (pixels at base scale). */
     const val LIST_MARKER_TEXT_GAP: Float = 8f
@@ -94,6 +95,11 @@ private data class PendingLeadingMargin(
     val blockquoteStripeWidthPx: Int = 0,
     val blockquoteGapWidthPx: Int = 0,
     val blockquoteBaseIndentPx: Int = 0
+)
+
+private data class PendingCodeBlockSpan(
+    val start: Int,
+    val end: Int
 )
 
 class BlockquoteSpan(
@@ -214,6 +220,64 @@ class BlockquoteSpan(
         if (textLength <= 0) return 0
         val safeStart = offset.coerceIn(0, textLength - 1)
         return layout.getLineForOffset(safeStart)
+    }
+}
+
+class CodeBlockSpan(
+    private val backgroundColor: Int,
+    private val cornerRadiusPx: Float,
+    private val paddingHorizontalPx: Int,
+    private val paddingVerticalPx: Int
+) : LeadingMarginSpan, LineBackgroundSpan {
+    var spanStart: Int = 0
+    var spanEnd: Int = 0
+
+    override fun getLeadingMargin(first: Boolean): Int = paddingHorizontalPx
+
+    override fun drawBackground(
+        canvas: Canvas,
+        paint: Paint,
+        left: Int,
+        right: Int,
+        top: Int,
+        baseline: Int,
+        bottom: Int,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        lineNumber: Int
+    ) {
+        if (start >= spanEnd || end <= spanStart) return
+
+        val isFirstLine = start <= spanStart
+        val isLastLine = end >= spanEnd
+        val rect = RectF(
+            left.toFloat(),
+            if (isFirstLine) top.toFloat() - paddingVerticalPx else top.toFloat(),
+            (right - paddingHorizontalPx).toFloat(),
+            if (isLastLine) bottom.toFloat() + paddingVerticalPx else bottom.toFloat()
+        )
+
+        val savedColor = paint.color
+        val savedStyle = paint.style
+        paint.color = backgroundColor
+        paint.style = Paint.Style.FILL
+
+        when {
+            isFirstLine && isLastLine -> canvas.drawRoundRect(rect, cornerRadiusPx, cornerRadiusPx, paint)
+            isFirstLine -> {
+                canvas.drawRoundRect(rect, cornerRadiusPx, cornerRadiusPx, paint)
+                canvas.drawRect(rect.left, rect.centerY(), rect.right, rect.bottom, paint)
+            }
+            isLastLine -> {
+                canvas.drawRoundRect(rect, cornerRadiusPx, cornerRadiusPx, paint)
+                canvas.drawRect(rect.left, rect.top, rect.right, rect.centerY(), paint)
+            }
+            else -> canvas.drawRect(rect, paint)
+        }
+
+        paint.color = savedColor
+        paint.style = savedStyle
     }
 }
 
@@ -759,6 +823,7 @@ object RenderBridge {
         val result: SpannableStringBuilder = SpannableStringBuilder(),
         val blockStack: MutableList<BlockContext> = mutableListOf(),
         val pendingLeadingMargins: MutableMap<Int, PendingLeadingMargin> = linkedMapOf(),
+        val pendingCodeBlockSpans: MutableList<PendingCodeBlockSpan> = mutableListOf(),
         var isFirstBlock: Boolean = true,
         var nextBlockSpacingBefore: Float? = null
     )
@@ -799,6 +864,7 @@ object RenderBridge {
             hostView = hostView
         )
         applyPendingLeadingMargins(state.result, state.pendingLeadingMargins)
+        applyPendingCodeBlockSpans(state.result, state.pendingCodeBlockSpans, theme, density)
         return state.result
     }
 
@@ -826,6 +892,7 @@ object RenderBridge {
             )
         }
         applyPendingLeadingMargins(state.result, state.pendingLeadingMargins)
+        applyPendingCodeBlockSpans(state.result, state.pendingCodeBlockSpans, theme, density)
         return state.result
     }
 
@@ -1077,6 +1144,11 @@ object RenderBridge {
                                 theme,
                                 blockquoteDepth(state.blockStack) > 0
                             ).fontSize?.times(density) ?: baseFontSize
+                        val resolvedMarkerBaseSize = if (isTask) {
+                            markerBaseSize * 1.55f
+                        } else {
+                            markerBaseSize
+                        }
                         val markerTextStyle = resolveTextStyle(
                             nodeType,
                             theme,
@@ -1086,7 +1158,7 @@ object RenderBridge {
                             state.result,
                             marker,
                             emptyList(),
-                            markerBaseSize,
+                            resolvedMarkerBaseSize,
                             theme?.list?.markerColor ?: textColor,
                             state.blockStack,
                             state.pendingLeadingMargins,
@@ -1104,12 +1176,12 @@ object RenderBridge {
                             val bulletRadius = ((markerBaseSize * markerScale) * 0.16f).coerceAtLeast(2f * density)
                             state.result.setSpan(
                                 CenteredBulletSpan(
-                                    textColor = theme?.list?.markerColor ?: textColor,
-                                    markerWidthPx = markerWidth,
-                                    bulletRadiusPx = bulletRadius,
-                                    bodyFontSizePx = markerBaseSize,
-                                    markerGapToTextPx = LayoutConstants.LIST_MARKER_TEXT_GAP * density
-                                ),
+                                textColor = theme?.list?.markerColor ?: textColor,
+                                markerWidthPx = markerWidth,
+                                bulletRadiusPx = bulletRadius,
+                                bodyFontSizePx = resolvedMarkerBaseSize,
+                                markerGapToTextPx = LayoutConstants.LIST_MARKER_TEXT_GAP * density
+                            ),
                                 markerStart,
                                 markerEnd,
                                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
@@ -1140,6 +1212,14 @@ object RenderBridge {
                         )
                         if (isListItemNodeType(endedBlock.nodeType) && endedBlock.listContext != null) {
                             state.nextBlockSpacingBefore = theme?.list?.itemSpacing
+                        }
+                        if (endedBlock.nodeType == "codeBlock" && endedBlock.renderStart < state.result.length) {
+                            state.pendingCodeBlockSpans.add(
+                                PendingCodeBlockSpan(
+                                    start = endedBlock.renderStart,
+                                    end = state.result.length
+                                )
+                            )
                         }
                     }
                 }
@@ -1296,10 +1376,14 @@ object RenderBridge {
             builder.setSpan(
                 TypefaceSpan("monospace"), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
             )
-            builder.setSpan(
-                BackgroundColorSpan(LayoutConstants.CODE_BACKGROUND_COLOR),
-                start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
+            if (hasCode && !isCodeBlock) {
+                builder.setSpan(
+                    BackgroundColorSpan(LayoutConstants.CODE_BACKGROUND_COLOR),
+                    start,
+                    end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
         }
 
         // Apply block-level indentation spans if in a block context.
@@ -1696,6 +1780,42 @@ object RenderBridge {
 
                 builder.setSpan(span, paragraphStart, paragraphEnd, Spanned.SPAN_PARAGRAPH)
             }
+        }
+    }
+
+    private fun applyPendingCodeBlockSpans(
+        builder: SpannableStringBuilder,
+        pendingCodeBlockSpans: List<PendingCodeBlockSpan>,
+        theme: EditorTheme?,
+        density: Float
+    ) {
+        if (pendingCodeBlockSpans.isEmpty()) return
+
+        val backgroundColor = theme?.codeBlock?.backgroundColor ?: LayoutConstants.CODE_BACKGROUND_COLOR
+        val cornerRadiusPx = (theme?.codeBlock?.borderRadius ?: 8f) * density
+        val paddingHorizontalPx = ((theme?.codeBlock?.paddingHorizontal ?: 12f) * density).toInt()
+        val paddingVerticalPx = ((theme?.codeBlock?.paddingVertical ?: 8f) * density).toInt()
+
+        for (pending in pendingCodeBlockSpans) {
+            if (pending.start >= pending.end || pending.start >= builder.length) {
+                continue
+            }
+            val spanEnd = pending.end.coerceAtMost(builder.length)
+            val span = CodeBlockSpan(
+                backgroundColor = backgroundColor,
+                cornerRadiusPx = cornerRadiusPx,
+                paddingHorizontalPx = paddingHorizontalPx,
+                paddingVerticalPx = paddingVerticalPx
+            ).also {
+                it.spanStart = pending.start
+                it.spanEnd = spanEnd
+            }
+            builder.setSpan(
+                span,
+                pending.start,
+                spanEnd,
+                Spanned.SPAN_PARAGRAPH
+            )
         }
     }
 
