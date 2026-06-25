@@ -686,7 +686,7 @@ private struct NativeToolbarItem {
 }
 
 final class EditorAccessoryToolbarView: UIInputView {
-    private static let baseHeight: CGFloat = 36
+    private static let baseHeight: CGFloat = 50
     private static let mentionRowHeight: CGFloat = 52
     private static let contentSpacing: CGFloat = 6
     private static let defaultHorizontalInset: CGFloat = 0
@@ -714,7 +714,6 @@ final class EditorAccessoryToolbarView: UIInputView {
     private let mentionStackView = UIStackView()
     private let scrollView = UIScrollView()
     private let stackView = UIStackView()
-    private let fixedButtonStackView = UIStackView()
     private var chromeLeadingConstraint: NSLayoutConstraint?
     private var chromeTrailingConstraint: NSLayoutConstraint?
     private var chromeBottomConstraint: NSLayoutConstraint?
@@ -991,7 +990,6 @@ final class EditorAccessoryToolbarView: UIInputView {
             ? nil
             : (theme?.buttonColor ?? tintColor)
         contentStackView.isHidden = usesBarToolbar && mentionButtons.isEmpty
-        fixedButtonStackView.isHidden = usesBarToolbar || !mentionButtons.isEmpty
         invalidateIntrinsicContentSize()
         for separator in separators {
             separator.isHidden = hasFloatingGlassButtons
@@ -1160,13 +1158,6 @@ final class EditorAccessoryToolbarView: UIInputView {
         stackView.spacing = 6
         scrollView.addSubview(stackView)
 
-        fixedButtonStackView.translatesAutoresizingMaskIntoConstraints = false
-        fixedButtonStackView.axis = .horizontal
-        fixedButtonStackView.alignment = .center
-        fixedButtonStackView.spacing = 4
-        fixedButtonStackView.backgroundColor = .clear
-        chromeView.addSubview(fixedButtonStackView)
-
         let leading = chromeView.leadingAnchor.constraint(
             equalTo: leadingAnchor,
             constant: Self.defaultHorizontalInset
@@ -1216,10 +1207,10 @@ final class EditorAccessoryToolbarView: UIInputView {
             nativeToolbarView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.baseHeight),
             nativeToolbarWidth,
 
-            contentStackView.topAnchor.constraint(equalTo: chromeView.topAnchor, constant: 4),
+            contentStackView.topAnchor.constraint(equalTo: chromeView.topAnchor, constant: 6),
             contentStackView.leadingAnchor.constraint(equalTo: chromeView.leadingAnchor),
             contentStackView.trailingAnchor.constraint(equalTo: chromeView.trailingAnchor),
-            contentStackView.bottomAnchor.constraint(equalTo: chromeView.safeAreaLayoutGuide.bottomAnchor, constant: -4),
+            contentStackView.bottomAnchor.constraint(equalTo: chromeView.safeAreaLayoutGuide.bottomAnchor, constant: -6),
 
             mentionHeight,
 
@@ -1229,16 +1220,12 @@ final class EditorAccessoryToolbarView: UIInputView {
             mentionStackView.bottomAnchor.constraint(equalTo: mentionScrollView.contentLayoutGuide.bottomAnchor),
             mentionStackView.heightAnchor.constraint(equalTo: mentionScrollView.frameLayoutGuide.heightAnchor),
 
-            stackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 4),
+            stackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 6),
             stackView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 12),
             stackView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -12),
-            stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -4),
-            stackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor, constant: -8),
+            stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -6),
+            stackView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor, constant: -12),
             scrollView.heightAnchor.constraint(equalToConstant: Self.baseHeight),
-
-            fixedButtonStackView.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-            fixedButtonStackView.trailingAnchor.constraint(equalTo: chromeView.trailingAnchor, constant: -8),
-            fixedButtonStackView.heightAnchor.constraint(lessThanOrEqualTo: scrollView.heightAnchor),
         ])
 
     }
@@ -1252,16 +1239,8 @@ final class EditorAccessoryToolbarView: UIInputView {
             stackView.removeArrangedSubview(arrangedSubview)
             arrangedSubview.removeFromSuperview()
         }
-        for arrangedSubview in fixedButtonStackView.arrangedSubviews {
-            fixedButtonStackView.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-
         let visibleItems = visibleToolbarItems()
-        let pinnedItems = visibleItems.filter(isPinnedTrailingItem)
-        let scrollingItems = compactToolbarItems(visibleItems.filter { !isPinnedTrailingItem($0) })
-
-        for item in scrollingItems {
+        for item in visibleItems {
             if item.type == .separator {
                 stackView.addArrangedSubview(makeSeparator())
                 continue
@@ -1274,7 +1253,7 @@ final class EditorAccessoryToolbarView: UIInputView {
 
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            nativeToolbarView.setItems(makeNativeToolbarItems(from: scrollingItems + pinnedItems), animated: false)
+            nativeToolbarView.setItems(makeNativeToolbarItems(from: visibleItems), animated: false)
         } else {
             nativeToolbarView.setItems([], animated: false)
         }
@@ -1282,25 +1261,9 @@ final class EditorAccessoryToolbarView: UIInputView {
         nativeToolbarView.setItems([], animated: false)
         #endif
 
-        for item in pinnedItems {
-            let button = makeButton(item: item)
-            buttonBindings.append(ButtonBinding(item: item, button: button))
-            fixedButtonStackView.addArrangedSubview(button)
-        }
-
         updateNativeToolbarMetricsIfNeeded()
         apply(theme: theme)
         apply(state: currentState)
-    }
-
-    private func isPinnedTrailingItem(_ item: NativeToolbarItem) -> Bool {
-        if item.type == .command {
-            return item.command == .undo || item.command == .redo
-        }
-        if item.type == .action {
-            return item.key == "openeditor:keyboard:dismiss"
-        }
-        return false
     }
 
     private func compactToolbarItems(_ items: [NativeToolbarItem]) -> [NativeToolbarItem] {
@@ -1502,14 +1465,14 @@ final class EditorAccessoryToolbarView: UIInputView {
         if #available(iOS 15.0, *) {
             var configuration = UIButton.Configuration.plain()
             configuration.contentInsets = NSDirectionalEdgeInsets(
-                top: 1,
-                leading: 6,
-                bottom: 1,
-                trailing: 6
+                top: 8,
+                leading: 10,
+                bottom: 8,
+                trailing: 10
             )
             button.configuration = configuration
         } else {
-            button.contentEdgeInsets = UIEdgeInsets(top: 1, left: 6, bottom: 1, right: 6)
+            button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
         }
         if let symbolName = item.icon?.resolvedSFSymbolName(),
            let symbolImage = UIImage(systemName: symbolName)
@@ -1517,15 +1480,15 @@ final class EditorAccessoryToolbarView: UIInputView {
             button.setImage(symbolImage, for: .normal)
             button.setTitle(nil, for: .normal)
             button.setPreferredSymbolConfiguration(
-                UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold),
+                UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold),
                 forImageIn: .normal
             )
         } else {
             button.setImage(nil, for: .normal)
             button.setTitle(item.icon?.resolvedGlyphText() ?? "?", for: .normal)
         }
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 36).isActive = true
         if item.type == .group,
            (item.presentation ?? .expand) == .menu,
            #available(iOS 14.0, *)

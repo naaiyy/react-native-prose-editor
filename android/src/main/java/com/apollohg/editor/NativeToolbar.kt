@@ -9,7 +9,6 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewOutlineProvider
-import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import androidx.appcompat.R as AppCompatR
@@ -457,15 +456,15 @@ internal data class NativeToolbarItem(
     }
 }
 
-internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context) {
+internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollView(context) {
     private companion object {
-        private const val NATIVE_CONTAINER_HEIGHT_DP = 36
-        private const val NATIVE_CONTAINER_HORIZONTAL_PADDING_DP = 8
-        private const val NATIVE_CONTAINER_VERTICAL_PADDING_DP = 4
-        private const val NATIVE_BUTTON_SIZE_DP = 24
-        private const val NATIVE_BUTTON_ICON_SIZE_SP = 16f
-        private const val NATIVE_ITEM_SPACING_DP = 4
-        private const val NATIVE_GROUP_SPACING_DP = 6
+        private const val NATIVE_CONTAINER_HEIGHT_DP = 64
+        private const val NATIVE_CONTAINER_HORIZONTAL_PADDING_DP = 16
+        private const val NATIVE_CONTAINER_VERTICAL_PADDING_DP = 12
+        private const val NATIVE_BUTTON_SIZE_DP = 40
+        private const val NATIVE_BUTTON_ICON_SIZE_SP = 24f
+        private const val NATIVE_ITEM_SPACING_DP = 8
+        private const val NATIVE_GROUP_SPACING_DP = 12
     }
 
     private data class ButtonBinding(
@@ -477,9 +476,7 @@ internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context
     var onSelectMentionSuggestion: ((NativeMentionSuggestion) -> Unit)? = null
 
     private val themedContext: Context = DynamicColors.wrapContextIfAvailable(context)
-    private val scrollView = HorizontalScrollView(context)
     private val contentRow = LinearLayout(context)
-    private val fixedButtonRow = LinearLayout(context)
     private var theme: EditorToolbarTheme? = null
     private var mentionTheme: EditorMentionTheme? = null
     private var state: NativeToolbarState = NativeToolbarState.empty
@@ -508,47 +505,21 @@ internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context
         get() = mentionSuggestions.isNotEmpty()
 
     init {
+        isHorizontalScrollBarEnabled = false
+        overScrollMode = OVER_SCROLL_NEVER
         setBackgroundColor(Color.TRANSPARENT)
+        clipToPadding = false
         clipChildren = false
-
-        scrollView.isHorizontalScrollBarEnabled = false
-        scrollView.overScrollMode = OVER_SCROLL_NEVER
-        scrollView.setBackgroundColor(Color.TRANSPARENT)
-        scrollView.clipToPadding = false
-        scrollView.clipChildren = false
-        scrollView.isFillViewport = true
-        addView(
-            scrollView,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER_VERTICAL)
-        )
+        isFillViewport = true
 
         contentRow.orientation = LinearLayout.HORIZONTAL
         contentRow.gravity = Gravity.START or Gravity.CENTER_VERTICAL
         contentRow.setPadding(dp(12))
         contentRow.clipToPadding = false
         contentRow.clipChildren = false
-        scrollView.addView(
-            contentRow,
-            HorizontalScrollView.LayoutParams(
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        fixedButtonRow.orientation = LinearLayout.HORIZONTAL
-        fixedButtonRow.gravity = Gravity.CENTER
-        fixedButtonRow.setPadding(
-            0,
-            dp(NATIVE_CONTAINER_VERTICAL_PADDING_DP),
-            dp(8),
-            dp(NATIVE_CONTAINER_VERTICAL_PADDING_DP)
-        )
-        fixedButtonRow.clipToPadding = false
-        fixedButtonRow.clipChildren = false
-        fixedButtonRow.setBackgroundColor(Color.TRANSPARENT)
         addView(
-            fixedButtonRow,
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL)
+            contentRow,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         )
         rebuildContent(preserveScrollPosition = false)
     }
@@ -624,19 +595,16 @@ internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context
         separators.getOrNull(index)
 
     private fun rebuildContent(preserveScrollPosition: Boolean = true) {
-        val targetScrollX = if (preserveScrollPosition) scrollView.scrollX else 0
+        val targetScrollX = if (preserveScrollPosition) scrollX else 0
         val generation = ++rebuildGeneration
         bindings.clear()
         separators.clear()
         mentionChips.clear()
         contentRow.removeAllViews()
-        fixedButtonRow.removeAllViews()
 
         if (isShowingMentionSuggestions) {
-            fixedButtonRow.visibility = View.GONE
             rebuildMentionSuggestions()
         } else {
-            fixedButtonRow.visibility = View.VISIBLE
             rebuildButtons()
         }
 
@@ -644,20 +612,15 @@ internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context
         applyState(state)
         post {
             if (generation != rebuildGeneration) return@post
-            val contentWidth = contentRow.width
-            val viewportWidth =
-                (scrollView.width - scrollView.paddingLeft - scrollView.paddingRight).coerceAtLeast(0)
+            val contentWidth = getChildAt(0)?.width ?: 0
+            val viewportWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
             val maxScrollX = (contentWidth - viewportWidth).coerceAtLeast(0)
-            scrollView.scrollTo(targetScrollX.coerceIn(0, maxScrollX), 0)
+            scrollTo(targetScrollX.coerceIn(0, maxScrollX), 0)
         }
     }
 
     private fun rebuildButtons() {
-        val visibleItems = visibleItems()
-        val pinnedItems = visibleItems.filter(::isPinnedTrailingItem)
-        val scrollingItems = compactItems(visibleItems.filterNot(::isPinnedTrailingItem))
-
-        for (item in scrollingItems) {
+        for (item in visibleItems()) {
             if (item.type == ToolbarItemKind.separator) {
                 val separator = View(context)
                 configureSeparator(separator)
@@ -666,57 +629,45 @@ internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context
                 continue
             }
 
-            val button = makeButton(item)
-            bindings.add(ButtonBinding(item, button))
-            contentRow.addView(button)
-        }
-        for (item in pinnedItems) {
-            val button = makeButton(item)
-            bindings.add(ButtonBinding(item, button))
-            fixedButtonRow.addView(button)
-        }
-    }
-
-    private fun makeButton(item: NativeToolbarItem): AppCompatButton =
-        AppCompatButton(themedContext).apply {
-            val resolvedIcon = item.icon?.resolveForAndroid(themedContext)
-                ?: NativeToolbarResolvedIcon("?")
-            text = resolvedIcon.text
-            typeface = resolvedIcon.typeface ?: Typeface.DEFAULT
-            gravity = Gravity.CENTER
-            background = GradientDrawable()
-            isAllCaps = false
-            includeFontPadding = false
-            contentDescription = item.label
-            setOnClickListener {
-                when (item.type) {
-                    ToolbarItemKind.group -> handleGroupButtonPress(this, item)
-                    else -> {
-                        onPressItem?.invoke(item.copy(parentGroupKey = null))
-                        if (item.parentGroupKey != null && expandedGroupKey == item.parentGroupKey) {
-                            expandedGroupKey = null
-                            rebuildContent()
+            val button = AppCompatButton(themedContext).apply {
+                val resolvedIcon = item.icon?.resolveForAndroid(themedContext)
+                    ?: NativeToolbarResolvedIcon("?")
+                text = resolvedIcon.text
+                typeface = resolvedIcon.typeface ?: Typeface.DEFAULT
+                gravity = Gravity.CENTER
+                background = GradientDrawable()
+                isAllCaps = false
+                includeFontPadding = false
+                contentDescription = item.label
+                setOnClickListener {
+                    when (item.type) {
+                        ToolbarItemKind.group -> handleGroupButtonPress(this, item)
+                        else -> {
+                            onPressItem?.invoke(item.copy(parentGroupKey = null))
+                            if (item.parentGroupKey != null && expandedGroupKey == item.parentGroupKey) {
+                                expandedGroupKey = null
+                                rebuildContent()
+                            }
                         }
                     }
                 }
+                elevation = 0f
+                translationZ = 0f
+                stateListAnimator = null
             }
-            elevation = 0f
-            translationZ = 0f
-            stateListAnimator = null
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                foreground = resolveDrawableAttr(android.R.attr.selectableItemBackgroundBorderless)
+                button.foreground = resolveDrawableAttr(android.R.attr.selectableItemBackgroundBorderless)
             }
-            layoutParams = LinearLayout.LayoutParams(
+            val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            applyButtonLayout(this, appearance = theme?.appearance ?: EditorToolbarAppearance.CUSTOM)
+            button.layoutParams = params
+            applyButtonLayout(button, appearance = theme?.appearance ?: EditorToolbarAppearance.CUSTOM)
+            bindings.add(ButtonBinding(item, button))
+            contentRow.addView(button)
         }
-
-    private fun isPinnedTrailingItem(item: NativeToolbarItem): Boolean =
-        (item.type == ToolbarItemKind.command &&
-            (item.command == ToolbarCommand.undo || item.command == ToolbarCommand.redo)) ||
-            (item.type == ToolbarItemKind.action && item.key == "openeditor:keyboard:dismiss")
+    }
 
     private fun rebuildMentionSuggestions() {
         for (suggestion in mentionSuggestions) {
@@ -1081,7 +1032,7 @@ internal class EditorKeyboardToolbarView(context: Context) : FrameLayout(context
     private fun configureSeparator(separator: View) {
         val appearance = theme?.appearance ?: EditorToolbarAppearance.CUSTOM
         val params = if (appearance == EditorToolbarAppearance.NATIVE) {
-            LinearLayout.LayoutParams(dp(1), dp(14)).apply {
+            LinearLayout.LayoutParams(dp(1), dp(24)).apply {
                 marginStart = dp(NATIVE_GROUP_SPACING_DP / 2)
                 marginEnd = dp(NATIVE_GROUP_SPACING_DP / 2)
             }
