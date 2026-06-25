@@ -520,6 +520,7 @@ public class NativeEditorModule: Module {
                 "onSelectionChange",
                 "onFocusChange",
                 "onContentHeightChange",
+                "onKeyPress",
                 "onToolbarAction",
                 "onAddonEvent"
             )
@@ -544,6 +545,9 @@ public class NativeEditorModule: Module {
             }
             Prop("keyboardType") { (view: NativeEditorExpoView, keyboardType: String?) in
                 view.setKeyboardType(keyboardType)
+            }
+            Prop("keyboardAppearance") { (view: NativeEditorExpoView, keyboardAppearance: String?) in
+                view.setKeyboardAppearance(keyboardAppearance)
             }
             Prop("showToolbar") { (view: NativeEditorExpoView, showToolbar: Bool) in
                 view.setShowToolbar(showToolbar)

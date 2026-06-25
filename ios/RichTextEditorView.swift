@@ -18,6 +18,10 @@ protocol EditorTextViewDelegate: AnyObject {
     ///   - textView: The editor text view.
     ///   - updateJSON: The full EditorUpdate JSON string from Rust.
     func editorTextView(_ textView: EditorTextView, didReceiveUpdate updateJSON: String)
+
+    /// Called when the user presses Backspace at the start of an empty editor block.
+    /// - Parameter textView: The editor text view.
+    func editorTextViewDidPressBackspaceAtStartOnEmptyContent(_ textView: EditorTextView)
 }
 
 enum EditorHeightBehavior: String {
@@ -1068,6 +1072,7 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
         var autoCapitalize: String?
         var autoCorrect: Bool?
         var keyboardType: String?
+        var keyboardAppearance: String?
     }
 
     private struct PendingInputTraitChange {
@@ -1077,9 +1082,11 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
         var autoCorrect: Bool?
         var hasKeyboardType = false
         var keyboardType: String?
+        var hasKeyboardAppearance = false
+        var keyboardAppearance: String?
 
         var isEmpty: Bool {
-            !hasAutoCapitalize && !hasAutoCorrect && !hasKeyboardType
+            !hasAutoCapitalize && !hasAutoCorrect && !hasKeyboardType && !hasKeyboardAppearance
         }
     }
 
@@ -1230,8 +1237,28 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
         clearPendingKeyboardType()
     }
 
+    func setKeyboardAppearance(_ keyboardAppearance: String?) {
+        desiredInputTraitState.keyboardAppearance = keyboardAppearance
+        guard prepareForInputTraitChange() else {
+            pendingInputTraitChange.hasKeyboardAppearance = true
+            pendingInputTraitChange.keyboardAppearance = keyboardAppearance
+            scheduleInputTraitChangeRetry()
+            return
+        }
+        applyKeyboardAppearance(keyboardAppearance)
+        appliedInputTraitState.keyboardAppearance = keyboardAppearance
+        clearPendingKeyboardAppearance()
+    }
+
     private func applyKeyboardType(_ keyboardType: String?) {
         self.keyboardType = Self.resolvedKeyboardType(from: keyboardType)
+        if isFirstResponder {
+            reloadInputViews()
+        }
+    }
+
+    private func applyKeyboardAppearance(_ keyboardAppearance: String?) {
+        self.keyboardAppearance = Self.resolvedKeyboardAppearance(from: keyboardAppearance)
         if isFirstResponder {
             reloadInputViews()
         }
@@ -1265,6 +1292,10 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
                pending.keyboardType == self.desiredInputTraitState.keyboardType {
                 self.setKeyboardType(pending.keyboardType)
             }
+            if pending.hasKeyboardAppearance,
+               pending.keyboardAppearance == self.desiredInputTraitState.keyboardAppearance {
+                self.setKeyboardAppearance(pending.keyboardAppearance)
+            }
         }
     }
 
@@ -1283,6 +1314,12 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
     private func clearPendingKeyboardType() {
         pendingInputTraitChange.hasKeyboardType = false
         pendingInputTraitChange.keyboardType = nil
+        cancelPendingInputTraitRetryIfEmpty()
+    }
+
+    private func clearPendingKeyboardAppearance() {
+        pendingInputTraitChange.hasKeyboardAppearance = false
+        pendingInputTraitChange.keyboardAppearance = nil
         cancelPendingInputTraitRetryIfEmpty()
     }
 
@@ -1308,6 +1345,9 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
         }
         if desiredInputTraitState.keyboardType != appliedInputTraitState.keyboardType {
             setKeyboardType(desiredInputTraitState.keyboardType)
+        }
+        if desiredInputTraitState.keyboardAppearance != appliedInputTraitState.keyboardAppearance {
+            setKeyboardAppearance(desiredInputTraitState.keyboardAppearance)
         }
     }
 
@@ -1337,6 +1377,17 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
             return .asciiCapableNumberPad
         case "visible-password":
             return .asciiCapable
+        default:
+            return .default
+        }
+    }
+
+    private static func resolvedKeyboardAppearance(from keyboardAppearance: String?) -> UIKeyboardAppearance {
+        switch keyboardAppearance {
+        case "light":
+            return .light
+        case "dark":
+            return .dark
         default:
             return .default
         }
@@ -2043,6 +2094,11 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
             }
         } else {
             // Cursor: delete one grapheme cluster backward.
+            if isRenderedContentEmpty() {
+                editorDelegate?.editorTextViewDidPressBackspaceAtStartOnEmptyContent(self)
+                return
+            }
+
             let cursorPos = PositionBridge.textViewToScalar(selectedRange.start, in: self)
             if cursorPos == 0 {
                 performInterceptedInput {

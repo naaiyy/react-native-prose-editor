@@ -439,6 +439,7 @@ class NativeEditorModule : Module() {
                 "onFocusChange",
                 "onContentHeightChange",
                 "onEditorReady",
+                "onKeyPress",
                 "onToolbarAction",
                 "onAddonEvent"
             )
