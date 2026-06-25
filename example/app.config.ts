@@ -6,7 +6,7 @@ export default {
         slug: 'native-editor-example',
         version: rootPackage.version,
         plugins: [
-            '@apollohg/react-native-prose-editor',
+            '@openeditor/react-native-prose-editor',
             [
                 'expo-image-picker',
                 {
@@ -20,10 +20,10 @@ export default {
         orientation: 'portrait',
         ios: {
             supportsTablet: true,
-            bundleIdentifier: 'com.apollohg.nativeeditorexample',
+            bundleIdentifier: 'com.openeditor.nativeeditorexample',
         },
         android: {
-            package: 'com.apollohg.nativeeditorexample',
+            package: 'com.openeditor.nativeeditorexample',
         },
     },
 };

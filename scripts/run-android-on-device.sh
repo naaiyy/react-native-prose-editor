@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_dir="example/android"
-task=":apollohg-react-native-prose-editor:connectedDebugAndroidTest"
+task=":openeditor-react-native-prose-editor:connectedDebugAndroidTest"
 device_id="${ANDROID_DEVICE_ID:-${ANDROID_SERIAL:-}}"
 test_class=""
 extra_args=()

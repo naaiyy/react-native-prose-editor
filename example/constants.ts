@@ -2,7 +2,7 @@ import type {
     EditorToolbarItem,
     EditorToolbarTheme,
     MentionSuggestion,
-} from '@apollohg/react-native-prose-editor';
+} from '@openeditor/react-native-prose-editor';
 
 export const INITIAL_CONTENT = [
     '<p><strong>Native Editor</strong> example app.</p>',
@@ -139,6 +139,7 @@ export const EXAMPLE_DEFAULT_TOOLBAR_ITEMS: readonly EditorToolbarItem[] = [
 export type ToolbarColorKey = Exclude<
     keyof Required<EditorToolbarTheme>,
     | 'appearance'
+    | 'height'
     | 'borderRadius'
     | 'borderWidth'
     | 'marginTop'

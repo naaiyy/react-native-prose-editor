@@ -30,7 +30,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: NativeEditorTestHost
-        PRODUCT_BUNDLE_IDENTIFIER: com.apollohg.NativeEditorTestHost
+        PRODUCT_BUNDLE_IDENTIFIER: com.openeditor.NativeEditorTestHost
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: NativeEditorTestHost
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: NO
@@ -58,7 +58,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: NativeEditorTests
-        PRODUCT_BUNDLE_IDENTIFIER: com.apollohg.NativeEditorTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.openeditor.NativeEditorTests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: NativeEditorTestHost
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/NativeEditorTestHost.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NativeEditorTestHost

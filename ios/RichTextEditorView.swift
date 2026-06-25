@@ -1049,19 +1049,19 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
 
     /// Logger for reconciliation events (visible in Console.app / device logs).
     private static let reconciliationLog = Logger(
-        subsystem: "com.apollohg.prose-editor",
+        subsystem: "com.openeditor.prose-editor",
         category: "reconciliation"
     )
     private static let inputLog = Logger(
-        subsystem: "com.apollohg.prose-editor",
+        subsystem: "com.openeditor.prose-editor",
         category: "input"
     )
     private static let updateLog = Logger(
-        subsystem: "com.apollohg.prose-editor",
+        subsystem: "com.openeditor.prose-editor",
         category: "update"
     )
     private static let selectionLog = Logger(
-        subsystem: "com.apollohg.prose-editor",
+        subsystem: "com.openeditor.prose-editor",
         category: "selection"
     )
 

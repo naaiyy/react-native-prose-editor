@@ -1,10 +1,12 @@
 name: Publish
 
 on:
-  release:
-    types:
-      - published
   workflow_dispatch:
+    inputs:
+      confirm_release:
+        description: 'Type RELEASE to publish @openeditor/react-native-prose-editor to npm'
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -12,6 +14,7 @@ permissions:
 
 jobs:
   publish:
+    if: ${{ github.event.inputs.confirm_release == 'RELEASE' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -46,3 +49,5 @@ jobs:
 
       - name: Publish to npm
         run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

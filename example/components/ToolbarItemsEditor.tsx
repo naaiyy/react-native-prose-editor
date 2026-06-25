@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
-import { type EditorToolbarItem } from '@apollohg/react-native-prose-editor';
+import { type EditorToolbarItem } from '@openeditor/react-native-prose-editor';
 import { EXAMPLE_DEFAULT_TOOLBAR_ITEMS } from '../constants';
 import type { ExampleThemePreset } from '../themePresets';
 import { sharedStyles } from '../sharedStyles';

@@ -27,7 +27,7 @@
       <dict>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>com.apollohg.nativeeditorexample</string>
+          <string>com.openeditor.nativeeditorexample</string>
         </array>
       </dict>
     </array>

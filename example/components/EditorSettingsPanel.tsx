@@ -1,7 +1,7 @@
 import React from 'react';
 import { StyleSheet, Switch, Text, View } from 'react-native';
 import Slider from '@react-native-community/slider';
-import type { NativeRichTextEditorToolbarPlacement } from '@apollohg/react-native-prose-editor';
+import type { NativeRichTextEditorToolbarPlacement } from '@openeditor/react-native-prose-editor';
 import type { ExampleThemePreset } from '../themePresets';
 import { EXAMPLE_MENTION_SUGGESTIONS } from '../constants';
 import { sharedStyles } from '../sharedStyles';

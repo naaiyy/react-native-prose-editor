@@ -29,7 +29,7 @@ import {
     type NativeRichTextEditorRef,
     type NativeRichTextEditorToolbarPlacement,
     type Selection,
-} from '@apollohg/react-native-prose-editor';
+} from '@openeditor/react-native-prose-editor';
 
 import {
     buildExampleEditorTheme,

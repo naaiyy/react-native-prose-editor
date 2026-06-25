@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo

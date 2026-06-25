@@ -8,11 +8,11 @@ Pod::Spec.new do |s|
   s.summary        = package['description']
   s.description    = package['description']
   s.license        = { :type => 'MIT' }
-  s.author         = 'Apollo HG'
-  s.homepage       = 'https://github.com/apollohg/react-native-prose-editor'
+  s.author         = 'OpenEditor'
+  s.homepage       = 'https://github.com/naaiyy/react-native-prose-editor'
   s.platforms      = { :ios => '15.1' }
   s.swift_version  = '5.9'
-  s.source         = { git: 'https://github.com/apollohg/react-native-prose-editor.git' }
+  s.source         = { git: 'https://github.com/naaiyy/react-native-prose-editor.git' }
   # UniFFI's generated Swift bindings import a companion Clang module
   # (`editor_coreFFI`) via a custom modulemap. CocoaPods does not support
   # custom module maps on Swift static libraries, so this pod must build as

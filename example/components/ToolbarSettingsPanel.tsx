@@ -5,7 +5,7 @@ import type {
     EditorToolbarAppearance,
     EditorToolbarItem,
     EditorToolbarTheme,
-} from '@apollohg/react-native-prose-editor';
+} from '@openeditor/react-native-prose-editor';
 import type { ExampleThemePreset } from '../themePresets';
 import { TOOLBAR_COLOR_FIELDS, type ToolbarColorKey } from '../constants';
 import { sharedStyles } from '../sharedStyles';

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import type { CollaborationPeer } from '@apollohg/react-native-prose-editor';
+import type { CollaborationPeer } from '@openeditor/react-native-prose-editor';
 import type { ExampleThemePreset } from '../themePresets';
 import { sharedStyles } from '../sharedStyles';
 import { CollapsibleSection } from './CollapsibleSection';

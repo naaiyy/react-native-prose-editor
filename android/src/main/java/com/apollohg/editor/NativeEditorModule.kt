@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition

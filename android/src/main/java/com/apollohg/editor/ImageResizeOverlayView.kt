@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 import android.content.Context
 import android.graphics.Canvas

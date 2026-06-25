@@ -2,16 +2,16 @@ import UIKit
 
 extension Notification.Name {
     static let editorImageAttachmentDidLoad = Notification.Name(
-        "com.apollohg.editor.imageAttachmentDidLoad"
+        "com.openeditor.editor.imageAttachmentDidLoad"
     )
 }
 
 private enum RenderImageCache {
     static let cache = NSCache<NSString, UIImage>()
-    static let stateQueue = DispatchQueue(label: "com.apollohg.editor.image-loader-state")
+    static let stateQueue = DispatchQueue(label: "com.openeditor.editor.image-loader-state")
     static let queue: OperationQueue = {
         let queue = OperationQueue()
-        queue.name = "com.apollohg.editor.image-loader"
+        queue.name = "com.openeditor.editor.image-loader"
         queue.qualityOfService = .userInitiated
         queue.maxConcurrentOperationCount = 2
         return queue
@@ -63,61 +63,61 @@ private enum RenderImageCache {
 enum RenderBridgeAttributes {
     /// Marks a character as a void element placeholder (hardBreak, horizontalRule).
     /// The value is the node type string (e.g. "hardBreak", "horizontalRule").
-    static let voidNodeType = NSAttributedString.Key("com.apollohg.editor.voidNodeType")
+    static let voidNodeType = NSAttributedString.Key("com.openeditor.editor.voidNodeType")
 
     /// Stores the Rust document position (UInt32) for void elements.
-    static let docPos = NSAttributedString.Key("com.apollohg.editor.docPos")
+    static let docPos = NSAttributedString.Key("com.openeditor.editor.docPos")
 
     /// Marks a character as a block boundary (for block start/end tracking).
-    static let blockBoundary = NSAttributedString.Key("com.apollohg.editor.blockBoundary")
+    static let blockBoundary = NSAttributedString.Key("com.openeditor.editor.blockBoundary")
 
     /// Stores the block node type (e.g. "paragraph", "listItem").
-    static let blockNodeType = NSAttributedString.Key("com.apollohg.editor.blockNodeType")
+    static let blockNodeType = NSAttributedString.Key("com.openeditor.editor.blockNodeType")
 
     /// Stores the block depth (UInt8).
-    static let blockDepth = NSAttributedString.Key("com.apollohg.editor.blockDepth")
+    static let blockDepth = NSAttributedString.Key("com.openeditor.editor.blockDepth")
 
     /// Stores list context info as a dictionary for list items.
-    static let listContext = NSAttributedString.Key("com.apollohg.editor.listContext")
+    static let listContext = NSAttributedString.Key("com.openeditor.editor.listContext")
 
     /// Marks blocks that should render a visible list marker.
-    static let listMarkerContext = NSAttributedString.Key("com.apollohg.editor.listMarkerContext")
+    static let listMarkerContext = NSAttributedString.Key("com.openeditor.editor.listMarkerContext")
 
     /// Stores the rendered list marker color for the paragraph marker.
-    static let listMarkerColor = NSAttributedString.Key("com.apollohg.editor.listMarkerColor")
+    static let listMarkerColor = NSAttributedString.Key("com.openeditor.editor.listMarkerColor")
 
     /// Stores the rendered list marker scale for unordered bullets.
-    static let listMarkerScale = NSAttributedString.Key("com.apollohg.editor.listMarkerScale")
+    static let listMarkerScale = NSAttributedString.Key("com.openeditor.editor.listMarkerScale")
 
     /// Stores the paragraph base font used to render the list marker.
-    static let listMarkerBaseFont = NSAttributedString.Key("com.apollohg.editor.listMarkerBaseFont")
+    static let listMarkerBaseFont = NSAttributedString.Key("com.openeditor.editor.listMarkerBaseFont")
 
     /// Stores the reserved list marker gutter width.
-    static let listMarkerWidth = NSAttributedString.Key("com.apollohg.editor.listMarkerWidth")
+    static let listMarkerWidth = NSAttributedString.Key("com.openeditor.editor.listMarkerWidth")
 
     /// Stores the rendered blockquote border color.
-    static let blockquoteBorderColor = NSAttributedString.Key("com.apollohg.editor.blockquoteBorderColor")
+    static let blockquoteBorderColor = NSAttributedString.Key("com.openeditor.editor.blockquoteBorderColor")
 
     /// Stores the rendered blockquote border width.
-    static let blockquoteBorderWidth = NSAttributedString.Key("com.apollohg.editor.blockquoteBorderWidth")
+    static let blockquoteBorderWidth = NSAttributedString.Key("com.openeditor.editor.blockquoteBorderWidth")
 
     /// Stores the rendered blockquote gap between border and text.
-    static let blockquoteMarkerGap = NSAttributedString.Key("com.apollohg.editor.blockquoteMarkerGap")
+    static let blockquoteMarkerGap = NSAttributedString.Key("com.openeditor.editor.blockquoteMarkerGap")
 
     /// Marks code-block paragraphs for custom background drawing.
-    static let codeBlockBackgroundColor = NSAttributedString.Key("com.apollohg.editor.codeBlockBackgroundColor")
-    static let codeBlockBorderRadius = NSAttributedString.Key("com.apollohg.editor.codeBlockBorderRadius")
-    static let codeBlockPaddingHorizontal = NSAttributedString.Key("com.apollohg.editor.codeBlockPaddingHorizontal")
-    static let codeBlockPaddingVertical = NSAttributedString.Key("com.apollohg.editor.codeBlockPaddingVertical")
+    static let codeBlockBackgroundColor = NSAttributedString.Key("com.openeditor.editor.codeBlockBackgroundColor")
+    static let codeBlockBorderRadius = NSAttributedString.Key("com.openeditor.editor.codeBlockBorderRadius")
+    static let codeBlockPaddingHorizontal = NSAttributedString.Key("com.openeditor.editor.codeBlockPaddingHorizontal")
+    static let codeBlockPaddingVertical = NSAttributedString.Key("com.openeditor.editor.codeBlockPaddingVertical")
 
     /// Marks synthetic zero-width placeholders used only for UIKit layout.
-    static let syntheticPlaceholder = NSAttributedString.Key("com.apollohg.editor.syntheticPlaceholder")
+    static let syntheticPlaceholder = NSAttributedString.Key("com.openeditor.editor.syntheticPlaceholder")
 
     /// Stores the link href for visually styled link text without enabling UITextView's default link interaction.
-    static let linkHref = NSAttributedString.Key("com.apollohg.editor.linkHref")
+    static let linkHref = NSAttributedString.Key("com.openeditor.editor.linkHref")
 
     /// Stores the owning top-level document child index for partial native patching.
-    static let topLevelChildIndex = NSAttributedString.Key("com.apollohg.editor.topLevelChildIndex")
+    static let topLevelChildIndex = NSAttributedString.Key("com.openeditor.editor.topLevelChildIndex")
 }
 
 /// Layout constants for paragraph styles.

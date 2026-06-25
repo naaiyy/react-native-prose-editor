@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 import android.content.ClipData
 import android.content.ClipboardManager

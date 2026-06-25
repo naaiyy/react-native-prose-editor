@@ -7,15 +7,15 @@ plugins {
 
 def packageJson = new JsonSlurper().parse(file('../package.json'))
 
-group = 'com.apollohg'
+group = 'com.openeditor'
 version = packageJson.version
 
 android {
-    namespace = "com.apollohg.editor"
+    namespace = "com.openeditor.editor"
     testOptions {
         unitTests.includeAndroidResources = true
         unitTests.all { test ->
-            if (project.findProperty("apollohgShowPerfTestOutput") == "true") {
+            if (project.findProperty("openeditorShowPerfTestOutput") == "true") {
                 test.testLogging {
                     events "passed", "failed"
                     showStandardStreams = true

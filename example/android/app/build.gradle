@@ -87,9 +87,9 @@ android {
     buildToolsVersion = rootProject.ext.buildToolsVersion
     compileSdk = rootProject.ext.compileSdkVersion
 
-    namespace = 'com.apollohg.nativeeditorexample'
+    namespace = 'com.openeditor.nativeeditorexample'
     defaultConfig {
-        applicationId = 'com.apollohg.nativeeditorexample'
+        applicationId = 'com.openeditor.nativeeditorexample'
         minSdkVersion = rootProject.ext.minSdkVersion
         targetSdkVersion = rootProject.ext.targetSdkVersion
         versionCode = 1

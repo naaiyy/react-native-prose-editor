@@ -4,6 +4,6 @@
     "modules": ["NativeEditorModule"]
   },
   "android": {
-    "modules": ["com.apollohg.editor.NativeEditorModule"]
+    "modules": ["com.openeditor.editor.NativeEditorModule"]
   }
 }

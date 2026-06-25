@@ -440,7 +440,7 @@
 					"@loader_path/Frameworks",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_DEBUG";
-				PRODUCT_BUNDLE_IDENTIFIER = com.apollohg.NativeEditorTestHost;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openeditor.NativeEditorTestHost;
 				PRODUCT_NAME = NativeEditorTestHost;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -470,7 +470,7 @@
 					"@executable_path/Frameworks",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../ios/editor_coreFFI/module.modulemap -D EXPO_CONFIGURATION_RELEASE";
-				PRODUCT_BUNDLE_IDENTIFIER = com.apollohg.NativeEditorTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openeditor.NativeEditorTests;
 				PRODUCT_NAME = NativeEditorTests;
 				SDKROOT = iphoneos;
 				SWIFT_INCLUDE_PATHS = "$(inherited) $(SRCROOT)/../ios/editor_coreFFI";
@@ -497,7 +497,7 @@
 					"@loader_path/Frameworks",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_RELEASE";
-				PRODUCT_BUNDLE_IDENTIFIER = com.apollohg.NativeEditorTestHost;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openeditor.NativeEditorTestHost;
 				PRODUCT_NAME = NativeEditorTestHost;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -666,7 +666,7 @@
 					"@executable_path/Frameworks",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../ios/editor_coreFFI/module.modulemap -D EXPO_CONFIGURATION_DEBUG";
-				PRODUCT_BUNDLE_IDENTIFIER = com.apollohg.NativeEditorTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openeditor.NativeEditorTests;
 				PRODUCT_NAME = NativeEditorTests;
 				SDKROOT = iphoneos;
 				SWIFT_INCLUDE_PATHS = "$(inherited) $(SRCROOT)/../ios/editor_coreFFI";

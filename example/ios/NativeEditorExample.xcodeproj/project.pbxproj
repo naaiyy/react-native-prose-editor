@@ -352,14 +352,14 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5.24;
+				MARKETING_VERSION = 0.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
 					"-lc++",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_DEBUG";
-				PRODUCT_BUNDLE_IDENTIFIER = com.apollohg.nativeeditorexample;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openeditor.nativeeditorexample;
 				PRODUCT_NAME = NativeEditorExample;
 				SWIFT_OBJC_BRIDGING_HEADER = "NativeEditorExample/NativeEditorExample-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -386,14 +386,14 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5.24;
+				MARKETING_VERSION = 0.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
 					"-lc++",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_RELEASE";
-				PRODUCT_BUNDLE_IDENTIFIER = com.apollohg.nativeeditorexample;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openeditor.nativeeditorexample;
 				PRODUCT_NAME = NativeEditorExample;
 				SWIFT_OBJC_BRIDGING_HEADER = "NativeEditorExample/NativeEditorExample-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;

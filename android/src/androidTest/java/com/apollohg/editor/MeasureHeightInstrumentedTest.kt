@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertTrue

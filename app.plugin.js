@@ -32,7 +32,7 @@ function mergeCommaList(value, additions) {
   return Array.from(new Set([...values, ...additions])).join(',');
 }
 
-function withReactNativeProseEditor(config) {
+function withOpenEditorReactNativeProseEditor(config) {
   const { withGradleProperties } = requireExpoConfigPlugins();
 
   return withGradleProperties(config, (config) => {
@@ -56,7 +56,7 @@ function withReactNativeProseEditor(config) {
 }
 
 module.exports = requireExpoConfigPlugins().createRunOncePlugin(
-  withReactNativeProseEditor,
+  withOpenEditorReactNativeProseEditor,
   pkg.name,
   pkg.version
 );

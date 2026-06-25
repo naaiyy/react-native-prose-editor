@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 import android.graphics.Paint
 import android.text.Layout

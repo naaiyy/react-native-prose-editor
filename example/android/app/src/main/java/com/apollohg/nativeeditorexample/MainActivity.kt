@@ -1,4 +1,4 @@
-package com.apollohg.nativeeditorexample
+package com.openeditor.nativeeditorexample
 
 import android.os.Build
 import android.os.Bundle

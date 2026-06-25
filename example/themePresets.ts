@@ -3,7 +3,7 @@ import type {
     EditorTheme,
     EditorMentionTheme,
     EditorToolbarTheme,
-} from '@apollohg/react-native-prose-editor';
+} from '@openeditor/react-native-prose-editor';
 
 export interface ExampleThemePreset {
     id: string;
@@ -196,6 +196,7 @@ export const EXAMPLE_THEME_PRESETS: readonly ExampleThemePreset[] = [
         },
         toolbar: {
             appearance: 'native',
+            height: 50,
             backgroundColor: '#fff8ef',
             borderColor: '#dcc8b5',
             borderWidth: 1,
@@ -291,6 +292,7 @@ export const EXAMPLE_THEME_PRESETS: readonly ExampleThemePreset[] = [
         },
         toolbar: {
             appearance: 'custom',
+            height: 50,
             backgroundColor: '#f6f7f9',
             borderColor: '#cdd3db',
             borderWidth: 1,
@@ -386,6 +388,7 @@ export const EXAMPLE_THEME_PRESETS: readonly ExampleThemePreset[] = [
         },
         toolbar: {
             appearance: 'custom',
+            height: 50,
             backgroundColor: '#1a1e28',
             borderColor: '#2e3548',
             borderWidth: 1,
@@ -481,6 +484,7 @@ export const EXAMPLE_THEME_PRESETS: readonly ExampleThemePreset[] = [
         },
         toolbar: {
             appearance: 'custom',
+            height: 50,
             backgroundColor: '#201c18',
             borderColor: '#362e26',
             borderWidth: 1,

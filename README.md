@@ -1,6 +1,6 @@
-# React Native Prose Editor [![NPM version](https://img.shields.io/npm/v/@apollohg/react-native-prose-editor.svg?style=flat)](https://www.npmjs.com/package/@apollohg/react-native-prose-editor)
+# React Native Prose Editor [![NPM version](https://img.shields.io/npm/v/@openeditor/react-native-prose-editor.svg?style=flat)](https://www.npmjs.com/package/@openeditor/react-native-prose-editor)
 
-`@apollohg/react-native-prose-editor` is a native rich text editor for React Native with a Rust document core, native iOS and Android rendering, configurable schemas, and a React-facing toolbar and theme API.
+`@openeditor/react-native-prose-editor` is a native rich text editor for React Native with a Rust document core, native iOS and Android rendering, configurable schemas, and a React-facing toolbar and theme API.
 
 This project is currently in `alpha` and the API, behavior, and packaging may still change.
 
@@ -39,7 +39,7 @@ The editor already supports:
 - [`Rust Editor Core`](./rust/editor-core): document model, transforms, schema system, selection, history, serialization, and tests
 - [`example`](./example): Expo 54 app for manual QA and development
 
-Project documentation now lives in the [GitHub Wiki](https://github.com/apollohg/react-native-prose-editor/wiki).
+Project documentation now lives in the [GitHub Wiki](https://github.com/naaiyy/react-native-prose-editor/wiki).
 
 ## Installation
 
@@ -57,7 +57,7 @@ Required peer dependencies:
 Install the package:
 
 ```sh
-npm install @apollohg/react-native-prose-editor@0.5.1
+npm install @openeditor/react-native-prose-editor@0.0.1
 ```
 
 Expo prebuild apps should add the package config plugin so Android excludes
@@ -66,7 +66,7 @@ obsolete JNA ABI copies that modern NDKs cannot strip:
 ```ts
 export default {
   expo: {
-    plugins: ['@apollohg/react-native-prose-editor'],
+    plugins: ['@openeditor/react-native-prose-editor'],
   },
 };
 ```
@@ -90,7 +90,7 @@ npm --prefix example install
 npm run example:prebuild
 ```
 
-For full setup details, including peer dependencies, example app setup, and iOS pods, see the [Installation Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Installation).
+For full setup details, including peer dependencies, example app setup, and iOS pods, see the [Installation Guide](https://github.com/naaiyy/react-native-prose-editor/wiki/Installation).
 
 ## Basic Usage
 
@@ -99,7 +99,7 @@ import React, { useRef } from 'react';
 import {
   NativeRichTextEditor,
   type NativeRichTextEditorRef,
-} from '@apollohg/react-native-prose-editor';
+} from '@openeditor/react-native-prose-editor';
 
 export function EditorScreen() {
   const editorRef = useRef<NativeRichTextEditorRef>(null);
@@ -129,9 +129,9 @@ The main extension points today are:
 - `addons`: configure optional features like @-mentions
 - `heightBehavior`: switch between internal scrolling and auto-grow
 
-For setup and customization details, start with the [Documentation Index](https://github.com/apollohg/react-native-prose-editor/wiki).
+For setup and customization details, start with the [Documentation Index](https://github.com/naaiyy/react-native-prose-editor/wiki).
 
-For realtime collaboration, including the correct `useYjsCollaboration()` wiring, encoded-state persistence, remote cursors, and automatic reconnect behavior, see the [Collaboration Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Collaboration).
+For realtime collaboration, including the correct `useYjsCollaboration()` wiring, encoded-state persistence, remote cursors, and automatic reconnect behavior, see the [Collaboration Guide](https://github.com/naaiyy/react-native-prose-editor/wiki/Collaboration).
 
 For whole-document JSON loads, `initialJSON`, controlled `valueJSON`, and `setContentJson()` will normalize an empty root document like `{ type: 'doc', content: [] }` to the active schema's empty text block so block-constrained schemas still load a valid empty document. For chat composer or draft-reset flows, prefer the ref method `clearContent()`.
 
@@ -175,17 +175,17 @@ npm run ios:test:perf:device
 
 ## Documentation
 
-Documentation is published in the [GitHub Wiki](https://github.com/apollohg/react-native-prose-editor/wiki).
+Documentation is published in the [GitHub Wiki](https://github.com/naaiyy/react-native-prose-editor/wiki).
 
-- [Documentation Index](https://github.com/apollohg/react-native-prose-editor/wiki): main documentation index
-- [Installation Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Installation): installation and local setup
-- [Getting Started](https://github.com/apollohg/react-native-prose-editor/wiki/Getting-Started): first setup and first editor
-- [Collaboration Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Collaboration): Yjs collaboration wiring, source-of-truth rules, and persistence
-- [Toolbar Setup](https://github.com/apollohg/react-native-prose-editor/wiki/Toolbar-Setup): toolbar setup patterns and examples
-- [Mentions Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Mentions): @-mentions addon setup and configuration
-- [Styling Guide](https://github.com/apollohg/react-native-prose-editor/wiki/Styling): content, toolbar, and mention styling
-- [NativeRichTextEditor Reference](https://github.com/apollohg/react-native-prose-editor/wiki/NativeRichTextEditor-Reference): component props and ref methods
-- [Design Decisions](https://github.com/apollohg/react-native-prose-editor/wiki/Design-Decisions): rationale for key API and architecture decisions
+- [Documentation Index](https://github.com/naaiyy/react-native-prose-editor/wiki): main documentation index
+- [Installation Guide](https://github.com/naaiyy/react-native-prose-editor/wiki/Installation): installation and local setup
+- [Getting Started](https://github.com/naaiyy/react-native-prose-editor/wiki/Getting-Started): first setup and first editor
+- [Collaboration Guide](https://github.com/naaiyy/react-native-prose-editor/wiki/Collaboration): Yjs collaboration wiring, source-of-truth rules, and persistence
+- [Toolbar Setup](https://github.com/naaiyy/react-native-prose-editor/wiki/Toolbar-Setup): toolbar setup patterns and examples
+- [Mentions Guide](https://github.com/naaiyy/react-native-prose-editor/wiki/Mentions): @-mentions addon setup and configuration
+- [Styling Guide](https://github.com/naaiyy/react-native-prose-editor/wiki/Styling): content, toolbar, and mention styling
+- [NativeRichTextEditor Reference](https://github.com/naaiyy/react-native-prose-editor/wiki/NativeRichTextEditor-Reference): component props and ref methods
+- [Design Decisions](https://github.com/naaiyy/react-native-prose-editor/wiki/Design-Decisions): rationale for key API and architecture decisions
 
 ## Project Status
 

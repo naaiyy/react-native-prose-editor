@@ -1,4 +1,4 @@
-package com.apollohg.editor
+package com.openeditor.editor
 
 enum class EditorHeightBehavior {
     FIXED,

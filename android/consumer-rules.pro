@@ -10,7 +10,7 @@
 
 # Preserve native editor View class names in consuming release builds so Android
 # framework ViewGroup crashes identify the owning component in crash reporters.
--keepnames class com.apollohg.editor.** extends android.view.View
+-keepnames class com.openeditor.editor.** extends android.view.View
 
 # JNA inspects Library interfaces and Structure fields reflectively. These
 # member rules make that contract explicit for ProGuard/R8 consumers.

@@ -1,15 +1,15 @@
 {
-    "name": "@apollohg/react-native-prose-editor",
-    "version": "0.5.24",
-    "description": "Native rich text editor with Rust core for React Native",
+    "name": "@openeditor/react-native-prose-editor",
+    "version": "0.0.1",
+    "description": "OpenEditor-owned native rich text editor engine for React Native",
     "license": "Apache-2.0",
-    "homepage": "https://github.com/apollohg/react-native-prose-editor",
+    "homepage": "https://github.com/naaiyy/react-native-prose-editor",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/apollohg/react-native-prose-editor.git"
+        "url": "git+https://github.com/naaiyy/react-native-prose-editor.git"
     },
     "bugs": {
-        "url": "https://github.com/apollohg/react-native-prose-editor/issues"
+        "url": "https://github.com/naaiyy/react-native-prose-editor/issues"
     },
     "main": "dist/index.js",
     "module": "dist/index.js",
@@ -38,12 +38,12 @@
         "sync:version": "node scripts/sync-version.mjs",
         "publish:prepare": "bash ./scripts/prepare-publish.sh",
         "version": "node scripts/sync-version.mjs",
-        "android:compile": "cd example/android && ./gradlew :apollohg-react-native-prose-editor:compileDebugKotlin",
-        "android:test": "cd example/android && ./gradlew :apollohg-react-native-prose-editor:testDebugUnitTest",
-        "android:test:perf": "cd example/android && ./gradlew :apollohg-react-native-prose-editor:testDebugUnitTest -PapollohgShowPerfTestOutput=true --tests com.apollohg.editor.NativePerformanceTest",
+        "android:compile": "cd example/android && ./gradlew :openeditor-react-native-prose-editor:compileDebugKotlin",
+        "android:test": "cd example/android && ./gradlew :openeditor-react-native-prose-editor:testDebugUnitTest",
+        "android:test:perf": "cd example/android && ./gradlew :openeditor-react-native-prose-editor:testDebugUnitTest -PopeneditorShowPerfTestOutput=true --tests com.openeditor.editor.NativePerformanceTest",
         "android:test:device": "bash ./scripts/run-android-on-device.sh",
-        "android:test:ime:device": "bash ./scripts/run-android-on-device.sh --class com.apollohg.editor.NativeDeviceImeRegressionTest",
-        "android:test:perf:device": "bash ./scripts/run-android-on-device.sh --class com.apollohg.editor.NativeDevicePerformanceTest",
+        "android:test:ime:device": "bash ./scripts/run-android-on-device.sh --class com.openeditor.editor.NativeDeviceImeRegressionTest",
+        "android:test:perf:device": "bash ./scripts/run-android-on-device.sh --class com.openeditor.editor.NativeDevicePerformanceTest",
         "ios:test": "bash ./scripts/run-ios-tests.sh",
         "ios:test:perf": "bash ./scripts/run-ios-tests.sh -only-testing:NativeEditorTests/NativePerformanceTests",
         "ios:test:device": "bash ./scripts/run-ios-on-device.sh",

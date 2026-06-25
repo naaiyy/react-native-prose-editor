@@ -5,7 +5,7 @@ import type {
     EditorToolbarTheme,
     NativeRichTextEditorHeightBehavior,
     NativeRichTextEditorToolbarPlacement,
-} from '@apollohg/react-native-prose-editor';
+} from '@openeditor/react-native-prose-editor';
 import type { ToolbarColorKey } from '../constants';
 import type { ExampleThemePreset } from '../themePresets';
 import { CollapsibleSection } from './CollapsibleSection';
