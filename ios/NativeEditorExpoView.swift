@@ -1943,7 +1943,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     let onSelectionChange = EventDispatcher()
     let onFocusChange = EventDispatcher()
     let onContentHeightChange = EventDispatcher()
-    let onKeyPress = EventDispatcher()
+    let onBackspaceAtStart = EventDispatcher()
     let onToolbarAction = EventDispatcher()
     let onAddonEvent = EventDispatcher()
     private var lastEmittedContentHeight: CGFloat = 0
@@ -2784,11 +2784,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     }
 
     func editorTextViewDidPressBackspaceAtStartOnEmptyContent(_ textView: EditorTextView) {
-        onKeyPress([
-            "key": "Backspace",
-            "editorId": richTextView.editorId,
-            "isEmpty": true,
-        ])
+        onBackspaceAtStart()
     }
 
     @discardableResult

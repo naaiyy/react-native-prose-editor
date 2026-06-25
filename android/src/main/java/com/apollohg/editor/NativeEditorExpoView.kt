@@ -603,7 +603,7 @@ class NativeEditorExpoView(
     private val onContentHeightChange by EventDispatcher<Map<String, Any>>()
     private val onEditorReady by EventDispatcher<Map<String, Any>>()
     @Suppress("unused")
-    private val onKeyPress by EventDispatcher<Map<String, Any>>()
+    private val onBackspaceAtStart by EventDispatcher<Unit>()
     @Suppress("unused")
     private val onToolbarAction by EventDispatcher<Map<String, Any>>()
     @Suppress("unused")
@@ -2246,13 +2246,7 @@ class NativeEditorExpoView(
     }
 
     override fun onBackspaceAtStartOnEmptyContent() {
-        onKeyPress(
-            mapOf(
-                "key" to "Backspace",
-                "editorId" to richTextView.editorId,
-                "isEmpty" to true
-            )
-        )
+        onBackspaceAtStart(Unit)
     }
 
     internal fun pendingEditorUpdateEventCountForTesting(): Int =

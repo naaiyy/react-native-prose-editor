@@ -103,7 +103,7 @@ interface NativeEditorViewProps {
     onFocusChange: (event: NativeSyntheticEvent<NativeFocusEvent>) => void;
     onContentHeightChange: (event: NativeSyntheticEvent<NativeContentHeightEvent>) => void;
     onEditorReady?: (event: NativeSyntheticEvent<NativeEditorReadyEvent>) => void;
-    onKeyPress?: (event: NativeSyntheticEvent<NativeKeyPressEvent>) => void;
+    onBackspaceAtStart?: () => void;
     onToolbarAction: (event: NativeSyntheticEvent<NativeToolbarActionEvent>) => void;
     onAddonEvent: (event: NativeSyntheticEvent<NativeAddonEvent>) => void;
 }
@@ -704,12 +704,6 @@ interface NativeContentHeightEvent {
 interface NativeEditorReadyEvent {
     editorId?: number;
     editorUpdateRevision?: number;
-}
-
-interface NativeKeyPressEvent {
-    key: string;
-    editorId?: number;
-    isEmpty?: boolean;
 }
 
 interface NativeToolbarActionEvent {
@@ -2903,16 +2897,6 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             ]
         );
 
-        const handleKeyPress = useCallback(
-            (event: NativeSyntheticEvent<NativeKeyPressEvent>) => {
-                if (!isCurrentNativeEditorEvent(event.nativeEvent, bridgeRef.current)) return;
-                if (event.nativeEvent.key === 'Backspace' && event.nativeEvent.isEmpty === true) {
-                    onBackspaceAtStartRef.current?.();
-                }
-            },
-            []
-        );
-
         const resolveMentionSelectionAttrs = useCallback(
             (selectionEvent: MentionSelectionAttrsEvent): Record<string, unknown> => {
                 let resolvedAttrs: Record<string, unknown> | null | undefined;
@@ -3776,7 +3760,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     onFocusChange={handleFocusChange}
                     onContentHeightChange={handleContentHeightChange}
                     {...(Platform.OS === 'android' ? { onEditorReady: handleEditorReady } : {})}
-                    onKeyPress={handleKeyPress}
+                    onBackspaceAtStart={() => onBackspaceAtStartRef.current?.()}
                     onToolbarAction={handleToolbarAction}
                     onAddonEvent={handleAddonEvent}
                 />

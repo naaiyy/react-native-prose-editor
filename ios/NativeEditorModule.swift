@@ -520,7 +520,7 @@ public class NativeEditorModule: Module {
                 "onSelectionChange",
                 "onFocusChange",
                 "onContentHeightChange",
-                "onKeyPress",
+                "onBackspaceAtStart",
                 "onToolbarAction",
                 "onAddonEvent"
             )
