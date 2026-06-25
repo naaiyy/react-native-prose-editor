@@ -2050,7 +2050,6 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     let onSelectionChange = EventDispatcher()
     let onFocusChange = EventDispatcher()
     let onContentHeightChange = EventDispatcher()
-    let onBackspaceAtStart = EventDispatcher()
     let onToolbarAction = EventDispatcher()
     let onAddonEvent = EventDispatcher()
     private var lastEmittedContentHeight: CGFloat = 0
@@ -2888,10 +2887,6 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         richTextView.refreshRemoteSelections()
         guard !isApplyingJSUpdate else { return }
         onEditorUpdate(["updateJson": updateJSON])
-    }
-
-    func editorTextViewDidPressBackspaceAtStartOnEmptyContent(_ textView: EditorTextView) {
-        onBackspaceAtStart()
     }
 
     @discardableResult

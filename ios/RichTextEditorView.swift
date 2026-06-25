@@ -19,9 +19,6 @@ protocol EditorTextViewDelegate: AnyObject {
     ///   - updateJSON: The full EditorUpdate JSON string from Rust.
     func editorTextView(_ textView: EditorTextView, didReceiveUpdate updateJSON: String)
 
-    /// Called when the user presses Backspace at the start of an empty editor block.
-    /// - Parameter textView: The editor text view.
-    func editorTextViewDidPressBackspaceAtStartOnEmptyContent(_ textView: EditorTextView)
 }
 
 enum EditorHeightBehavior: String {
@@ -2094,11 +2091,6 @@ final class EditorTextView: UITextView, UIGestureRecognizerDelegate {
             }
         } else {
             // Cursor: delete one grapheme cluster backward.
-            if isRenderedContentEmpty() {
-                editorDelegate?.editorTextViewDidPressBackspaceAtStartOnEmptyContent(self)
-                return
-            }
-
             let cursorPos = PositionBridge.textViewToScalar(selectedRange.start, in: self)
             if cursorPos == 0 {
                 performInterceptedInput {

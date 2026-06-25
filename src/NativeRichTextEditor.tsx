@@ -103,7 +103,6 @@ interface NativeEditorViewProps {
     onFocusChange: (event: NativeSyntheticEvent<NativeFocusEvent>) => void;
     onContentHeightChange: (event: NativeSyntheticEvent<NativeContentHeightEvent>) => void;
     onEditorReady?: (event: NativeSyntheticEvent<NativeEditorReadyEvent>) => void;
-    onBackspaceAtStart?: () => void;
     onToolbarAction: (event: NativeSyntheticEvent<NativeToolbarActionEvent>) => void;
     onAddonEvent: (event: NativeSyntheticEvent<NativeAddonEvent>) => void;
 }
@@ -986,8 +985,6 @@ export interface NativeRichTextEditorProps {
     onFocus?: () => void;
     /** Called when the editor loses focus. */
     onBlur?: () => void;
-    /** Called when Backspace is pressed at the start of an empty editor block. */
-    onBackspaceAtStart?: () => void;
     /** Style applied to the native editor view. */
     style?: StyleProp<ViewStyle>;
     /** Style applied to the outer React container wrapping the editor and inline toolbar. */
@@ -1165,7 +1162,6 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             onHistoryStateChange,
             onFocus,
             onBlur,
-            onBackspaceAtStart,
             style,
             containerStyle,
             theme,
@@ -1317,8 +1313,6 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         onFocusRef.current = onFocus;
         const onBlurRef = useRef(onBlur);
         onBlurRef.current = onBlur;
-        const onBackspaceAtStartRef = useRef(onBackspaceAtStart);
-        onBackspaceAtStartRef.current = onBackspaceAtStart;
         const addonsRef = useRef(addons);
         addonsRef.current = addons;
         const currentLinkHref =
@@ -3762,7 +3756,6 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     onFocusChange={handleFocusChange}
                     onContentHeightChange={handleContentHeightChange}
                     {...(Platform.OS === 'android' ? { onEditorReady: handleEditorReady } : {})}
-                    onBackspaceAtStart={() => onBackspaceAtStartRef.current?.()}
                     onToolbarAction={handleToolbarAction}
                     onAddonEvent={handleAddonEvent}
                 />

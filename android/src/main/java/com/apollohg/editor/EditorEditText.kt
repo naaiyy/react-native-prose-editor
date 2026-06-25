@@ -193,9 +193,6 @@ class EditorEditText @JvmOverloads constructor(
 
         /** Called when the editor content is updated after a Rust operation. */
         fun onEditorUpdate(updateJSON: String)
-
-        /** Called when the user presses Backspace at the start of an empty editor block. */
-        fun onBackspaceAtStartOnEmptyContent()
     }
 
     /** The Rust editor instance ID (from editor_create / editor_create_with_max_length). */
@@ -2017,10 +2014,6 @@ class EditorEditText @JvmOverloads constructor(
             val (scalarStart, scalarEnd) = normalizedScalarSelectionRange(currentText) ?: return
             deleteRangeInRust(scalarStart, scalarEnd)
         } else if (start > 0) {
-            if (isRenderedContentEmpty(currentText)) {
-                editorListener?.onBackspaceAtStartOnEmptyContent()
-                return
-            }
             if (currentText.getOrNull(start - 1) == EMPTY_BLOCK_PLACEHOLDER) {
                 val scalarCursor = PositionBridge.utf16ToScalar(start, currentText)
                 deleteBackwardAtSelectionScalarInRust(scalarCursor, scalarCursor)
@@ -2041,10 +2034,6 @@ class EditorEditText @JvmOverloads constructor(
                 deleteBackwardAtSelectionScalarInRust(scalarEnd, scalarEnd)
             }
         } else {
-            if (isRenderedContentEmpty(currentText)) {
-                editorListener?.onBackspaceAtStartOnEmptyContent()
-                return
-            }
             deleteBackwardAtSelectionScalarInRust(0, 0)
         }
     }
