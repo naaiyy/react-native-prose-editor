@@ -1239,9 +1239,7 @@ final class EditorAccessoryToolbarView: UIInputView {
             stackView.removeArrangedSubview(arrangedSubview)
             arrangedSubview.removeFromSuperview()
         }
-
         let visibleItems = visibleToolbarItems()
-
         for item in visibleItems {
             if item.type == .separator {
                 stackView.addArrangedSubview(makeSeparator())
@@ -1908,6 +1906,7 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
     let onSelectionChange = EventDispatcher()
     let onFocusChange = EventDispatcher()
     let onContentHeightChange = EventDispatcher()
+    let onBackspaceAtStart = EventDispatcher()
     let onToolbarAction = EventDispatcher()
     let onAddonEvent = EventDispatcher()
     private var lastEmittedContentHeight: CGFloat = 0
@@ -2373,6 +2372,10 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         richTextView.textView.setKeyboardType(keyboardType)
     }
 
+    func setKeyboardAppearance(_ keyboardAppearance: String?) {
+        richTextView.textView.setKeyboardAppearance(keyboardAppearance)
+    }
+
     func setShowToolbar(_ showToolbar: Bool) {
         showsToolbar = showToolbar
         updateAccessoryToolbarVisibility()
@@ -2741,6 +2744,10 @@ class NativeEditorExpoView: ExpoView, EditorTextViewDelegate, UIGestureRecognize
         richTextView.refreshRemoteSelections()
         guard !isApplyingJSUpdate else { return }
         onEditorUpdate(["updateJson": updateJSON])
+    }
+
+    func editorTextViewDidPressBackspaceAtStartOnEmptyContent(_ textView: EditorTextView) {
+        onBackspaceAtStart()
     }
 
     @discardableResult

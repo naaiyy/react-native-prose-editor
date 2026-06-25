@@ -82,6 +82,7 @@ interface NativeEditorViewProps {
     autoCapitalize?: NativeRichTextEditorAutoCapitalize;
     autoCorrect?: boolean;
     keyboardType?: NativeRichTextEditorKeyboardType;
+    keyboardAppearance?: NativeRichTextEditorKeyboardAppearance;
     showToolbar: boolean;
     toolbarPlacement: NativeRichTextEditorToolbarPlacement;
     heightBehavior: NativeRichTextEditorHeightBehavior;
@@ -102,6 +103,7 @@ interface NativeEditorViewProps {
     onFocusChange: (event: NativeSyntheticEvent<NativeFocusEvent>) => void;
     onContentHeightChange: (event: NativeSyntheticEvent<NativeContentHeightEvent>) => void;
     onEditorReady?: (event: NativeSyntheticEvent<NativeEditorReadyEvent>) => void;
+    onBackspaceAtStart?: () => void;
     onToolbarAction: (event: NativeSyntheticEvent<NativeToolbarActionEvent>) => void;
     onAddonEvent: (event: NativeSyntheticEvent<NativeAddonEvent>) => void;
 }
@@ -887,6 +889,7 @@ export type NativeRichTextEditorKeyboardType =
     | 'web-search'
     | 'visible-password'
     | 'ascii-capable-number-pad';
+export type NativeRichTextEditorKeyboardAppearance = 'default' | 'light' | 'dark';
 
 export interface RemoteSelectionDecoration {
     clientId: number;
@@ -945,6 +948,8 @@ export interface NativeRichTextEditorProps {
     autoCorrect?: boolean;
     /** Controls the native keyboard layout. Defaults to the platform default keyboard. */
     keyboardType?: NativeRichTextEditorKeyboardType;
+    /** Controls the native keyboard appearance. */
+    keyboardAppearance?: NativeRichTextEditorKeyboardAppearance;
     /** Controls whether the editor scrolls internally or grows with content. */
     heightBehavior?: NativeRichTextEditorHeightBehavior;
     /** Whether to show the formatting toolbar. Defaults to true. */
@@ -979,6 +984,8 @@ export interface NativeRichTextEditorProps {
     onFocus?: () => void;
     /** Called when the editor loses focus. */
     onBlur?: () => void;
+    /** Called when Backspace is pressed at the start of an empty editor block. */
+    onBackspaceAtStart?: () => void;
     /** Style applied to the native editor view. */
     style?: StyleProp<ViewStyle>;
     /** Style applied to the outer React container wrapping the editor and inline toolbar. */
@@ -1140,6 +1147,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             autoCapitalize,
             autoCorrect,
             keyboardType,
+            keyboardAppearance,
             heightBehavior = 'autoGrow',
             showToolbar = true,
             toolbarPlacement = 'keyboard',
@@ -1155,6 +1163,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
             onHistoryStateChange,
             onFocus,
             onBlur,
+            onBackspaceAtStart,
             style,
             containerStyle,
             theme,
@@ -1306,6 +1315,8 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
         onFocusRef.current = onFocus;
         const onBlurRef = useRef(onBlur);
         onBlurRef.current = onBlur;
+        const onBackspaceAtStartRef = useRef(onBackspaceAtStart);
+        onBackspaceAtStartRef.current = onBackspaceAtStart;
         const addonsRef = useRef(addons);
         addonsRef.current = addons;
         const currentLinkHref =
@@ -3728,6 +3739,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     autoCapitalize={autoCapitalize}
                     autoCorrect={autoCorrect}
                     keyboardType={keyboardType}
+                    keyboardAppearance={keyboardAppearance}
                     showToolbar={showToolbar}
                     toolbarPlacement={toolbarPlacement}
                     heightBehavior={heightBehavior}
@@ -3748,6 +3760,7 @@ export const NativeRichTextEditor = forwardRef<NativeRichTextEditorRef, NativeRi
                     onFocusChange={handleFocusChange}
                     onContentHeightChange={handleContentHeightChange}
                     {...(Platform.OS === 'android' ? { onEditorReady: handleEditorReady } : {})}
+                    onBackspaceAtStart={() => onBackspaceAtStartRef.current?.()}
                     onToolbarAction={handleToolbarAction}
                     onAddonEvent={handleAddonEvent}
                 />
