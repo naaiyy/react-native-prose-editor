@@ -136,6 +136,12 @@ internal enum class ToolbarGroupPresentation {
     menu,
 }
 
+internal enum class ToolbarItemPlacement {
+    start,
+    scroll,
+    end,
+}
+
 internal data class NativeToolbarIcon(
     val defaultId: ToolbarDefaultIconId? = null,
     val glyphText: String? = null,
@@ -317,6 +323,7 @@ internal data class NativeToolbarItem(
     val nodeType: String? = null,
     val isActive: Boolean = false,
     val isDisabled: Boolean = false,
+    val placement: ToolbarItemPlacement? = null,
     val presentation: ToolbarGroupPresentation? = null,
     val items: List<NativeToolbarItem> = emptyList(),
     val parentGroupKey: String? = null
@@ -354,26 +361,58 @@ internal data class NativeToolbarItem(
                     if (!allowSeparator) {
                         null
                     } else {
-                        NativeToolbarItem(type = type, key = key)
+                        NativeToolbarItem(
+                            type = type,
+                            key = key,
+                            placement = rawItem.optNullableString("placement")?.let {
+                                runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                            }
+                        )
                     }
                 }
                 ToolbarItemKind.mark -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
                     val mark = rawItem.optNullableString("mark") ?: return null
                     val label = rawItem.optNullableString("label") ?: return null
-                    NativeToolbarItem(type, key, label, icon, mark = mark)
+                    NativeToolbarItem(
+                        type,
+                        key,
+                        label,
+                        icon,
+                        mark = mark,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        }
+                    )
                 }
                 ToolbarItemKind.heading -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
                     val level = rawItem.optInt("level", -1)
                     if (level !in 1..6) return null
                     val label = rawItem.optNullableString("label") ?: return null
-                    NativeToolbarItem(type, key, label, icon, headingLevel = level)
+                    NativeToolbarItem(
+                        type,
+                        key,
+                        label,
+                        icon,
+                        headingLevel = level,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        }
+                    )
                 }
                 ToolbarItemKind.blockquote -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
                     val label = rawItem.optNullableString("label") ?: return null
-                    NativeToolbarItem(type, key, label, icon)
+                    NativeToolbarItem(
+                        type,
+                        key,
+                        label,
+                        icon,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        }
+                    )
                 }
                 ToolbarItemKind.list -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
@@ -381,7 +420,16 @@ internal data class NativeToolbarItem(
                         ToolbarListType.valueOf(rawItem.getString("listType"))
                     }.getOrNull() ?: return null
                     val label = rawItem.optNullableString("label") ?: return null
-                    NativeToolbarItem(type, key, label, icon, listType = listType)
+                    NativeToolbarItem(
+                        type,
+                        key,
+                        label,
+                        icon,
+                        listType = listType,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        }
+                    )
                 }
                 ToolbarItemKind.command -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
@@ -389,13 +437,31 @@ internal data class NativeToolbarItem(
                         ToolbarCommand.valueOf(rawItem.getString("command"))
                     }.getOrNull() ?: return null
                     val label = rawItem.optNullableString("label") ?: return null
-                    NativeToolbarItem(type, key, label, icon, command = command)
+                    NativeToolbarItem(
+                        type,
+                        key,
+                        label,
+                        icon,
+                        command = command,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        }
+                    )
                 }
                 ToolbarItemKind.node -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
                     val nodeType = rawItem.optNullableString("nodeType") ?: return null
                     val label = rawItem.optNullableString("label") ?: return null
-                    NativeToolbarItem(type, key, label, icon, nodeType = nodeType)
+                    NativeToolbarItem(
+                        type,
+                        key,
+                        label,
+                        icon,
+                        nodeType = nodeType,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        }
+                    )
                 }
                 ToolbarItemKind.action -> {
                     val icon = NativeToolbarIcon.fromJson(rawItem.optJSONObject("icon")) ?: return null
@@ -406,6 +472,9 @@ internal data class NativeToolbarItem(
                         key = keyValue,
                         label = label,
                         icon = icon,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        },
                         isActive = rawItem.optBoolean("isActive", false),
                         isDisabled = rawItem.optBoolean("isDisabled", false)
                     )
@@ -432,6 +501,9 @@ internal data class NativeToolbarItem(
                         key = keyValue,
                         label = label,
                         icon = icon,
+                        placement = rawItem.optNullableString("placement")?.let {
+                            runCatching { ToolbarItemPlacement.valueOf(it) }.getOrNull()
+                        },
                         presentation = presentation,
                         items = children
                     )
@@ -476,7 +548,11 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
     var onSelectMentionSuggestion: ((NativeMentionSuggestion) -> Unit)? = null
 
     private val themedContext: Context = DynamicColors.wrapContextIfAvailable(context)
+    private val rootRow = LinearLayout(context)
+    private val startRow = LinearLayout(context)
+    private val centerScrollView = HorizontalScrollView(context)
     private val contentRow = LinearLayout(context)
+    private val endRow = LinearLayout(context)
     private var theme: EditorToolbarTheme? = null
     private var mentionTheme: EditorMentionTheme? = null
     private var state: NativeToolbarState = NativeToolbarState.empty
@@ -512,13 +588,50 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
         clipChildren = false
         isFillViewport = true
 
+        rootRow.orientation = LinearLayout.HORIZONTAL
+        rootRow.gravity = Gravity.CENTER_VERTICAL
+        rootRow.clipToPadding = false
+        rootRow.clipChildren = false
+        startRow.orientation = LinearLayout.HORIZONTAL
+        startRow.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        endRow.orientation = LinearLayout.HORIZONTAL
+        endRow.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        centerScrollView.isHorizontalScrollBarEnabled = false
+        centerScrollView.overScrollMode = OVER_SCROLL_NEVER
+        centerScrollView.clipToPadding = false
+        centerScrollView.clipChildren = false
         contentRow.orientation = LinearLayout.HORIZONTAL
         contentRow.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        contentRow.setPadding(dp(12))
         contentRow.clipToPadding = false
         contentRow.clipChildren = false
-        addView(
+        centerScrollView.addView(
             contentRow,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        )
+        rootRow.addView(
+            startRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        rootRow.addView(
+            centerScrollView,
+            LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+        rootRow.addView(
+            endRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        addView(
+            rootRow,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
         )
         rebuildContent(preserveScrollPosition = false)
@@ -595,15 +708,20 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
         separators.getOrNull(index)
 
     private fun rebuildContent(preserveScrollPosition: Boolean = true) {
-        val targetScrollX = if (preserveScrollPosition) scrollX else 0
+        val targetScrollX = if (preserveScrollPosition) centerScrollView.scrollX else 0
         val generation = ++rebuildGeneration
         bindings.clear()
         separators.clear()
         mentionChips.clear()
         contentRow.removeAllViews()
+        startRow.removeAllViews()
+        endRow.removeAllViews()
 
         if (isShowingMentionSuggestions) {
+            val visibleItems = visibleItemsByPlacement()
+            rebuildButtonPlacement(visibleItems.start, startRow)
             rebuildMentionSuggestions()
+            rebuildButtonPlacement(visibleItems.end, endRow)
         } else {
             rebuildButtons()
         }
@@ -612,20 +730,27 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
         applyState(state)
         post {
             if (generation != rebuildGeneration) return@post
-            val contentWidth = getChildAt(0)?.width ?: 0
-            val viewportWidth = (width - paddingLeft - paddingRight).coerceAtLeast(0)
+            val contentWidth = contentRow.width
+            val viewportWidth = (centerScrollView.width - centerScrollView.paddingLeft - centerScrollView.paddingRight).coerceAtLeast(0)
             val maxScrollX = (contentWidth - viewportWidth).coerceAtLeast(0)
-            scrollTo(targetScrollX.coerceIn(0, maxScrollX), 0)
+            centerScrollView.scrollTo(targetScrollX.coerceIn(0, maxScrollX), 0)
         }
     }
 
     private fun rebuildButtons() {
-        for (item in visibleItems()) {
+        val visibleItems = visibleItemsByPlacement()
+        rebuildButtonPlacement(visibleItems.start, startRow)
+        rebuildButtonPlacement(visibleItems.scroll, contentRow)
+        rebuildButtonPlacement(visibleItems.end, endRow)
+    }
+
+    private fun rebuildButtonPlacement(items: List<NativeToolbarItem>, container: LinearLayout) {
+        for (item in items) {
             if (item.type == ToolbarItemKind.separator) {
                 val separator = View(context)
                 configureSeparator(separator)
                 separators.add(separator)
-                contentRow.addView(separator)
+                container.addView(separator)
                 continue
             }
 
@@ -665,7 +790,7 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
             button.layoutParams = params
             applyButtonLayout(button, appearance = theme?.appearance ?: EditorToolbarAppearance.CUSTOM)
             bindings.add(ButtonBinding(item, button))
-            contentRow.addView(button)
+            container.addView(button)
         }
     }
 
@@ -705,10 +830,36 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
                     (item.presentation ?: ToolbarGroupPresentation.expand) == ToolbarGroupPresentation.expand &&
                     expandedGroupKey == item.key
             ) {
-                visible += item.items.map { child -> child.copy(parentGroupKey = item.key) }
+                visible += item.items.map { child ->
+                    child.copy(parentGroupKey = item.key, placement = child.placement ?: item.placement)
+                }
             }
         }
         return compactItems(visible)
+    }
+
+    private data class VisibleToolbarItemsByPlacement(
+        val start: List<NativeToolbarItem>,
+        val scroll: List<NativeToolbarItem>,
+        val end: List<NativeToolbarItem>
+    )
+
+    private fun visibleItemsByPlacement(): VisibleToolbarItemsByPlacement {
+        val start = mutableListOf<NativeToolbarItem>()
+        val scroll = mutableListOf<NativeToolbarItem>()
+        val end = mutableListOf<NativeToolbarItem>()
+        for (item in visibleItems()) {
+            when (item.placement ?: ToolbarItemPlacement.scroll) {
+                ToolbarItemPlacement.start -> start += item
+                ToolbarItemPlacement.end -> end += item
+                ToolbarItemPlacement.scroll -> scroll += item
+            }
+        }
+        return VisibleToolbarItemsByPlacement(
+            start = compactItems(start),
+            scroll = compactItems(scroll),
+            end = compactItems(end)
+        )
     }
 
     private fun containsExpandableGroup(items: List<NativeToolbarItem>, key: String?): Boolean {
@@ -990,13 +1141,11 @@ internal class EditorKeyboardToolbarView(context: Context) : HorizontalScrollVie
             }
         )
         val verticalPadding = dp(resolvedVerticalPaddingDp(isNative, toolbarHeightDp, buttonSizeDp).roundToInt())
-        contentRow.setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding)
-        contentRow.gravity = if (isNative) {
-            Gravity.START or Gravity.CENTER_VERTICAL
-        } else {
-            Gravity.CENTER_VERTICAL
-        }
-        contentRow.minimumHeight = dp(toolbarHeightDp.roundToInt())
+        rootRow.setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding)
+        rootRow.minimumHeight = dp(toolbarHeightDp.roundToInt())
+        startRow.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        contentRow.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        endRow.gravity = Gravity.END or Gravity.CENTER_VERTICAL
     }
 
     private fun applyButtonLayout(button: AppCompatButton, appearance: EditorToolbarAppearance) {

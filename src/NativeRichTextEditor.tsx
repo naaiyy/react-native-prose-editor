@@ -134,6 +134,7 @@ function mapToolbarChildForNative(
             key: LINK_TOOLBAR_ACTION_KEY,
             label: item.label,
             icon: item.icon as EditorToolbarIcon,
+            placement: item.placement,
             isActive: activeState.marks.link === true,
             isDisabled: !editable || !onRequestLink || !activeState.allowedMarks.includes('link'),
         };
@@ -144,6 +145,7 @@ function mapToolbarChildForNative(
             key: IMAGE_TOOLBAR_ACTION_KEY,
             label: item.label,
             icon: item.icon as EditorToolbarIcon,
+            placement: item.placement,
             isActive: false,
             isDisabled:
                 !editable ||

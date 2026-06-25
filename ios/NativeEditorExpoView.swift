@@ -233,6 +233,12 @@ private enum ToolbarGroupPresentation: String {
     case menu
 }
 
+private enum ToolbarItemPlacement: String {
+    case start
+    case scroll
+    case end
+}
+
 private struct NativeToolbarIcon {
     let defaultId: ToolbarDefaultIconId?
     let glyphText: String?
@@ -376,26 +382,27 @@ private struct NativeToolbarItem {
     let nodeType: String?
     let isActive: Bool
     let isDisabled: Bool
+    let placement: ToolbarItemPlacement?
     let presentation: ToolbarGroupPresentation?
     let items: [NativeToolbarItem]
     let parentGroupKey: String?
 
     static let defaults: [NativeToolbarItem] = [
-        NativeToolbarItem(type: .mark, key: nil, label: "Bold", icon: .defaultIcon(.bold), mark: "bold", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .mark, key: nil, label: "Italic", icon: .defaultIcon(.italic), mark: "italic", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .mark, key: nil, label: "Underline", icon: .defaultIcon(.underline), mark: "underline", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .mark, key: nil, label: "Strikethrough", icon: .defaultIcon(.strike), mark: "strike", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .blockquote, key: nil, label: "Blockquote", icon: .defaultIcon(.blockquote), mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .separator, key: nil, label: nil, icon: nil, mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .list, key: nil, label: "Bullet List", icon: .defaultIcon(.bulletList), mark: nil, headingLevel: nil, listType: .bulletList, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .list, key: nil, label: "Ordered List", icon: .defaultIcon(.orderedList), mark: nil, headingLevel: nil, listType: .orderedList, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .command, key: nil, label: "Indent List", icon: .defaultIcon(.indentList), mark: nil, headingLevel: nil, listType: nil, command: .indentList, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .command, key: nil, label: "Outdent List", icon: .defaultIcon(.outdentList), mark: nil, headingLevel: nil, listType: nil, command: .outdentList, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .node, key: nil, label: "Line Break", icon: .defaultIcon(.lineBreak), mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: "hardBreak", isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .node, key: nil, label: "Horizontal Rule", icon: .defaultIcon(.horizontalRule), mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: "horizontalRule", isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .separator, key: nil, label: nil, icon: nil, mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .command, key: nil, label: "Undo", icon: .defaultIcon(.undo), mark: nil, headingLevel: nil, listType: nil, command: .undo, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
-        NativeToolbarItem(type: .command, key: nil, label: "Redo", icon: .defaultIcon(.redo), mark: nil, headingLevel: nil, listType: nil, command: .redo, nodeType: nil, isActive: false, isDisabled: false, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .mark, key: nil, label: "Bold", icon: .defaultIcon(.bold), mark: "bold", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .mark, key: nil, label: "Italic", icon: .defaultIcon(.italic), mark: "italic", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .mark, key: nil, label: "Underline", icon: .defaultIcon(.underline), mark: "underline", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .mark, key: nil, label: "Strikethrough", icon: .defaultIcon(.strike), mark: "strike", headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .blockquote, key: nil, label: "Blockquote", icon: .defaultIcon(.blockquote), mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .separator, key: nil, label: nil, icon: nil, mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .list, key: nil, label: "Bullet List", icon: .defaultIcon(.bulletList), mark: nil, headingLevel: nil, listType: .bulletList, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .list, key: nil, label: "Ordered List", icon: .defaultIcon(.orderedList), mark: nil, headingLevel: nil, listType: .orderedList, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .command, key: nil, label: "Indent List", icon: .defaultIcon(.indentList), mark: nil, headingLevel: nil, listType: nil, command: .indentList, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .command, key: nil, label: "Outdent List", icon: .defaultIcon(.outdentList), mark: nil, headingLevel: nil, listType: nil, command: .outdentList, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .node, key: nil, label: "Line Break", icon: .defaultIcon(.lineBreak), mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: "hardBreak", isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .node, key: nil, label: "Horizontal Rule", icon: .defaultIcon(.horizontalRule), mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: "horizontalRule", isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .separator, key: nil, label: nil, icon: nil, mark: nil, headingLevel: nil, listType: nil, command: nil, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .command, key: nil, label: "Undo", icon: .defaultIcon(.undo), mark: nil, headingLevel: nil, listType: nil, command: .undo, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
+        NativeToolbarItem(type: .command, key: nil, label: "Redo", icon: .defaultIcon(.redo), mark: nil, headingLevel: nil, listType: nil, command: .redo, nodeType: nil, isActive: false, isDisabled: false, placement: nil, presentation: nil, items: [], parentGroupKey: nil),
     ]
 
     private static func parse(
@@ -410,6 +417,8 @@ private struct NativeToolbarItem {
         }
 
         let key = rawItem["key"] as? String
+        let placement = (rawItem["placement"] as? String)
+            .flatMap(ToolbarItemPlacement.init(rawValue:))
         switch type {
         case .separator:
             guard allowSeparator else { return nil }
@@ -425,6 +434,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -448,6 +458,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -472,6 +483,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -494,6 +506,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -518,6 +531,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -542,6 +556,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -565,6 +580,7 @@ private struct NativeToolbarItem {
                 nodeType: nodeType,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -588,6 +604,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: (rawItem["isActive"] as? Bool) ?? false,
                 isDisabled: (rawItem["isDisabled"] as? Bool) ?? false,
+                placement: placement,
                 presentation: nil,
                 items: [],
                 parentGroupKey: nil
@@ -620,6 +637,7 @@ private struct NativeToolbarItem {
                 nodeType: nil,
                 isActive: false,
                 isDisabled: false,
+                placement: placement,
                 presentation: presentation,
                 items: children,
                 parentGroupKey: nil
@@ -678,6 +696,27 @@ private struct NativeToolbarItem {
             nodeType: nodeType,
             isActive: isActive,
             isDisabled: isDisabled,
+            placement: placement,
+            presentation: presentation,
+            items: items,
+            parentGroupKey: parentGroupKey
+        )
+    }
+
+    func with(parentGroupKey: String?, inheritedPlacement: ToolbarItemPlacement?) -> NativeToolbarItem {
+        NativeToolbarItem(
+            type: type,
+            key: key,
+            label: label,
+            icon: icon,
+            mark: mark,
+            headingLevel: headingLevel,
+            listType: listType,
+            command: command,
+            nodeType: nodeType,
+            isActive: isActive,
+            isDisabled: isDisabled,
+            placement: placement ?? inheritedPlacement,
             presentation: presentation,
             items: items,
             parentGroupKey: parentGroupKey
@@ -693,6 +732,12 @@ final class EditorAccessoryToolbarView: UIInputView {
     private static let defaultKeyboardOffset: CGFloat = 0
     private static let chromeTransitionDuration: TimeInterval = 0.18
     private static let nativeDisabledButtonOpacity: CGFloat = 0.46
+
+    private struct VisibleToolbarItemsByPlacement {
+        let start: [NativeToolbarItem]
+        let scroll: [NativeToolbarItem]
+        let end: [NativeToolbarItem]
+    }
 
     private struct ButtonBinding {
         let item: NativeToolbarItem
@@ -711,11 +756,14 @@ final class EditorAccessoryToolbarView: UIInputView {
     private let glassTintView = UIView()
     private let nativeToolbarScrollView = UIScrollView()
     private let nativeToolbarView = UIToolbar()
+    private let bodyStackView = UIStackView()
+    private let startPinnedStackView = UIStackView()
     private let contentStackView = UIStackView()
     private let mentionScrollView = UIScrollView()
     private let mentionStackView = UIStackView()
     private let scrollView = UIScrollView()
     private let stackView = UIStackView()
+    private let endPinnedStackView = UIStackView()
     private var chromeLeadingConstraint: NSLayoutConstraint?
     private var chromeTrailingConstraint: NSLayoutConstraint?
     private var chromeBottomConstraint: NSLayoutConstraint?
@@ -1139,10 +1187,34 @@ final class EditorAccessoryToolbarView: UIInputView {
         nativeToolbarView.setContentCompressionResistancePriority(.required, for: .vertical)
         nativeToolbarScrollView.addSubview(nativeToolbarView)
 
+        bodyStackView.translatesAutoresizingMaskIntoConstraints = false
+        bodyStackView.axis = .horizontal
+        bodyStackView.alignment = .fill
+        bodyStackView.spacing = 0
+        chromeView.addSubview(bodyStackView)
+
+        startPinnedStackView.translatesAutoresizingMaskIntoConstraints = false
+        startPinnedStackView.axis = .horizontal
+        startPinnedStackView.alignment = .center
+        startPinnedStackView.spacing = 6
+        startPinnedStackView.setContentHuggingPriority(.required, for: .horizontal)
+        startPinnedStackView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        bodyStackView.addArrangedSubview(startPinnedStackView)
+
         contentStackView.translatesAutoresizingMaskIntoConstraints = false
         contentStackView.axis = .vertical
         contentStackView.spacing = 0
-        chromeView.addSubview(contentStackView)
+        contentStackView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        contentStackView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bodyStackView.addArrangedSubview(contentStackView)
+
+        endPinnedStackView.translatesAutoresizingMaskIntoConstraints = false
+        endPinnedStackView.axis = .horizontal
+        endPinnedStackView.alignment = .center
+        endPinnedStackView.spacing = 6
+        endPinnedStackView.setContentHuggingPriority(.required, for: .horizontal)
+        endPinnedStackView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        bodyStackView.addArrangedSubview(endPinnedStackView)
 
         mentionScrollView.translatesAutoresizingMaskIntoConstraints = false
         mentionScrollView.showsHorizontalScrollIndicator = false
@@ -1220,10 +1292,10 @@ final class EditorAccessoryToolbarView: UIInputView {
             nativeToolbarMinHeight,
             nativeToolbarWidth,
 
-            contentStackView.topAnchor.constraint(equalTo: chromeView.topAnchor, constant: 6),
-            contentStackView.leadingAnchor.constraint(equalTo: chromeView.leadingAnchor),
-            contentStackView.trailingAnchor.constraint(equalTo: chromeView.trailingAnchor),
-            contentStackView.bottomAnchor.constraint(equalTo: chromeView.safeAreaLayoutGuide.bottomAnchor, constant: -6),
+            bodyStackView.topAnchor.constraint(equalTo: chromeView.topAnchor, constant: 6),
+            bodyStackView.leadingAnchor.constraint(equalTo: chromeView.leadingAnchor),
+            bodyStackView.trailingAnchor.constraint(equalTo: chromeView.trailingAnchor),
+            bodyStackView.bottomAnchor.constraint(equalTo: chromeView.safeAreaLayoutGuide.bottomAnchor, constant: -6),
 
             mentionHeight,
 
@@ -1248,23 +1320,26 @@ final class EditorAccessoryToolbarView: UIInputView {
         barButtonBindings.removeAll()
         separators.removeAll()
         nativeToolbarDidInitializeScrollPosition = false
+        for arrangedSubview in startPinnedStackView.arrangedSubviews {
+            startPinnedStackView.removeArrangedSubview(arrangedSubview)
+            arrangedSubview.removeFromSuperview()
+        }
         for arrangedSubview in stackView.arrangedSubviews {
             stackView.removeArrangedSubview(arrangedSubview)
             arrangedSubview.removeFromSuperview()
         }
-        let visibleItems = visibleToolbarItems()
-        for item in visibleItems {
-            if item.type == .separator {
-                stackView.addArrangedSubview(makeSeparator())
-                continue
-            }
-
-            stackView.addArrangedSubview(makeButton(item: item))
+        for arrangedSubview in endPinnedStackView.arrangedSubviews {
+            endPinnedStackView.removeArrangedSubview(arrangedSubview)
+            arrangedSubview.removeFromSuperview()
         }
+        let visibleItems = visibleToolbarItemsByPlacement()
+        rebuildButtons(items: visibleItems.start, in: startPinnedStackView)
+        rebuildButtons(items: visibleItems.scroll, in: stackView)
+        rebuildButtons(items: visibleItems.end, in: endPinnedStackView)
 
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            nativeToolbarView.setItems(makeNativeToolbarItems(from: visibleItems), animated: false)
+            nativeToolbarView.setItems(makeNativeToolbarItems(from: visibleItems.scroll), animated: false)
         } else {
             nativeToolbarView.setItems([], animated: false)
         }
@@ -1275,6 +1350,17 @@ final class EditorAccessoryToolbarView: UIInputView {
         updateNativeToolbarMetricsIfNeeded()
         apply(theme: theme)
         apply(state: currentState)
+    }
+
+    private func rebuildButtons(items: [NativeToolbarItem], in container: UIStackView) {
+        for item in items {
+            if item.type == .separator {
+                container.addArrangedSubview(makeSeparator())
+                continue
+            }
+
+            container.addArrangedSubview(makeButton(item: item))
+        }
     }
 
     private func compactToolbarItems(_ items: [NativeToolbarItem]) -> [NativeToolbarItem] {
@@ -1293,10 +1379,35 @@ final class EditorAccessoryToolbarView: UIInputView {
                (item.presentation ?? .expand) == .expand,
                expandedGroupKey == item.key
             {
-                visible.append(contentsOf: item.items.map { $0.with(parentGroupKey: item.key) })
+                visible.append(contentsOf: item.items.map {
+                    $0.with(parentGroupKey: item.key, inheritedPlacement: item.placement)
+                })
             }
         }
         return compactToolbarItems(visible)
+    }
+
+    private func visibleToolbarItemsByPlacement() -> VisibleToolbarItemsByPlacement {
+        var start: [NativeToolbarItem] = []
+        var scroll: [NativeToolbarItem] = []
+        var end: [NativeToolbarItem] = []
+
+        for item in visibleToolbarItems() {
+            switch item.placement ?? .scroll {
+            case .start:
+                start.append(item)
+            case .scroll:
+                scroll.append(item)
+            case .end:
+                end.append(item)
+            }
+        }
+
+        return VisibleToolbarItemsByPlacement(
+            start: compactToolbarItems(start),
+            scroll: compactToolbarItems(scroll),
+            end: compactToolbarItems(end)
+        )
     }
 
     private func handleToolbarButtonPress(_ item: NativeToolbarItem) {
